@@ -6,9 +6,7 @@ use crate::mcp::{
 use crate::role_instructions;
 use chrono::Utc;
 use entities::{GetAllSessions, Message, MessageId, Session, SessionId};
-#[allow(unused_imports)]
-use entities::MessageId as _MessageId;
-use hyphae::{Gettable, Watchable};
+use hyphae::{Cell, CellImmutable, Gettable};
 use myko::{
     client::MykoClient,
     core::item::Eventable,
@@ -28,6 +26,11 @@ pub struct ToolHost {
     /// set_role) update this and re-emit a SET event so the server's view
     /// stays in sync.
     pub session: Arc<Mutex<Session>>,
+    /// Long-lived `GetAllSessions` subscription. We hold this so the cell
+    /// is kept warm across tool calls — otherwise creating it inside
+    /// `roster()` would race the server's first response and snapshot an
+    /// empty Vec.
+    pub sessions_cell: Cell<Vec<Arc<Session>>, CellImmutable>,
 }
 
 pub struct CoordHandler {
@@ -94,12 +97,7 @@ impl ToolHandler for CoordHandler {
                 }
 
                 "roster" => {
-                    let sessions_cell =
-                        host.client.watch_query::<GetAllSessions>(GetAllSessions {});
-                    let sessions: Vec<Arc<Session>> = sessions_cell.get();
-                    // Drop the cell so the underlying query subscription goes away.
-                    drop(sessions_cell);
-
+                    let sessions: Vec<Arc<Session>> = host.sessions_cell.get();
                     let me = host.session_id.0.as_ref();
                     let view: Vec<Value> = sessions
                         .iter()
@@ -132,7 +130,7 @@ impl ToolHandler for CoordHandler {
                         .ok_or_else(|| ToolError::invalid_params("send_message: missing `body`"))?
                         .to_string();
 
-                    let target = resolve_recipient(&host.client, &to).ok_or_else(|| {
+                    let target = resolve_recipient(&host.sessions_cell, &to).ok_or_else(|| {
                         ToolError::invalid_params(format!("no live session matches '{to}'"))
                     })?;
 
@@ -183,9 +181,11 @@ struct ResolvedRecipient {
 /// Look up a session by id or nickname. Returns None if no live session
 /// matches; if multiple match the same nickname, returns one
 /// nondeterministically (caller can be more specific by passing the id).
-fn resolve_recipient(client: &MykoClient, target: &str) -> Option<ResolvedRecipient> {
-    let cell = client.watch_query::<GetAllSessions>(GetAllSessions {});
-    let sessions: Vec<Arc<Session>> = cell.get();
+fn resolve_recipient(
+    sessions_cell: &Cell<Vec<Arc<Session>>, CellImmutable>,
+    target: &str,
+) -> Option<ResolvedRecipient> {
+    let sessions: Vec<Arc<Session>> = sessions_cell.get();
 
     if let Some(s) = sessions.iter().find(|s| s.id.0.as_ref() == target) {
         return Some(ResolvedRecipient {

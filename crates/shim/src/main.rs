@@ -13,7 +13,7 @@ mod tools;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use entities::{NotifyChannel, Session, SessionId};
+use entities::{GetAllSessions, NotifyChannel, Session, SessionId};
 use hyphae::Watchable;
 use mcp::{ServerConfig, ToolDef};
 use myko::{
@@ -101,6 +101,12 @@ async fn main() -> Result<()> {
 
     set_session(&client, &session.lock().unwrap())?;
 
+    // Open the long-lived sessions subscription before we start serving MCP.
+    // The cell starts empty and fills in once the server responds; tools
+    // that snapshot it (roster, send_message recipient resolution) need it
+    // hot, not freshly-opened on every call.
+    let sessions_cell = client.watch_query::<GetAllSessions>(GetAllSessions {});
+
     let host = Arc::new(tools::ToolHost {
         client: Arc::clone(&client),
         session_id: session_id.clone(),
@@ -108,6 +114,7 @@ async fn main() -> Result<()> {
         pid,
         cwd: cwd.clone(),
         session: Arc::clone(&session),
+        sessions_cell,
     });
 
     let handler = Arc::new(tools::CoordHandler { host });
