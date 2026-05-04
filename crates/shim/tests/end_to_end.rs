@@ -7,19 +7,34 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn daemon_bin() -> std::path::PathBuf {
-    // CARGO_BIN_EXE_<name> is set by cargo when the test binary is in the same workspace as the bin.
-    // We depend on `daemon` indirectly via dev-deps; resolve via target dir.
-    let exe = std::env::var("CARGO_BIN_EXE_claude-coord-daemon").ok();
-    if let Some(e) = exe {
+    // CARGO_BIN_EXE_<name> is only set for in-package binary tests.
+    // For cross-crate dev-dep tests we resolve the binary path manually
+    // and ensure it's built first.
+    if let Ok(e) = std::env::var("CARGO_BIN_EXE_claude-coord-daemon") {
         return e.into();
     }
-    // Fallback: target/debug/claude-coord-daemon relative to the manifest dir.
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    // Walk up from this crate's manifest dir to find the workspace target/.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let mut p = std::path::PathBuf::from(manifest);
     p.pop();
-    p.pop(); // workspace root
-    p.push("target/debug/claude-coord-daemon");
-    p
+    p.pop(); // crates/shim → workspace root
+    let target_bin = p.join("target/debug/claude-coord-daemon");
+
+    if !target_bin.exists() {
+        // Build the daemon binary. Inherit stderr so build failures are visible.
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--bin", "claude-coord-daemon"])
+            .current_dir(&p)
+            .status()
+            .expect("running cargo build for claude-coord-daemon");
+        assert!(status.success(), "cargo build of claude-coord-daemon failed");
+    }
+    assert!(
+        target_bin.exists(),
+        "daemon binary still not at {target_bin:?} after cargo build"
+    );
+    target_bin
 }
 
 #[tokio::test]
