@@ -28,3 +28,4 @@ which = "6"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+daemon = { path = "../daemon" }
