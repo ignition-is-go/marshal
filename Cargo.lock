@@ -1813,8 +1813,15 @@ dependencies = [
 name = "shim"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "entities",
- "myko-server",
+ "env_logger",
+ "hyphae",
+ "log",
+ "myko",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
