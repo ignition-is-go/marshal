@@ -108,28 +108,6 @@ pub async fn handle(app: Arc<AppState>, sock: UnixStream) -> Result<()> {
         }),
     });
 
-    // Broadcast `agent_joined` to every other live session so they can announce
-    // the newcomer to their users.
-    {
-        let g = app.outbound.lock().unwrap();
-        let event = ServerMsg::Event {
-            kind: "agent_joined".to_string(),
-            payload: serde_json::json!({
-                "session_id": session_id,
-                "nickname": nickname,
-                "pid": pid,
-                "cwd": cwd,
-                "git_branch": git_branch,
-                "connected_at": now,
-            }),
-        };
-        for (sid, tx) in g.iter() {
-            if sid != &session_id {
-                let _ = tx.send(event.clone());
-            }
-        }
-    }
-
     // Spawn writer task that owns the write half of the socket.
     let writer = tokio::spawn(async move {
         let mut write_half = write_half;

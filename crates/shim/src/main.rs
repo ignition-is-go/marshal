@@ -432,12 +432,6 @@ fn render_event(kind: &str, payload: &Value) -> String {
             payload["from_nick"].as_str().unwrap_or("?"),
             payload["body"].as_str().unwrap_or("")
         ),
-        "agent_joined" => format!(
-            "claude-coord: agent '{}' joined (id {}, cwd {})",
-            payload["nickname"].as_str().unwrap_or("?"),
-            payload["session_id"].as_str().unwrap_or("?"),
-            payload["cwd"].as_str().unwrap_or("?"),
-        ),
         other => format!("claude-coord: event '{other}': {payload}"),
     }
 }

@@ -74,7 +74,6 @@ async fn rpc(sock: &mut UnixStream, id: u64, method: &str, params: serde_json::V
 
 /// Drain any Event frames currently buffered on `sock` without blocking forever.
 /// Returns the events that were drained.
-#[allow(dead_code)]
 async fn drain_events(sock: &mut UnixStream) -> Vec<ServerMsg> {
     let mut events = Vec::new();
     loop {
@@ -258,7 +257,6 @@ async fn send_message_pushes_new_message_event_to_recipient() {
     let _ = say_hello(&mut recv, "/x/eww").await;
 
     // The recipient already received `joined` (its own startup event). Drain it.
-    // (recv connected AFTER sender, so it does not receive an agent_joined for sender.)
     let frame = read_frame(&mut recv).await.unwrap();
     let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
     match msg {
@@ -285,7 +283,7 @@ async fn send_message_pushes_new_message_event_to_recipient() {
 }
 
 #[tokio::test]
-async fn hello_pushes_joined_to_self_and_agent_joined_to_others() {
+async fn hello_pushes_joined_to_self_only() {
     let h = Harness::new().await;
     let mut a = h.connect().await;
     let _a_id = say_hello(&mut a, "/x/alice").await;
@@ -302,23 +300,11 @@ async fn hello_pushes_joined_to_self_and_agent_joined_to_others() {
         other => panic!("expected joined, got {other:?}"),
     }
 
-    // A second session connects — alice should receive `agent_joined`,
-    // and bob should receive `joined` listing alice as a peer.
+    // A second session connects — bob should receive `joined` listing alice
+    // as a peer; alice should NOT receive any push event for bob.
     let mut b = h.connect().await;
     let _b_id = say_hello(&mut b, "/x/bob").await;
 
-    // Alice's next event: agent_joined for bob.
-    let frame = read_frame(&mut a).await.unwrap();
-    let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
-    match msg {
-        ServerMsg::Event { kind, payload } => {
-            assert_eq!(kind, "agent_joined");
-            assert_eq!(payload["nickname"], "bob");
-        }
-        other => panic!("expected agent_joined, got {other:?}"),
-    }
-
-    // Bob's first event: joined with alice in peers.
     let frame = read_frame(&mut b).await.unwrap();
     let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
     match msg {
@@ -331,4 +317,40 @@ async fn hello_pushes_joined_to_self_and_agent_joined_to_others() {
         }
         other => panic!("expected joined, got {other:?}"),
     }
+
+    // Alice's socket should be quiet — peers learn about new sessions via
+    // `roster`, not push events.
+    let extra = drain_events(&mut a).await;
+    assert!(extra.is_empty(), "alice unexpectedly received {extra:?}");
+}
+
+#[tokio::test]
+async fn disconnect_does_not_push_event_but_clears_roster() {
+    let h = Harness::new().await;
+    let mut a = h.connect().await;
+    let _a_id = say_hello(&mut a, "/x/alice").await;
+    // Drain alice's `joined` event so subsequent reads start fresh.
+    let _ = read_frame(&mut a).await.unwrap();
+
+    let mut b = h.connect().await;
+    let _b_id = say_hello(&mut b, "/x/bob").await;
+
+    // Bob disconnects. Cleanup should remove him from the roster but the
+    // daemon must not push a leave event to alice.
+    drop(b);
+
+    // Give the daemon a moment to run cleanup.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let extra = drain_events(&mut a).await;
+    assert!(extra.is_empty(), "alice unexpectedly received {extra:?}");
+
+    let resp = rpc(&mut a, 99, method::ROSTER, serde_json::json!({})).await;
+    let result = match resp {
+        ServerMsg::RpcOk { result, .. } => result,
+        other => panic!("expected ok, got {other:?}"),
+    };
+    let r: RosterResult = serde_json::from_value(result).unwrap();
+    assert_eq!(r.sessions.len(), 1);
+    assert_eq!(r.sessions[0].nickname, "alice");
 }

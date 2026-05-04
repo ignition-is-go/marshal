@@ -264,10 +264,6 @@ async fn call<R: serde::de::DeserializeOwned>(
 fn handle_event(state: &State, kind: &str, payload: &serde_json::Value) {
     let summary = match kind {
         "joined" => format!("joined as {}", payload["nickname"].as_str().unwrap_or("?")),
-        "agent_joined" => format!(
-            "agent joined: {}",
-            payload["nickname"].as_str().unwrap_or("?")
-        ),
         "new_message" => format!(
             "msg from {}: {}",
             payload["from_nick"].as_str().unwrap_or("?"),
