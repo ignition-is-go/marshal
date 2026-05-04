@@ -41,6 +41,10 @@ pub struct DaemonClient {
     git_branch: Option<String>,
     events_tx: mpsc::UnboundedSender<EventMsg>,
     events_rx: TokioMutex<Option<mpsc::UnboundedReceiver<EventMsg>>>,
+    /// If set, `ensure_connected` will spawn the daemon when the socket is
+    /// missing, so a daemon that has exited (e.g. after a binary upgrade)
+    /// is automatically respawned by the next tool call.
+    daemon_bin: Option<PathBuf>,
 }
 
 struct ConnInner {
@@ -75,7 +79,17 @@ impl DaemonClient {
             git_branch,
             events_tx,
             events_rx: TokioMutex::new(Some(events_rx)),
+            daemon_bin: None,
         }
+    }
+
+    /// Configure the daemon binary path used for auto-respawn. After this is
+    /// set, `ensure_connected` will invoke `spawn::ensure_running` if the
+    /// socket isn't available — recovering from a daemon that exited (e.g.
+    /// because its binary was replaced on disk).
+    pub fn with_auto_respawn(mut self, daemon_bin: PathBuf) -> Self {
+        self.daemon_bin = Some(daemon_bin);
+        self
     }
 
     /// Take the events receiver. Returns `Some` exactly once per `DaemonClient`
@@ -90,6 +104,16 @@ impl DaemonClient {
         let mut g = self.inner.lock().await;
         if let Some(c) = g.as_ref() {
             return Ok((c.session_id.clone(), c.nickname.clone()));
+        }
+
+        // If auto-respawn is configured and the socket isn't accepting,
+        // (re)launch the daemon. ensure_running is a no-op when the socket
+        // is already up, so this is cheap on the hot path.
+        if let Some(bin) = self.daemon_bin.as_ref() {
+            if let Err(e) = crate::spawn::ensure_running(&self.socket_path, bin).await {
+                tracing::warn!(error = ?e, "daemon respawn failed");
+                return Err(CallError::Disconnected);
+            }
         }
 
         let sock = UnixStream::connect(&self.socket_path)

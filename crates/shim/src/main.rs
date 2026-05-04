@@ -30,7 +30,10 @@ async fn main() -> Result<()> {
     let pid = std::process::id();
     let git_branch = detect_git_branch(&cwd);
 
-    let client = Arc::new(DaemonClient::new(socket, pid, cwd.clone(), git_branch));
+    let client = Arc::new(
+        DaemonClient::new(socket, pid, cwd.clone(), git_branch)
+            .with_auto_respawn(daemon_bin.clone()),
+    );
     let events_rx = client.take_events_rx().await;
 
     // Connect now so we can include current peers in the MCP `instructions`.
