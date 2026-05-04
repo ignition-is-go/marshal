@@ -16,6 +16,17 @@ use myko_server::mcp::McpServer;
 fn main() -> std::io::Result<()> {
     entities::link();
 
+    // The myko mcp server reads MYKO_ADDRESS for its target. We want
+    // claude-coord's default (port 6155) to win when the user hasn't
+    // explicitly opted into something else, without forcing every
+    // launcher to set the env var. SAFETY: set_var is sound here because
+    // we're single-threaded — main hasn't spawned anything yet.
+    if std::env::var_os("MYKO_ADDRESS").is_none() {
+        unsafe {
+            std::env::set_var("MYKO_ADDRESS", "ws://localhost:6155");
+        }
+    }
+
     let server = McpServer::with_info("claude-coord-shim", env!("CARGO_PKG_VERSION"));
 
     let summary = server.summary();

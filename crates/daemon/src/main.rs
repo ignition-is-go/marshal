@@ -10,7 +10,9 @@ use anyhow::Result;
 use myko_server::{BlackholePersister, CellServer};
 use std::{net::SocketAddr, sync::Arc};
 
-const DEFAULT_BIND: &str = "127.0.0.1:5155";
+/// Default bind address. Port 6155 is deliberately distinct from myko's
+/// default 5155 — claude-coord may run on the same host as a myko server.
+const DEFAULT_BIND: &str = "127.0.0.1:6155";
 
 #[tokio::main]
 async fn main() -> Result<()> {
