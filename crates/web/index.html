@@ -116,6 +116,27 @@
             color: var(--accent);
         }
 
+        select.role-select {
+            background: var(--bg-0);
+            color: var(--accent);
+            border: 1px solid var(--border-default);
+            padding: 2px 6px;
+            border-radius: var(--radius-sm);
+            font-family: inherit;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            min-width: 140px;
+            transition: border-color 0.12s ease;
+        }
+        select.role-select:hover {
+            border-color: var(--accent);
+        }
+        select.role-select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
         .messages {
             list-style: none;
             display: flex;
