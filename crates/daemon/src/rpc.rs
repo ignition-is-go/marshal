@@ -52,6 +52,56 @@ pub async fn dispatch(
             },
             Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
         },
+        method::INBOX => match serde_json::from_value::<proto::rpc::InboxParams>(params) {
+            Ok(p) => {
+                let store = app.store.lock().await;
+                match store.unread_for(session_id) {
+                    Ok(rows) => {
+                        let messages: Vec<proto::messages::Message> = rows.iter().map(|r| {
+                            proto::messages::Message {
+                                id: r.id, from_session: r.from_session.clone(),
+                                from_nick: r.from_nick.clone(), body: r.body.clone(),
+                                sent_at: r.sent_at,
+                            }
+                        }).collect();
+                        if p.mark_read {
+                            let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+                            let _ = store.mark_read(&ids, crate::conn::now_ms());
+                        }
+                        ok(id, proto::rpc::InboxResult { messages })
+                    }
+                    Err(e) => err(id, ErrorCode::Internal, e.to_string()),
+                }
+            }
+            Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
+        },
+        method::RECENT_MESSAGES => match serde_json::from_value::<proto::rpc::RecentMessagesParams>(params) {
+            Ok(p) => {
+                let store = app.store.lock().await;
+                match store.recent_for(session_id, p.limit) {
+                    Ok(rows) => {
+                        let messages = rows.into_iter().map(|r| {
+                            let direction = if r.from_session == session_id {
+                                proto::rpc::Direction::Sent
+                            } else {
+                                proto::rpc::Direction::Received
+                            };
+                            proto::rpc::RecentMessage {
+                                message: proto::messages::Message {
+                                    id: r.id, from_session: r.from_session,
+                                    from_nick: r.from_nick, body: r.body, sent_at: r.sent_at,
+                                },
+                                direction,
+                                to_nick: r.to_nick,
+                            }
+                        }).collect();
+                        ok(id, proto::rpc::RecentMessagesResult { messages })
+                    }
+                    Err(e) => err(id, ErrorCode::Internal, e.to_string()),
+                }
+            }
+            Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
+        },
         other => err(id, ErrorCode::BadRequest, format!("unknown method '{other}'")),
     }
 }

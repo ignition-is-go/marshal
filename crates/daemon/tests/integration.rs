@@ -4,6 +4,7 @@ use daemon::state::Roster;
 use proto::framing::{read_frame, write_frame};
 use proto::messages::{ClientMsg, ServerMsg};
 use proto::rpc::{method, OkResult, RosterResult, SendMessageParams, SendMessageResult, SetStatusParams};
+use proto::rpc::{InboxParams, InboxResult, RecentMessagesParams, RecentMessagesResult};
 use std::sync::Arc;
 use std::path::PathBuf;
 use tokio::net::UnixStream;
@@ -147,4 +148,58 @@ async fn send_message_ambiguous_recipient_errors() {
             assert_eq!(code, proto::messages::ErrorCode::AmbiguousRecipient),
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn inbox_returns_unread_then_marks_read() {
+    let h = Harness::new().await;
+    let mut sender = h.connect().await;
+    let mut recv = h.connect().await;
+    let _ = say_hello(&mut sender, "/x/sender").await;
+    let _ = say_hello(&mut recv, "/x/eww").await;
+
+    let p = SendMessageParams { to: "eww".into(), body: "yo".into() };
+    let _ = rpc(&mut sender, 1, method::SEND_MESSAGE, serde_json::to_value(&p).unwrap()).await;
+
+    let inbox: InboxResult = match rpc(&mut recv, 1, method::INBOX,
+        serde_json::to_value(InboxParams { mark_read: true }).unwrap()).await {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].body, "yo");
+    assert_eq!(inbox.messages[0].from_nick, "sender");
+
+    // Second call returns nothing.
+    let inbox2: InboxResult = match rpc(&mut recv, 2, method::INBOX,
+        serde_json::to_value(InboxParams { mark_read: true }).unwrap()).await {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("{other:?}"),
+    };
+    assert!(inbox2.messages.is_empty());
+}
+
+#[tokio::test]
+async fn recent_messages_includes_sent_and_received() {
+    let h = Harness::new().await;
+    let mut sender = h.connect().await;
+    let mut recv = h.connect().await;
+    let _ = say_hello(&mut sender, "/x/sender").await;
+    let _ = say_hello(&mut recv, "/x/eww").await;
+
+    rpc(&mut sender, 1, method::SEND_MESSAGE, serde_json::to_value(
+        SendMessageParams { to: "eww".into(), body: "hi".into() }).unwrap()).await;
+    rpc(&mut recv, 1, method::SEND_MESSAGE, serde_json::to_value(
+        SendMessageParams { to: "sender".into(), body: "back".into() }).unwrap()).await;
+
+    let rec: RecentMessagesResult = match rpc(&mut sender, 2, method::RECENT_MESSAGES,
+        serde_json::to_value(RecentMessagesParams { limit: 50 }).unwrap()).await {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(rec.messages.len(), 2);
+    let dirs: Vec<_> = rec.messages.iter().map(|m| m.direction).collect();
+    use proto::rpc::Direction;
+    assert!(dirs.contains(&Direction::Sent));
+    assert!(dirs.contains(&Direction::Received));
 }
