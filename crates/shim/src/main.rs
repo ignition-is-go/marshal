@@ -8,7 +8,6 @@
 //! 4. serves stdio MCP with a curated tool surface backed by the MykoClient.
 
 mod mcp;
-mod role_instructions;
 mod tools;
 
 use anyhow::{Context, Result};

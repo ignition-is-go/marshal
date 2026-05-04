@@ -3,9 +3,8 @@
 use crate::mcp::{
     INVALID_PARAMS, METHOD_NOT_FOUND, Notifier, ToolError, ToolFuture, ToolHandler, ToolOutcome,
 };
-use crate::role_instructions;
 use chrono::Utc;
-use entities::{GetAllSessions, Message, MessageId, Session, SessionId};
+use entities::{GetAllSessions, Message, MessageId, Session, SessionId, role_instructions};
 use hyphae::{Cell, CellImmutable, Gettable};
 use myko::{
     client::MykoClient,

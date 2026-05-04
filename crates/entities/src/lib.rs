@@ -11,6 +11,7 @@
 
 mod message;
 mod notify;
+pub mod role_instructions;
 mod session;
 
 pub use message::*;
