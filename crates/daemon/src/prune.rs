@@ -36,10 +36,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_once_drops_only_old() {
-        let app = Arc::new(AppState {
-            roster: Roster::new(),
-            store: tokio::sync::Mutex::new(Store::open_in_memory().unwrap()),
-        });
+        let app = Arc::new(AppState::new(Roster::new(), Store::open_in_memory().unwrap()));
         let now = crate::conn::now_ms();
         let store = app.store.lock().await;
         store.insert_message("a", "a", "b", "b", "old", now - RETENTION_MS - 1).unwrap();

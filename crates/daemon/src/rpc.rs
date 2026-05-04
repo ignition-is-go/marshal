@@ -34,7 +34,23 @@ pub async fn dispatch(
                     let now = crate::conn::now_ms();
                     let store = app.store.lock().await;
                     match store.insert_message(session_id, &from_nick, &to_session, &to_nick, &p.body, now) {
-                        Ok(message_id) => ok(id, proto::rpc::SendMessageResult { message_id }),
+                        Ok(message_id) => {
+                            // Push a new_message event to the recipient if they're connected.
+                            let event = ServerMsg::Event {
+                                kind: "new_message".to_string(),
+                                payload: serde_json::json!({
+                                    "message_id": message_id,
+                                    "from_session": session_id,
+                                    "from_nick": from_nick,
+                                    "to_session": to_session,
+                                    "to_nick": to_nick,
+                                    "body": p.body,
+                                    "sent_at": now,
+                                }),
+                            };
+                            app.push_event(&to_session, event);
+                            ok(id, proto::rpc::SendMessageResult { message_id })
+                        }
                         Err(e) => err(id, ErrorCode::Internal, e.to_string()),
                     }
                 }

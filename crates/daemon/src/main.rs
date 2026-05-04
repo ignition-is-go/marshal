@@ -41,10 +41,7 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(paths::state_dir())?;
     let store = Store::open(paths::db_path())?;
-    let app = Arc::new(AppState {
-        roster: Roster::new(),
-        store: tokio::sync::Mutex::new(store),
-    });
+    let app = Arc::new(AppState::new(Roster::new(), store));
 
     let _prune = daemon::prune::spawn(Arc::clone(&app));
 

@@ -14,10 +14,7 @@ struct Harness {
 }
 impl Harness {
     async fn new() -> Self {
-        let app = Arc::new(AppState {
-            roster: Roster::new(),
-            store: tokio::sync::Mutex::new(Store::open_in_memory().unwrap()),
-        });
+        let app = Arc::new(AppState::new(Roster::new(), Store::open_in_memory().unwrap()));
         Self { app }
     }
     async fn connect(&self) -> UnixStream {
@@ -64,8 +61,35 @@ async fn rpc(sock: &mut UnixStream, id: u64, method: &str, params: serde_json::V
 {
     let req = ClientMsg::Rpc { id, method: method.into(), params };
     write_frame(sock, serde_json::to_vec(&req).unwrap().as_slice()).await.unwrap();
-    let frame = read_frame(sock).await.unwrap();
-    serde_json::from_slice(&frame).unwrap()
+    // Skip any push events that may have arrived before our RPC reply.
+    loop {
+        let frame = read_frame(sock).await.unwrap();
+        let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
+        match &msg {
+            ServerMsg::Event { .. } => continue,
+            _ => return msg,
+        }
+    }
+}
+
+/// Drain any Event frames currently buffered on `sock` without blocking forever.
+/// Returns the events that were drained.
+#[allow(dead_code)]
+async fn drain_events(sock: &mut UnixStream) -> Vec<ServerMsg> {
+    let mut events = Vec::new();
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_millis(20), read_frame(sock)).await {
+            Ok(Ok(frame)) => {
+                let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
+                if let ServerMsg::Event { .. } = msg {
+                    events.push(msg);
+                } else {
+                    panic!("expected Event during drain, got {msg:?}");
+                }
+            }
+            _ => return events,
+        }
+    }
 }
 
 #[tokio::test]
@@ -223,4 +247,88 @@ async fn recent_messages_includes_sent_and_received() {
     use proto::rpc::Direction;
     assert!(dirs.contains(&Direction::Sent));
     assert!(dirs.contains(&Direction::Received));
+}
+
+#[tokio::test]
+async fn send_message_pushes_new_message_event_to_recipient() {
+    let h = Harness::new().await;
+    let mut sender = h.connect().await;
+    let mut recv = h.connect().await;
+    let _ = say_hello(&mut sender, "/x/sender").await;
+    let _ = say_hello(&mut recv, "/x/eww").await;
+
+    // The recipient already received `joined` (its own startup event). Drain it.
+    // (recv connected AFTER sender, so it does not receive an agent_joined for sender.)
+    let frame = read_frame(&mut recv).await.unwrap();
+    let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
+    match msg {
+        ServerMsg::Event { kind, .. } if kind == "joined" => {}
+        other => panic!("expected joined event, got {other:?}"),
+    }
+
+    let p = SendMessageParams { to: "eww".into(), body: "wake up".into() };
+    let _ = rpc(&mut sender, 1, method::SEND_MESSAGE, serde_json::to_value(&p).unwrap()).await;
+
+    // Recipient should see a new_message Event arrive on its socket.
+    let frame = read_frame(&mut recv).await.unwrap();
+    let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
+    match msg {
+        ServerMsg::Event { kind, payload } => {
+            assert_eq!(kind, "new_message");
+            assert_eq!(payload["body"], "wake up");
+            assert_eq!(payload["from_nick"], "sender");
+            assert_eq!(payload["to_nick"], "eww");
+            assert!(payload["message_id"].as_i64().unwrap() > 0);
+        }
+        other => panic!("expected Event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn hello_pushes_joined_to_self_and_agent_joined_to_others() {
+    let h = Harness::new().await;
+    let mut a = h.connect().await;
+    let _a_id = say_hello(&mut a, "/x/alice").await;
+
+    // Alice should immediately see her own `joined` event with empty peers.
+    let frame = read_frame(&mut a).await.unwrap();
+    let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
+    match msg {
+        ServerMsg::Event { kind, payload } => {
+            assert_eq!(kind, "joined");
+            assert_eq!(payload["nickname"], "alice");
+            assert!(payload["peers"].as_array().unwrap().is_empty());
+        }
+        other => panic!("expected joined, got {other:?}"),
+    }
+
+    // A second session connects — alice should receive `agent_joined`,
+    // and bob should receive `joined` listing alice as a peer.
+    let mut b = h.connect().await;
+    let _b_id = say_hello(&mut b, "/x/bob").await;
+
+    // Alice's next event: agent_joined for bob.
+    let frame = read_frame(&mut a).await.unwrap();
+    let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
+    match msg {
+        ServerMsg::Event { kind, payload } => {
+            assert_eq!(kind, "agent_joined");
+            assert_eq!(payload["nickname"], "bob");
+        }
+        other => panic!("expected agent_joined, got {other:?}"),
+    }
+
+    // Bob's first event: joined with alice in peers.
+    let frame = read_frame(&mut b).await.unwrap();
+    let msg: ServerMsg = serde_json::from_slice(&frame).unwrap();
+    match msg {
+        ServerMsg::Event { kind, payload } => {
+            assert_eq!(kind, "joined");
+            assert_eq!(payload["nickname"], "bob");
+            let peers = payload["peers"].as_array().unwrap();
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peers[0]["nickname"], "alice");
+        }
+        other => panic!("expected joined, got {other:?}"),
+    }
 }
