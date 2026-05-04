@@ -28,12 +28,9 @@ hyphae = "^1.0.0"
 entities = { path = "crates/entities" }
 
 [patch.crates-io]
-myko = { path = "../myko/libs/myko/core" }
-myko-macros = { path = "../myko/libs/myko/macros" }
-myko-server = { path = "../myko/libs/myko/server" }
-myko-leptos = { path = "../myko/libs/myko/leptos" }
-autosocket = { path = "../myko/libs/autosocket" }
-hyphae = { path = "../hyphae/hyphae" }
-
-# myko-leptos and other workspace deps need to be declared at workspace level
-# to be inheritable; add them above.
+myko = { git = "https://github.com/ignition-is-go/myko" }
+myko-macros = { git = "https://github.com/ignition-is-go/myko" }
+myko-server = { git = "https://github.com/ignition-is-go/myko" }
+myko-leptos = { git = "https://github.com/ignition-is-go/myko" }
+autosocket = { git = "https://github.com/ignition-is-go/myko" }
+hyphae = { git = "https://github.com/ignition-is-go/hyphae" }
