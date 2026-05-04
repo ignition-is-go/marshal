@@ -9,11 +9,14 @@ name = "claude-coord-tui"
 path = "src/main.rs"
 
 [dependencies]
-proto = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+myko = { workspace = true }
+hyphae = { workspace = true }
+entities = { workspace = true }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }

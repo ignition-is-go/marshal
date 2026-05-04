@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/entities", "crates/daemon", "crates/shim"]
-exclude = ["crates/tui"]
+members = ["crates/entities", "crates/daemon", "crates/shim", "crates/tui"]
 
 [workspace.package]
 version = "0.1.0"
