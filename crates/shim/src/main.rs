@@ -149,6 +149,37 @@ impl CoordServer {
             }),
             &["text"],
         );
+        let send_message = schema_object(
+            json!({
+                "to": {
+                    "type": "string",
+                    "description": "Recipient session id or nickname."
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Message body (free-form text)."
+                }
+            }),
+            &["to", "body"],
+        );
+        let inbox = schema_object(
+            json!({
+                "mark_read": {
+                    "type": "boolean",
+                    "description": "If true (default), mark returned messages as read."
+                }
+            }),
+            &[],
+        );
+        let recent_messages = schema_object(
+            json!({
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of messages to return (default 50)."
+                }
+            }),
+            &[],
+        );
 
         vec![
             Tool::new(
@@ -165,6 +196,21 @@ impl CoordServer {
                 "roster",
                 "List all live coord sessions with their last-known status.",
                 empty,
+            ),
+            Tool::new(
+                "send_message",
+                "Send a message to another session by id or nickname.",
+                send_message,
+            ),
+            Tool::new(
+                "inbox",
+                "Fetch unread messages addressed to this session.",
+                inbox,
+            ),
+            Tool::new(
+                "recent_messages",
+                "Fetch the most recent messages addressed to this session.",
+                recent_messages,
             ),
         ]
     }
@@ -183,7 +229,9 @@ impl ServerHandler for CoordServer {
                 version: env!("CARGO_PKG_VERSION").into(),
             },
             instructions: Some(
-                "Coordinate with sibling Claude sessions: whoami, set_status, roster.".into(),
+                "Coordinate with sibling Claude sessions: whoami, set_status, roster, \
+                 send_message, inbox, recent_messages."
+                    .into(),
             ),
         }
     }
@@ -220,6 +268,53 @@ impl ServerHandler for CoordServer {
             }
             "roster" => {
                 let res = self.host.roster().await.map_err(mcp_err_from_call)?;
+                json_result(&res)
+            }
+            "send_message" => {
+                let to = args
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        McpError::invalid_params("send_message: missing string `to`", None)
+                    })?
+                    .to_string();
+                let body = args
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        McpError::invalid_params("send_message: missing string `body`", None)
+                    })?
+                    .to_string();
+                let res = self
+                    .host
+                    .send_message(to, body)
+                    .await
+                    .map_err(mcp_err_from_call)?;
+                json_result(&res)
+            }
+            "inbox" => {
+                let mark_read = args
+                    .get("mark_read")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let res = self
+                    .host
+                    .inbox(mark_read)
+                    .await
+                    .map_err(mcp_err_from_call)?;
+                json_result(&res)
+            }
+            "recent_messages" => {
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.min(u32::MAX as u64) as u32)
+                    .unwrap_or(50);
+                let res = self
+                    .host
+                    .recent_messages(limit)
+                    .await
+                    .map_err(mcp_err_from_call)?;
                 json_result(&res)
             }
             other => Err(McpError::new(

@@ -150,4 +150,43 @@ mod tests {
         let r = host.roster().await.unwrap();
         assert!(r.sessions.is_empty());
     }
+
+    #[tokio::test]
+    async fn send_message_calls_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let _h = fake_daemon_with(path.clone(), |m| {
+            if m == method::SEND_MESSAGE {
+                serde_json::json!({"message_id": 7})
+            } else {
+                serde_json::json!({})
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let client = Arc::new(DaemonClient::new(path, 1, "/x".into(), None));
+        let host = ToolHost {
+            client,
+            pid: 1,
+            cwd: "/x".into(),
+        };
+        let r = host.send_message("eww".into(), "hi".into()).await.unwrap();
+        assert_eq!(r.message_id, 7);
+    }
+
+    #[tokio::test]
+    async fn inbox_calls_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let _h = fake_daemon_with(path.clone(), |_m| serde_json::json!({"messages": []})).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let client = Arc::new(DaemonClient::new(path, 1, "/x".into(), None));
+        let host = ToolHost {
+            client,
+            pid: 1,
+            cwd: "/x".into(),
+        };
+        let r = host.inbox(true).await.unwrap();
+        assert!(r.messages.is_empty());
+    }
 }
