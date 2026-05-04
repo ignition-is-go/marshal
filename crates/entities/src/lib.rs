@@ -9,10 +9,12 @@
 //! framework traits at the parent scope; multiple items in the same module
 //! would collide.
 
-mod session;
 mod message;
+mod notify;
+mod session;
 
 pub use message::*;
+pub use notify::*;
 pub use session::*;
 
 /// Force-link this crate so the `inventory`-based item registration in the

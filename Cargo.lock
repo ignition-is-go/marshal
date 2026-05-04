@@ -534,6 +534,7 @@ dependencies = [
  "myko",
  "myko-macros",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
