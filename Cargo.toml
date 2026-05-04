@@ -1,24 +1,42 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/daemon", "crates/shim", "crates/tui"]
+members = ["crates/entities"]
+exclude = ["crates/daemon", "crates/shim", "crates/tui"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.75"
+rust-version = "1.85"
 
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
+# Core
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-directories = "5"
-rusqlite = { version = "0.32", features = ["bundled"] }
-nix = { version = "0.29", features = ["process", "signal"] }
-tempfile = "3"
-proto = { path = "crates/proto" }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Myko stack (path-patched below for hot-reload against the local checkout).
+myko = "^4.10.0"
+myko-macros = "^4.10.0"
+myko-server = "^4.10.0"
+hyphae = "^1.0.0"
+
+# Local crates
+entities = { path = "crates/entities" }
+
+[patch.crates-io]
+myko = { path = "../myko/libs/myko/core" }
+myko-macros = { path = "../myko/libs/myko/macros" }
+myko-server = { path = "../myko/libs/myko/server" }
+myko-leptos = { path = "../myko/libs/myko/leptos" }
+autosocket = { path = "../myko/libs/autosocket" }
+hyphae = { path = "../hyphae/hyphae" }
