@@ -30,12 +30,7 @@ pub async fn dispatch(
         method::SEND_MESSAGE => match serde_json::from_value::<proto::rpc::SendMessageParams>(params) {
             Ok(p) => match app.roster.resolve(&p.to) {
                 Ok((to_session, to_nick)) => {
-                    let from_nick = app.roster
-                        .snapshot(session_id)
-                        .into_iter()
-                        .find(|s| s.session_id == session_id)
-                        .map(|s| s.nickname)
-                        .unwrap_or_else(|| "?".into());
+                    let from_nick = app.roster.nickname_of(session_id).unwrap_or_else(|| "?".into());
                     let now = crate::conn::now_ms();
                     let store = app.store.lock().await;
                     match store.insert_message(session_id, &from_nick, &to_session, &to_nick, &p.body, now) {
