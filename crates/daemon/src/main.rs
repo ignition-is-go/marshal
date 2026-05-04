@@ -22,9 +22,10 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
         .parse()?;
 
-    // Force-link the entities crate so its `inventory`-registered items get
-    // pulled in even though main.rs doesn't reference them directly.
+    // Force-link entities + sagas so their `inventory` registrations aren't
+    // dead-code-eliminated.
     entities::link();
+    daemon::link();
 
     let server = CellServer::builder()
         .with_bind_addr(bind_addr)

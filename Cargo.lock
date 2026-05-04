@@ -526,9 +526,11 @@ dependencies = [
  "anyhow",
  "entities",
  "env_logger",
+ "hyphae",
  "log",
  "myko",
  "myko-server",
+ "serde_json",
  "tokio",
 ]
 
@@ -2043,6 +2045,7 @@ name = "shim"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "entities",
  "env_logger",
  "hyphae",
@@ -2051,6 +2054,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
