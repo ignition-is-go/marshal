@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "shim"
+path = "src/lib.rs"
+
 [[bin]]
 name = "claude-coord-shim"
 path = "src/main.rs"
