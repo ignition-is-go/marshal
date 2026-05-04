@@ -4,16 +4,17 @@ use anyhow::{Context, Result};
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParam, CallToolResult, Content, ErrorCode, Implementation, JsonObject,
-    ListToolsResult, PaginatedRequestParam, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
-    ToolsCapability,
+    ListToolsResult, LoggingLevel, LoggingMessageNotificationParam, PaginatedRequestParam,
+    ProtocolVersion, ServerCapabilities, ServerInfo, Tool, ToolsCapability,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleServer};
 use rmcp::{Error as McpError, ServiceExt};
 use serde_json::{json, Value};
-use shim::daemon_client::{CallError, DaemonClient};
+use shim::daemon_client::{CallError, DaemonClient, EventMsg};
 use shim::spawn;
 use shim::tools::ToolHost;
 use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,13 +35,33 @@ async fn main() -> Result<()> {
     let git_branch = detect_git_branch(&cwd);
 
     let client = Arc::new(DaemonClient::new(socket, pid, cwd.clone(), git_branch));
+    // Take the events receiver before anyone else can — it's single-consumer.
+    let events_rx = client.take_events_rx().await;
+
+    // Connect now so we can include current peers in the MCP `instructions`.
+    let (session_id, nickname) = match client.ensure_connected().await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(error = ?e, "could not pre-fetch roster from daemon");
+            (String::new(), String::new())
+        }
+    };
+    let initial_instructions = build_instructions(&client, &session_id, &nickname).await;
+
     let host = Arc::new(ToolHost {
         client,
         pid,
         cwd,
     });
 
-    serve_rmcp(host).await
+    let server = CoordServer {
+        host,
+        instructions: initial_instructions,
+        events_rx: Arc::new(TokioMutex::new(events_rx)),
+        session_id,
+        nickname,
+    };
+    serve_rmcp(server).await
 }
 
 fn init_tracing() {
@@ -81,9 +102,56 @@ fn detect_git_branch(cwd: &std::path::Path) -> Option<String> {
     }
 }
 
-async fn serve_rmcp(host: Arc<ToolHost>) -> Result<()> {
-    let handler = CoordServer { host };
-    let running = handler
+/// Compute initial instructions text shown to the model on session init.
+/// Includes this session's id/nickname plus a snapshot of live peers.
+async fn build_instructions(
+    client: &DaemonClient,
+    session_id: &str,
+    nickname: &str,
+) -> String {
+    let base = "Coordinate with sibling Claude sessions running on this machine. \
+                Tools: whoami, set_status, roster, send_message, inbox, recent_messages.";
+
+    if session_id.is_empty() {
+        return format!("{base}\n\n(Failed to reach the claude-coord daemon — tools may error.)");
+    }
+
+    let header = format!(
+        "{base}\n\nYou are session '{nickname}' (id {session_id}). When asked who else is around, \
+         use `roster` to see live peers; messages from peers arrive in `inbox`."
+    );
+
+    match client.call::<proto::rpc::RosterResult>("roster", json!({})).await {
+        Ok(r) => {
+            let peers: Vec<&proto::messages::SessionInfo> = r
+                .sessions
+                .iter()
+                .filter(|s| !s.is_self)
+                .collect();
+            if peers.is_empty() {
+                format!("{header}\n\nNo other sessions are connected right now.")
+            } else {
+                let mut s = format!("{header}\n\nLive peers ({} other sessions):", peers.len());
+                for p in peers {
+                    s.push_str(&format!(
+                        "\n  - {} (id {}) cwd={}",
+                        p.nickname,
+                        p.session_id,
+                        p.cwd.display()
+                    ));
+                    if let Some(t) = &p.current_task {
+                        s.push_str(&format!(" — {t}"));
+                    }
+                }
+                s
+            }
+        }
+        Err(e) => format!("{header}\n\n(Could not fetch roster: {e})"),
+    }
+}
+
+async fn serve_rmcp(server: CoordServer) -> Result<()> {
+    let running = server
         .serve(rmcp::transport::stdio())
         .await
         .context("starting rmcp stdio server")?;
@@ -135,6 +203,10 @@ fn schema_object(properties: Value, required: &[&str]) -> Arc<JsonObject> {
 #[derive(Clone)]
 struct CoordServer {
     host: Arc<ToolHost>,
+    instructions: String,
+    events_rx: Arc<TokioMutex<Option<tokio::sync::mpsc::UnboundedReceiver<EventMsg>>>>,
+    session_id: String,
+    nickname: String,
 }
 
 impl CoordServer {
@@ -222,17 +294,14 @@ impl ServerHandler for CoordServer {
             protocol_version: ProtocolVersion::default(),
             capabilities: ServerCapabilities {
                 tools: Some(ToolsCapability::default()),
+                logging: Some(Default::default()),
                 ..Default::default()
             },
             server_info: Implementation {
                 name: "claude-coord-shim".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
-            instructions: Some(
-                "Coordinate with sibling Claude sessions: whoami, set_status, roster, \
-                 send_message, inbox, recent_messages."
-                    .into(),
-            ),
+            instructions: Some(self.instructions.clone()),
         }
     }
 
@@ -325,7 +394,88 @@ impl ServerHandler for CoordServer {
         }
     }
 
-    async fn on_initialized(&self, _ctx: NotificationContext<RoleServer>) {
+    async fn on_initialized(&self, ctx: NotificationContext<RoleServer>) {
         tracing::info!("mcp client initialized");
+
+        // Spawn a task that forwards daemon events to the MCP client as
+        // logging notifications. rmcp 0.2.1 has no support for the
+        // `notifications/claude/channel` extension, so we use the standard
+        // `notifications/message` path; clients that surface logging will at
+        // least show events to the user. (Polling `inbox` via /loop remains
+        // the reliable wake-up mechanism for fully idle agents.)
+        let events_rx = match self.events_rx.lock().await.take() {
+            Some(rx) => rx,
+            None => {
+                tracing::debug!("events_rx already taken; skipping forwarder");
+                return;
+            }
+        };
+        let peer = ctx.peer.clone();
+
+        tokio::spawn(async move {
+            let mut events_rx = events_rx;
+            while let Some(event) = events_rx.recv().await {
+                let level = match event.kind.as_str() {
+                    "new_message" => LoggingLevel::Notice,
+                    _ => LoggingLevel::Info,
+                };
+                let data = json!({
+                    "kind": event.kind,
+                    "payload": event.payload,
+                });
+                let param = LoggingMessageNotificationParam {
+                    level,
+                    logger: Some("claude-coord".into()),
+                    data,
+                };
+                if let Err(e) = peer.notify_logging_message(param).await {
+                    tracing::warn!(error = ?e, "logging notification failed");
+                    break;
+                }
+            }
+            tracing::debug!("event forwarder exiting");
+        });
+
+        // Send an initial "session_started" notification with the roster so the
+        // user sees a confirmation of registration even before the model
+        // consults the `instructions`.
+        let peer = ctx.peer.clone();
+        let session_id = self.session_id.clone();
+        let nickname = self.nickname.clone();
+        let host = Arc::clone(&self.host);
+        tokio::spawn(async move {
+            let roster = match host.roster().await {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            let peers: Vec<_> = roster
+                .sessions
+                .into_iter()
+                .filter(|s| !s.is_self)
+                .map(|s| {
+                    json!({
+                        "session_id": s.session_id,
+                        "nickname": s.nickname,
+                        "cwd": s.cwd,
+                        "current_task": s.current_task,
+                    })
+                })
+                .collect();
+            let param = LoggingMessageNotificationParam {
+                level: LoggingLevel::Notice,
+                logger: Some("claude-coord".into()),
+                data: json!({
+                    "kind": "session_started",
+                    "payload": {
+                        "session_id": session_id,
+                        "nickname": nickname,
+                        "peers": peers,
+                    },
+                }),
+            };
+            if let Err(e) = peer.notify_logging_message(param).await {
+                tracing::warn!(error = ?e, "session_started notification failed");
+            }
+        });
     }
 }

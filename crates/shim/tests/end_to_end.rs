@@ -6,6 +6,16 @@ use shim::daemon_client::DaemonClient;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// RAII guard that kills + reaps a child process on Drop.
+/// Ensures the daemon doesn't outlive the test even if an `assert!` panics.
+struct ChildGuard(std::process::Child);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn daemon_bin() -> std::path::PathBuf {
     // CARGO_BIN_EXE_<name> is only set for in-package binary tests.
     // For cross-crate dev-dep tests we resolve the binary path manually
@@ -43,7 +53,7 @@ async fn two_clients_can_message_each_other() {
     let runtime = tempfile::tempdir().unwrap();
     let socket = runtime.path().join("claude-coord/sock");
 
-    let mut child = std::process::Command::new(daemon_bin())
+    let child = std::process::Command::new(daemon_bin())
         .arg("--foreground")
         .env("XDG_STATE_HOME", state.path())
         .env("XDG_RUNTIME_DIR", runtime.path())
@@ -52,6 +62,7 @@ async fn two_clients_can_message_each_other() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .expect("spawning daemon");
+    let _guard = ChildGuard(child);
 
     // Wait for socket.
     let mut tries = 0;
@@ -112,6 +123,5 @@ async fn two_clients_can_message_each_other() {
     assert_eq!(inbox.messages[0].body, "ping");
     assert_eq!(inbox.messages[0].from_nick, "alice");
 
-    let _ = child.kill();
-    let _ = child.wait();
+    // Drop of `_guard` kills + reaps the daemon.
 }

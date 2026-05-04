@@ -1,26 +1,56 @@
-//! Minimal RPC client over the daemon's unix socket.
+//! RPC client over the daemon's unix socket with async event multiplexing.
+//!
+//! A long-lived reader task demuxes incoming frames:
+//! - `ServerMsg::RpcOk`/`RpcErr` are routed to the `pending` map by request id.
+//! - `ServerMsg::Event` is forwarded to the events channel.
+//!
+//! `call()` is request/response over a oneshot. The reader task fires the oneshot
+//! when the matching reply arrives. On disconnect the reader drains all pending
+//! oneshots with a `Disconnected` reply.
 
 use anyhow::{anyhow, Result};
 use proto::framing::{read_frame, write_frame};
 use proto::messages::{ClientMsg, ErrorCode, ServerMsg};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
+
+/// Push event delivered from the daemon (e.g. a new_message arrived for this session).
+#[derive(Debug, Clone)]
+pub struct EventMsg {
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug)]
+enum RpcReply {
+    Ok(serde_json::Value),
+    Err(ErrorCode, String),
+    Disconnected,
+}
 
 pub struct DaemonClient {
     socket_path: PathBuf,
-    conn: Mutex<Option<Conn>>,
+    inner: TokioMutex<Option<ConnInner>>,
     next_id: AtomicU64,
     pid: u32,
     cwd: PathBuf,
     git_branch: Option<String>,
+    events_tx: mpsc::UnboundedSender<EventMsg>,
+    events_rx: TokioMutex<Option<mpsc::UnboundedReceiver<EventMsg>>>,
 }
 
-struct Conn {
-    sock: UnixStream,
-    pub session_id: String,
-    pub nickname: String,
+struct ConnInner {
+    write_half: tokio::net::unix::OwnedWriteHalf,
+    pending: Arc<TokioMutex<HashMap<u64, oneshot::Sender<RpcReply>>>>,
+    session_id: String,
+    nickname: String,
+    /// Reader task handle. When `inner` is dropped/replaced, the JoinHandle is
+    /// dropped; the task itself naturally exits when the read half EOFs.
+    _reader_task: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -35,55 +65,110 @@ pub enum CallError {
 
 impl DaemonClient {
     pub fn new(socket_path: PathBuf, pid: u32, cwd: PathBuf, git_branch: Option<String>) -> Self {
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
         Self {
             socket_path,
-            conn: Mutex::new(None),
+            inner: TokioMutex::new(None),
             next_id: AtomicU64::new(1),
             pid,
             cwd,
             git_branch,
+            events_tx,
+            events_rx: TokioMutex::new(Some(events_rx)),
         }
     }
 
+    /// Take the events receiver. Returns `Some` exactly once per `DaemonClient`
+    /// instance; subsequent calls return `None`. The consumer should spawn a
+    /// task that reads from the receiver and forwards events as it sees fit
+    /// (e.g. emit MCP `notifications/claude/channel`).
+    pub async fn take_events_rx(&self) -> Option<mpsc::UnboundedReceiver<EventMsg>> {
+        self.events_rx.lock().await.take()
+    }
+
     pub async fn ensure_connected(&self) -> Result<(String, String), CallError> {
-        let mut g = self.conn.lock().await;
+        let mut g = self.inner.lock().await;
         if let Some(c) = g.as_ref() {
             return Ok((c.session_id.clone(), c.nickname.clone()));
         }
-        let mut sock = UnixStream::connect(&self.socket_path)
+
+        let sock = UnixStream::connect(&self.socket_path)
             .await
             .map_err(|_| CallError::Disconnected)?;
+        let (read_half, mut write_half) = sock.into_split();
+
+        // Hello.
         let hello = ClientMsg::Hello {
             pid: self.pid,
             cwd: self.cwd.clone(),
             git_branch: self.git_branch.clone(),
         };
-        write_frame(
-            &mut sock,
-            serde_json::to_vec(&hello).map_err(|e| anyhow!(e))?.as_slice(),
-        )
-        .await
-        .map_err(|e| anyhow!(e))?;
-        let frame = read_frame(&mut sock).await.map_err(|e| anyhow!(e))?;
+        let buf = serde_json::to_vec(&hello).map_err(|e| anyhow!(e))?;
+        write_frame(&mut write_half, &buf).await.map_err(|e| anyhow!(e))?;
+
+        // Welcome (consumed before the reader task starts).
+        let mut read_half = read_half;
+        let frame = read_frame(&mut read_half).await.map_err(|e| anyhow!(e))?;
         let resp: ServerMsg = serde_json::from_slice(&frame).map_err(|e| anyhow!(e))?;
         let (session_id, nickname) = match resp {
-            ServerMsg::Welcome {
-                session_id,
-                nickname,
-            } => (session_id, nickname),
+            ServerMsg::Welcome { session_id, nickname } => (session_id, nickname),
             other => return Err(anyhow!("expected welcome, got {other:?}").into()),
         };
-        *g = Some(Conn {
-            sock,
+
+        let pending: Arc<TokioMutex<HashMap<u64, oneshot::Sender<RpcReply>>>> =
+            Arc::new(TokioMutex::new(HashMap::new()));
+        let pending_for_reader = Arc::clone(&pending);
+        let events_tx = self.events_tx.clone();
+
+        let reader_task = tokio::spawn(async move {
+            loop {
+                let frame = match read_frame(&mut read_half).await {
+                    Ok(f) => f,
+                    Err(_) => break,
+                };
+                let msg: ServerMsg = match serde_json::from_slice(&frame) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                match msg {
+                    ServerMsg::RpcOk { id, result } => {
+                        if let Some(tx) = pending_for_reader.lock().await.remove(&id) {
+                            let _ = tx.send(RpcReply::Ok(result));
+                        }
+                    }
+                    ServerMsg::RpcErr { id, code, message } => {
+                        if let Some(tx) = pending_for_reader.lock().await.remove(&id) {
+                            let _ = tx.send(RpcReply::Err(code, message));
+                        }
+                    }
+                    ServerMsg::Event { kind, payload } => {
+                        let _ = events_tx.send(EventMsg { kind, payload });
+                    }
+                    ServerMsg::Welcome { .. } => {
+                        // Daemon should not re-send welcome; ignore defensively.
+                    }
+                }
+            }
+            // Read half closed: drain pending with Disconnected.
+            let mut p = pending_for_reader.lock().await;
+            for (_, tx) in p.drain() {
+                let _ = tx.send(RpcReply::Disconnected);
+            }
+        });
+
+        *g = Some(ConnInner {
+            write_half,
+            pending,
             session_id: session_id.clone(),
             nickname: nickname.clone(),
+            _reader_task: reader_task,
         });
         Ok((session_id, nickname))
     }
 
     /// Drop any cached connection so the next call reconnects.
     pub async fn force_reconnect(&self) {
-        *self.conn.lock().await = None;
+        *self.inner.lock().await = None;
     }
 
     pub async fn call<R: serde::de::DeserializeOwned>(
@@ -91,60 +176,45 @@ impl DaemonClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<R, CallError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let req = ClientMsg::Rpc {
-            id,
-            method: method.into(),
-            params,
-        };
+        self.ensure_connected().await?;
 
-        // Best-effort send with one reconnect attempt on disconnected.
-        for attempt in 0..2 {
-            self.ensure_connected().await?;
-            let mut g = self.conn.lock().await;
-            let conn = g.as_mut().ok_or(CallError::Disconnected)?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (reply_tx, reply_rx) = oneshot::channel::<RpcReply>();
+
+        // Register the oneshot under the request id and write the frame.
+        {
+            let mut g = self.inner.lock().await;
+            let inner = g.as_mut().ok_or(CallError::Disconnected)?;
+            inner.pending.lock().await.insert(id, reply_tx);
+
+            let req = ClientMsg::Rpc {
+                id,
+                method: method.into(),
+                params,
+            };
             let buf = serde_json::to_vec(&req).map_err(|e| anyhow!(e))?;
-            if write_frame(&mut conn.sock, &buf).await.is_err() {
-                drop(g);
-                self.force_reconnect().await;
-                if attempt == 0 {
-                    continue;
-                }
+            if write_frame(&mut inner.write_half, &buf).await.is_err() {
+                inner.pending.lock().await.remove(&id);
+                *g = None;
                 return Err(CallError::Disconnected);
             }
-            let frame = match read_frame(&mut conn.sock).await {
-                Ok(f) => f,
-                Err(_) => {
-                    drop(g);
-                    self.force_reconnect().await;
-                    if attempt == 0 {
-                        continue;
-                    }
-                    return Err(CallError::Disconnected);
-                }
-            };
-            let resp: ServerMsg = serde_json::from_slice(&frame).map_err(|e| anyhow!(e))?;
-            return match resp {
-                ServerMsg::RpcOk { id: rid, result } if rid == id => {
-                    Ok(serde_json::from_value(result).map_err(|e| anyhow!(e))?)
-                }
-                ServerMsg::RpcOk { id: rid, .. } => {
-                    Err(anyhow!("response id mismatch: req {id}, got {rid}").into())
-                }
-                ServerMsg::RpcErr {
-                    id: rid,
-                    code,
-                    message,
-                } if rid == id => Err(CallError::Rpc { code, message }),
-                ServerMsg::RpcErr { id: rid, .. } => {
-                    Err(anyhow!("error id mismatch: req {id}, got {rid}").into())
-                }
-                ServerMsg::Welcome { .. } | ServerMsg::Event { .. } => {
-                    Err(anyhow!("unexpected message during call").into())
-                }
-            };
         }
-        Err(CallError::Disconnected)
+
+        match reply_rx.await {
+            Ok(RpcReply::Ok(value)) => {
+                Ok(serde_json::from_value(value).map_err(|e| anyhow!(e))?)
+            }
+            Ok(RpcReply::Err(code, message)) => Err(CallError::Rpc { code, message }),
+            Ok(RpcReply::Disconnected) => {
+                *self.inner.lock().await = None;
+                Err(CallError::Disconnected)
+            }
+            Err(_) => {
+                // Sender dropped without a value (reader task panicked or pending entry was evicted).
+                *self.inner.lock().await = None;
+                Err(CallError::Disconnected)
+            }
+        }
     }
 
     pub async fn whoami(&self) -> Result<(String, String), CallError> {
@@ -196,7 +266,7 @@ mod tests {
     async fn call_succeeds_against_fake_daemon() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sock");
-        let _ = fake_daemon(path.clone()).await;
+        let _h = fake_daemon(path.clone()).await;
         // Give the listener a moment to bind.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
@@ -224,5 +294,50 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, CallError::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn events_are_forwarded_to_subscriber() {
+        // Fake daemon that pushes an Event after sending Welcome.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut sock).await.unwrap();
+            let welcome = ServerMsg::Welcome {
+                session_id: "s-evt".into(),
+                nickname: "tt".into(),
+            };
+            write_frame(&mut sock, &serde_json::to_vec(&welcome).unwrap())
+                .await
+                .unwrap();
+            // Push an event.
+            let event = ServerMsg::Event {
+                kind: "new_message".into(),
+                payload: serde_json::json!({"body": "hi"}),
+            };
+            write_frame(&mut sock, &serde_json::to_vec(&event).unwrap())
+                .await
+                .unwrap();
+            // Hold the connection open briefly.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let client = DaemonClient::new(path, 1, std::path::PathBuf::from("/x"), None);
+        let mut events_rx = client.take_events_rx().await.unwrap();
+        let _ = client.whoami().await.unwrap();
+
+        let event = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            events_rx.recv(),
+        )
+        .await
+        .expect("timed out waiting for event")
+        .expect("event channel closed");
+        assert_eq!(event.kind, "new_message");
+        assert_eq!(event.payload["body"], "hi");
     }
 }
