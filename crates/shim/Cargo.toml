@@ -4,27 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-name = "shim"
-path = "src/lib.rs"
-
 [[bin]]
 name = "claude-coord-shim"
 path = "src/main.rs"
 
 [dependencies]
-proto = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-directories = { workspace = true }
-nix = { workspace = true, features = ["fs"] }
-which = "6"
-
-[dev-dependencies]
-tempfile = { workspace = true }
-daemon = { path = "../daemon" }
+myko-server = { workspace = true }
+entities = { workspace = true }
