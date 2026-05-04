@@ -4,29 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-name = "daemon"
-path = "src/lib.rs"
-
 [[bin]]
 name = "claude-coord-daemon"
 path = "src/main.rs"
 
 [dependencies]
-proto = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-appender = { workspace = true }
-rusqlite = { workspace = true }
-directories = { workspace = true }
-nix = { workspace = true }
-clap = { version = "4", features = ["derive"] }
-getrandom = "0.2"
-
-[dev-dependencies]
-tempfile = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+tokio = { workspace = true }
+myko = { workspace = true }
+myko-server = { workspace = true }
+entities = { workspace = true }
