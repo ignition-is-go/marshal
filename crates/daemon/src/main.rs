@@ -5,6 +5,7 @@ use daemon::db::Store;
 use daemon::paths;
 use daemon::state::Roster;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tokio::net::UnixListener;
 use tokio::signal;
 use tokio::signal::unix::{signal as unix_signal, SignalKind};
@@ -47,6 +48,14 @@ async fn main() -> Result<()> {
 
     let mut sigterm = unix_signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
 
+    // Self-replacement detection: capture the binary's mtime at startup.
+    // A periodic timer compares it to the current on-disk mtime; if a newer
+    // binary has been installed (e.g. via `cargo install`), the daemon exits
+    // gracefully so the next shim connect respawns the fresh build.
+    let start_mtime = current_exe_mtime();
+    let mut staleness_check = tokio::time::interval(Duration::from_secs(5));
+    staleness_check.tick().await; // consume the immediate first tick
+
     loop {
         tokio::select! {
             res = listener.accept() => match res {
@@ -68,10 +77,37 @@ async fn main() -> Result<()> {
                 info!("shutdown requested (SIGTERM)");
                 break;
             }
+            _ = staleness_check.tick() => {
+                if binary_replaced(start_mtime) {
+                    info!("binary replaced on disk; exiting so the next connect can respawn");
+                    break;
+                }
+            }
         }
     }
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+/// Read the mtime of the running binary. Returns `None` if anything fails;
+/// in that case staleness detection is silently disabled (we'd rather miss a
+/// reload than crash on a weird filesystem).
+fn current_exe_mtime() -> Option<SystemTime> {
+    let path = std::env::current_exe().ok()?;
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Return true if the binary's current on-disk mtime is newer than `start`.
+fn binary_replaced(start: Option<SystemTime>) -> bool {
+    let start = match start {
+        Some(t) => t,
+        None => return false,
+    };
+    let now_mtime = match current_exe_mtime() {
+        Some(t) => t,
+        None => return false,
+    };
+    now_mtime > start
 }
 
 fn set_socket_perms(p: &std::path::Path) -> Result<()> {
