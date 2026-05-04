@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/entities", "crates/daemon", "crates/shim", "crates/tui"]
+members = ["crates/entities", "crates/daemon", "crates/shim", "crates/tui", "crates/web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +21,7 @@ chrono = { version = "0.4", features = ["serde"] }
 myko = "^4.10.0"
 myko-macros = "^4.10.0"
 myko-server = "^4.10.0"
+myko-leptos = "^4.10.0"
 hyphae = "^1.0.0"
 
 # Local crates
@@ -33,3 +34,6 @@ myko-server = { path = "../myko/libs/myko/server" }
 myko-leptos = { path = "../myko/libs/myko/leptos" }
 autosocket = { path = "../myko/libs/autosocket" }
 hyphae = { path = "../hyphae/hyphae" }
+
+# myko-leptos and other workspace deps need to be declared at workspace level
+# to be inheritable; add them above.
