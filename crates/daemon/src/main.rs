@@ -7,6 +7,7 @@ use daemon::state::Roster;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::signal;
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -47,6 +48,8 @@ async fn main() -> Result<()> {
 
     let _prune = daemon::prune::spawn(Arc::clone(&app));
 
+    let mut sigterm = unix_signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+
     loop {
         tokio::select! {
             res = listener.accept() => match res {
@@ -61,7 +64,11 @@ async fn main() -> Result<()> {
                 Err(e) => { tracing::warn!(error = %e, "accept failed"); }
             },
             _ = signal::ctrl_c() => {
-                info!("shutdown requested");
+                info!("shutdown requested (SIGINT)");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("shutdown requested (SIGTERM)");
                 break;
             }
         }
