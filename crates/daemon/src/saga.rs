@@ -178,9 +178,12 @@ impl SagaHandler for RoleChangeNotifySaga {
         let new_role = session.role.clone();
         {
             let mut state = last_known_roles().lock().unwrap();
-            let prev = state.get(&session.id.0).cloned();
-            if prev == Some(new_role.clone()) {
-                return None; // unchanged
+            // Flatten Option<Option<_>> so "never seen" and "seen with None"
+            // both compare as None — that way the first SET (role=None) does
+            // not fire a spurious "cleared" notification.
+            let prev_role: Option<String> = state.get(&session.id.0).cloned().flatten();
+            if prev_role == new_role {
+                return None;
             }
             state.insert(session.id.0.clone(), new_role.clone());
         }

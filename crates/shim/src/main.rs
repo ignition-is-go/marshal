@@ -22,7 +22,7 @@ use myko::{
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const DEFAULT_MYKO_ADDRESS: &str = "ws://localhost:6155";
@@ -49,27 +49,6 @@ async fn main() -> Result<()> {
         let _ = notify_tx.send(cmd);
     });
     Box::leak(Box::new(notify_guard));
-
-    // Track connected status so we can defer the initial Session SET until
-    // the WebSocket actually opens.
-    let (connected_tx, mut connected_rx) = watch::channel(false);
-    let conn_guard = client.connection_status().subscribe(move |signal| {
-        if let hyphae::Signal::Value(status) = signal {
-            match &**status {
-                ConnectionStatus::Connected(addr) => {
-                    log::info!("[claude-coord-shim] connected to {addr}");
-                    let _ = connected_tx.send(true);
-                }
-                ConnectionStatus::Disconnected => {
-                    log::warn!("[claude-coord-shim] disconnected");
-                    let _ = connected_tx.send(false);
-                }
-                _ => {}
-            }
-        }
-    });
-    client.connection_status().own(conn_guard);
-    client.set_address(Some(myko_address));
 
     // Local session metadata.
     let cwd = std::env::current_dir()
@@ -99,17 +78,32 @@ async fn main() -> Result<()> {
     };
     let session = Arc::new(Mutex::new(session));
 
-    // Wait for the WebSocket to open before we SET our Session — otherwise
-    // the initial event would be queued until reconnect, but the daemon
-    // would have no record of us until the first reconnect tick.
-    while !*connected_rx.borrow() {
-        connected_rx
-            .changed()
-            .await
-            .context("connection_status channel closed")?;
-    }
-
-    set_session(&client, &session.lock().unwrap())?;
+    // Re-SET our Session on every connect. The daemon holds session state
+    // in-memory, so a daemon restart drops every roster entry; we have to
+    // re-publish on reconnect or peers can't see us anymore. This also
+    // handles the initial connection — the subscriber fires synchronously
+    // the moment the WebSocket opens.
+    let session_for_resend = Arc::clone(&session);
+    let client_for_resend = Arc::clone(&client);
+    let conn_guard = client.connection_status().subscribe(move |signal| {
+        if let hyphae::Signal::Value(status) = signal {
+            match &**status {
+                ConnectionStatus::Connected(addr) => {
+                    log::info!("[claude-coord-shim] connected to {addr} — (re)sending session");
+                    let snapshot = session_for_resend.lock().unwrap().clone();
+                    if let Err(e) = emit_session_set(&client_for_resend, &snapshot) {
+                        log::warn!("[claude-coord-shim] re-SET on connect failed: {e}");
+                    }
+                }
+                ConnectionStatus::Disconnected => {
+                    log::warn!("[claude-coord-shim] disconnected");
+                }
+                _ => {}
+            }
+        }
+    });
+    client.connection_status().own(conn_guard);
+    client.set_address(Some(myko_address));
 
     // Open the long-lived sessions subscription before we start serving MCP.
     // The cell starts empty and fills in once the server responds; tools
@@ -160,10 +154,11 @@ async fn main() -> Result<()> {
     .await
 }
 
-/// SET our Session entity so it appears on the roster and the daemon can
-/// route messages to us. The daemon auto-populates the `client_id` field
-/// from the WebSocket connection.
-fn set_session(client: &MykoClient, session: &Session) -> Result<()> {
+/// SET our Session entity. Used both on initial connect and on every
+/// subsequent reconnect (the daemon's in-memory store loses everything
+/// when it restarts, so we have to re-publish or peers can't see us).
+/// The server auto-populates `client_id` from the WS connection.
+fn emit_session_set(client: &MykoClient, session: &Session) -> Result<()> {
     let event = MEvent::from_item(session, MEventType::SET, &Uuid::new_v4().to_string());
     client
         .send_event(event)
