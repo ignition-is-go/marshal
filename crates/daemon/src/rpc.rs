@@ -27,6 +27,18 @@ pub async fn dispatch(
             }
             Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
         },
+        method::SET_ROLE => match serde_json::from_value::<proto::rpc::SetRoleParams>(params) {
+            Ok(p) => {
+                let canonical = crate::roles::canonicalize(&p.role);
+                app.roster.set_role(session_id, canonical.clone());
+                let instructions = crate::roles::instructions(&canonical);
+                ok(id, proto::rpc::SetRoleResult {
+                    role: canonical,
+                    instructions,
+                })
+            }
+            Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
+        },
         method::SEND_MESSAGE => match serde_json::from_value::<proto::rpc::SendMessageParams>(params) {
             Ok(p) => match app.roster.resolve(&p.to) {
                 Ok((to_session, to_nick)) => {

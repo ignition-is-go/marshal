@@ -7,6 +7,7 @@ fn hello_roundtrips() {
         pid: 1234,
         cwd: PathBuf::from("/home/trevor/Code/eww"),
         git_branch: Some("main".to_string()),
+        nickname: None,
     };
     let json = serde_json::to_string(&original).unwrap();
     let parsed: ClientMsg = serde_json::from_str(&json).unwrap();
@@ -30,6 +31,7 @@ fn hello_uses_tagged_form() {
         pid: 1,
         cwd: PathBuf::from("/x"),
         git_branch: None,
+        nickname: None,
     };
     let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
     assert_eq!(v["type"], "hello");
@@ -83,6 +85,7 @@ fn session_info_roundtrips() {
         cwd: PathBuf::from("/home/trevor/Code/eww"),
         git_branch: Some("main".to_string()),
         current_task: Some("fixing layout".to_string()),
+        role: Some("worker".to_string()),
         connected_at: 1_700_000_000_000,
         last_heartbeat: 1_700_000_005_000,
         is_self: true,

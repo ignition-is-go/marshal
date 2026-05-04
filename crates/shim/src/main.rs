@@ -119,7 +119,7 @@ fn detect_git_branch(cwd: &std::path::Path) -> Option<String> {
 
 async fn build_instructions(client: &DaemonClient, session_id: &str, nickname: &str) -> String {
     let base = "Coordinate with sibling Claude sessions running on this machine. \
-                Tools: whoami, set_status, roster, send_message, inbox, recent_messages.";
+                Tools: whoami, set_status, set_role, roster, send_message, inbox, recent_messages.";
 
     if session_id.is_empty() {
         return format!(
@@ -184,6 +184,15 @@ fn tools_def() -> Vec<ToolDef> {
         }),
         &["text"],
     );
+    let set_role = schema_object(
+        json!({
+            "role": {
+                "type": "string",
+                "description": "Role name. Built-ins: 'worker', 'task_distributor' (alias 'distributor'), 'communicator'. Empty string clears the role."
+            }
+        }),
+        &["role"],
+    );
     let send_message = schema_object(
         json!({
             "to": {
@@ -226,6 +235,11 @@ fn tools_def() -> Vec<ToolDef> {
             name: "set_status".into(),
             description: "Set this session's free-form status text on the roster.".into(),
             input_schema: set_status,
+        },
+        ToolDef {
+            name: "set_role".into(),
+            description: "Assign this session a role and receive behavioral instructions to follow going forward. The tool result is a directive — read and follow it before doing anything else.".into(),
+            input_schema: set_role,
         },
         ToolDef {
             name: "roster".into(),
@@ -274,6 +288,15 @@ impl ToolHandler for CoordHandler {
                         .ok_or_else(|| ToolError::invalid_params("set_status: missing `text`"))?
                         .to_string();
                     let r = self.host.set_status(text).await.map_err(map_call_err)?;
+                    Ok(ToolOutcome::Json(serde_json::to_value(r).unwrap()))
+                }
+                "set_role" => {
+                    let role = args
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| ToolError::invalid_params("set_role: missing `role`"))?
+                        .to_string();
+                    let r = self.host.set_role(role).await.map_err(map_call_err)?;
                     Ok(ToolOutcome::Json(serde_json::to_value(r).unwrap()))
                 }
                 "roster" => {

@@ -45,12 +45,14 @@ pub async fn handle(app: Arc<AppState>, sock: UnixStream) -> Result<()> {
     // Read Hello.
     let frame = read_frame(&mut read_half).await.context("reading hello frame")?;
     let hello: ClientMsg = serde_json::from_slice(&frame).context("decoding hello")?;
-    let (pid, cwd, git_branch) = match hello {
-        ClientMsg::Hello { pid, cwd, git_branch } => (pid, cwd, git_branch),
+    let (pid, cwd, git_branch, requested_nickname) = match hello {
+        ClientMsg::Hello { pid, cwd, git_branch, nickname } => (pid, cwd, git_branch, nickname),
         _ => return Err(anyhow!("expected Hello as first frame")),
     };
 
-    let nickname = nickname_from_cwd(&cwd);
+    let nickname = requested_nickname
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| nickname_from_cwd(&cwd));
     let now = now_ms();
     let session_id = {
         let mut id = new_session_id();
@@ -61,6 +63,7 @@ pub async fn handle(app: Arc<AppState>, sock: UnixStream) -> Result<()> {
             cwd: cwd.clone(),
             git_branch: git_branch.clone(),
             current_task: None,
+            role: None,
             connected_at: now,
             last_heartbeat: now,
             is_self: false,

@@ -3,8 +3,8 @@
 use crate::daemon_client::{CallError, DaemonClient};
 use proto::rpc::{
     method, InboxParams, InboxResult, OkResult, RecentMessagesParams, RecentMessagesResult,
-    RosterParams, RosterResult, SendMessageParams, SendMessageResult, SetStatusParams,
-    WhoamiResult,
+    RosterParams, RosterResult, SendMessageParams, SendMessageResult, SetRoleParams, SetRoleResult,
+    SetStatusParams, WhoamiResult,
 };
 use std::sync::Arc;
 
@@ -30,6 +30,15 @@ impl ToolHost {
             .call(
                 method::SET_STATUS,
                 serde_json::to_value(SetStatusParams { text }).unwrap(),
+            )
+            .await
+    }
+
+    pub async fn set_role(&self, role: String) -> Result<SetRoleResult, CallError> {
+        self.client
+            .call(
+                method::SET_ROLE,
+                serde_json::to_value(SetRoleParams { role }).unwrap(),
             )
             .await
     }

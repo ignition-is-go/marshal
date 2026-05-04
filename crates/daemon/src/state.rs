@@ -49,6 +49,14 @@ impl Roster {
         }
     }
 
+    /// Set the session's role. An empty string clears it.
+    pub fn set_role(&self, session_id: &str, role: String) {
+        let mut g = self.inner.lock().unwrap();
+        if let Some(s) = g.get_mut(session_id) {
+            s.role = if role.is_empty() { None } else { Some(role) };
+        }
+    }
+
     /// Snapshot of all sessions, with `is_self = true` on the row whose id matches `me`.
     pub fn snapshot(&self, me: &str) -> Vec<SessionInfo> {
         let g = self.inner.lock().unwrap();
@@ -97,6 +105,7 @@ mod tests {
             cwd: PathBuf::from("/x"),
             git_branch: None,
             current_task: None,
+            role: None,
             connected_at: 0,
             last_heartbeat: 0,
             is_self: false,

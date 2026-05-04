@@ -9,6 +9,11 @@ pub enum ClientMsg {
         cwd: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         git_branch: Option<String>,
+        /// Override the auto-derived nickname (which is the cwd basename).
+        /// Use this for non-shim clients (e.g. the TUI dashboard) that
+        /// shouldn't be confused with a Claude session by the same cwd.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nickname: Option<String>,
     },
     Rpc {
         id: u64,
@@ -58,6 +63,10 @@ pub struct SessionInfo {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_task: Option<String>,
+    /// Free-form role assigned to this session (e.g. "worker",
+    /// "task_distributor", "communicator"). Set via the `set_role` RPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub connected_at: i64,
     pub last_heartbeat: i64,
     #[serde(default)]

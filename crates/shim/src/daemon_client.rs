@@ -126,6 +126,7 @@ impl DaemonClient {
             pid: self.pid,
             cwd: self.cwd.clone(),
             git_branch: self.git_branch.clone(),
+            nickname: None,
         };
         let buf = serde_json::to_vec(&hello).map_err(|e| anyhow!(e))?;
         write_frame(&mut write_half, &buf).await.map_err(|e| anyhow!(e))?;

@@ -139,6 +139,7 @@ async fn run_connection(socket: &PathBuf, state: &State) -> Result<()> {
         pid: std::process::id(),
         cwd,
         git_branch: None,
+        nickname: Some("tui".into()),
     };
     write_frame(
         &mut *write_half.lock().await,
@@ -392,6 +393,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let header = Row::new(vec![
         RowCell::from("nick"),
         RowCell::from("session"),
+        RowCell::from("role"),
         RowCell::from("cwd"),
         RowCell::from("branch"),
         RowCell::from("status"),
@@ -415,9 +417,15 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
             };
+            let role_cell = match s.role.as_deref() {
+                Some(r) => RowCell::from(r.to_string())
+                    .style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                None => RowCell::from("—").style(Style::default().fg(Color::DarkGray)),
+            };
             Row::new(vec![
                 RowCell::from(s.nickname.clone()).style(nick_style),
                 RowCell::from(s.session_id.clone()).style(Style::default().fg(Color::Cyan)),
+                role_cell,
                 RowCell::from(s.cwd.display().to_string()).style(Style::default().fg(Color::Gray)),
                 RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
                 RowCell::from(s.current_task.clone().unwrap_or_else(|| "—".into())),
@@ -432,6 +440,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         [
             Constraint::Length(16),
             Constraint::Length(12),
+            Constraint::Length(16),
             Constraint::Min(20),
             Constraint::Length(14),
             Constraint::Length(20),

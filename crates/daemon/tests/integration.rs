@@ -3,7 +3,10 @@ use daemon::db::Store;
 use daemon::state::Roster;
 use proto::framing::{read_frame, write_frame};
 use proto::messages::{ClientMsg, ServerMsg};
-use proto::rpc::{method, OkResult, RosterResult, SendMessageParams, SendMessageResult, SetStatusParams};
+use proto::rpc::{
+    method, OkResult, RosterResult, SendMessageParams, SendMessageResult, SetRoleParams,
+    SetRoleResult, SetStatusParams,
+};
 use proto::rpc::{InboxParams, InboxResult, RecentMessagesParams, RecentMessagesResult};
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -33,6 +36,7 @@ async fn hello_gets_welcome_with_cwd_nickname() {
         pid: 99,
         cwd: PathBuf::from("/home/trevor/Code/eww"),
         git_branch: Some("main".into()),
+        nickname: None,
     };
     write_frame(&mut sock, serde_json::to_vec(&hello).unwrap().as_slice()).await.unwrap();
     let frame = read_frame(&mut sock).await.unwrap();
@@ -47,13 +51,53 @@ async fn hello_gets_welcome_with_cwd_nickname() {
 }
 
 async fn say_hello(sock: &mut UnixStream, cwd: &str) -> String {
-    let hello = ClientMsg::Hello { pid: 1, cwd: cwd.into(), git_branch: None };
+    let hello = ClientMsg::Hello { pid: 1, cwd: cwd.into(), git_branch: None, nickname: None };
     write_frame(sock, serde_json::to_vec(&hello).unwrap().as_slice()).await.unwrap();
     let frame = read_frame(sock).await.unwrap();
     match serde_json::from_slice(&frame).unwrap() {
         ServerMsg::Welcome { session_id, .. } => session_id,
         m => panic!("expected welcome, got {m:?}"),
     }
+}
+
+#[tokio::test]
+async fn hello_nickname_override_is_honored() {
+    let h = Harness::new().await;
+    let mut sock = h.connect().await;
+    let hello = ClientMsg::Hello {
+        pid: 99,
+        cwd: PathBuf::from("/home/trevor"),
+        git_branch: None,
+        nickname: Some("tui".into()),
+    };
+    write_frame(&mut sock, serde_json::to_vec(&hello).unwrap().as_slice()).await.unwrap();
+    let frame = read_frame(&mut sock).await.unwrap();
+    match serde_json::from_slice(&frame).unwrap() {
+        ServerMsg::Welcome { nickname, .. } => assert_eq!(nickname, "tui"),
+        m => panic!("expected welcome, got {m:?}"),
+    }
+}
+
+#[tokio::test]
+async fn two_hellos_in_same_cwd_are_separate_sessions() {
+    let h = Harness::new().await;
+    let mut a = h.connect().await;
+    let mut b = h.connect().await;
+    let id_a = say_hello(&mut a, "/home/trevor/Code/eww").await;
+    let id_b = say_hello(&mut b, "/home/trevor/Code/eww").await;
+    assert_ne!(id_a, id_b, "same-cwd sessions must get distinct session ids");
+
+    // Roster should list both rows independently, neither coalesced.
+    let resp = rpc(&mut a, 1, method::ROSTER, serde_json::json!({})).await;
+    let result = match resp {
+        ServerMsg::RpcOk { result, .. } => result,
+        other => panic!("expected ok, got {other:?}"),
+    };
+    let r: RosterResult = serde_json::from_value(result).unwrap();
+    assert_eq!(r.sessions.len(), 2);
+    let ids: std::collections::HashSet<_> =
+        r.sessions.iter().map(|s| s.session_id.clone()).collect();
+    assert!(ids.contains(&id_a) && ids.contains(&id_b));
 }
 
 async fn rpc(sock: &mut UnixStream, id: u64, method: &str, params: serde_json::Value)
@@ -123,6 +167,56 @@ async fn set_status_updates_roster() {
     let result = match r2 { ServerMsg::RpcOk { result, .. } => result, _ => panic!() };
     let r: RosterResult = serde_json::from_value(result).unwrap();
     assert_eq!(r.sessions[0].current_task.as_deref(), Some("refactoring"));
+}
+
+#[tokio::test]
+async fn set_role_canonicalizes_and_returns_instructions() {
+    let h = Harness::new().await;
+    let mut sock = h.connect().await;
+    let _me = say_hello(&mut sock, "/x/eww").await;
+
+    let p = SetRoleParams { role: "  Worker ".into() };
+    let resp = rpc(&mut sock, 1, method::SET_ROLE, serde_json::to_value(&p).unwrap()).await;
+    let r: SetRoleResult = match resp {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("expected ok, got {other:?}"),
+    };
+    assert_eq!(r.role, "worker");
+    assert!(r.instructions.contains("worker"));
+    assert!(r.instructions.len() > 100);
+
+    // Roster should reflect the new role.
+    let r2 = rpc(&mut sock, 2, method::ROSTER, serde_json::json!({})).await;
+    let result = match r2 { ServerMsg::RpcOk { result, .. } => result, _ => panic!() };
+    let roster: RosterResult = serde_json::from_value(result).unwrap();
+    assert_eq!(roster.sessions[0].role.as_deref(), Some("worker"));
+}
+
+#[tokio::test]
+async fn set_role_empty_clears_role() {
+    let h = Harness::new().await;
+    let mut sock = h.connect().await;
+    let _me = say_hello(&mut sock, "/x/eww").await;
+
+    // First set a role.
+    let _ = rpc(&mut sock, 1, method::SET_ROLE, serde_json::to_value(
+        SetRoleParams { role: "worker".into() }
+    ).unwrap()).await;
+
+    // Then clear it.
+    let resp = rpc(&mut sock, 2, method::SET_ROLE, serde_json::to_value(
+        SetRoleParams { role: "".into() }
+    ).unwrap()).await;
+    let r: SetRoleResult = match resp {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("expected ok, got {other:?}"),
+    };
+    assert_eq!(r.role, "");
+
+    let r2 = rpc(&mut sock, 3, method::ROSTER, serde_json::json!({})).await;
+    let result = match r2 { ServerMsg::RpcOk { result, .. } => result, _ => panic!() };
+    let roster: RosterResult = serde_json::from_value(result).unwrap();
+    assert_eq!(roster.sessions[0].role, None);
 }
 
 #[tokio::test]

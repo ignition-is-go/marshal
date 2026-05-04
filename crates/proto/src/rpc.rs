@@ -15,6 +15,21 @@ pub struct SetStatusParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetRoleParams {
+    /// Free-form role name. An empty string clears the role.
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetRoleResult {
+    /// The role that was set (canonicalized to lowercase). Empty if cleared.
+    pub role: String,
+    /// Behavioral instructions for the new role. The caller should follow
+    /// these going forward.
+    pub instructions: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OkResult {
     pub ok: bool,
 }
@@ -88,6 +103,7 @@ pub struct WhoamiResult {
 pub mod method {
     pub const ROSTER: &str = "roster";
     pub const SET_STATUS: &str = "set_status";
+    pub const SET_ROLE: &str = "set_role";
     pub const SEND_MESSAGE: &str = "send_message";
     pub const INBOX: &str = "inbox";
     pub const RECENT_MESSAGES: &str = "recent_messages";
