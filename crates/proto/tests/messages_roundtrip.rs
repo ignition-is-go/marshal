@@ -1,4 +1,4 @@
-use proto::messages::{ClientMsg, ErrorCode, ServerMsg};
+use proto::messages::{ClientMsg, ErrorCode, Message, ServerMsg, SessionInfo};
 use std::path::PathBuf;
 
 #[test]
@@ -72,4 +72,36 @@ fn rpc_err_roundtrips() {
 fn error_code_uses_snake_case() {
     let v = serde_json::to_value(ErrorCode::UnknownRecipient).unwrap();
     assert_eq!(v, serde_json::json!("unknown_recipient"));
+}
+
+#[test]
+fn session_info_roundtrips() {
+    let original = SessionInfo {
+        session_id: "s-abcd".to_string(),
+        nickname: "eww".to_string(),
+        pid: 999,
+        cwd: PathBuf::from("/home/trevor/Code/eww"),
+        git_branch: Some("main".to_string()),
+        current_task: Some("fixing layout".to_string()),
+        connected_at: 1_700_000_000_000,
+        last_heartbeat: 1_700_000_005_000,
+        is_self: true,
+    };
+    let parsed: SessionInfo =
+        serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+    assert_eq!(original, parsed);
+}
+
+#[test]
+fn message_roundtrips() {
+    let original = Message {
+        id: 7,
+        from_session: "s-1111".to_string(),
+        from_nick: "claude-coord".to_string(),
+        body: "hi".to_string(),
+        sent_at: 1_700_000_000_000,
+    };
+    let parsed: Message =
+        serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+    assert_eq!(original, parsed);
 }

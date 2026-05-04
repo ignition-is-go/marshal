@@ -47,3 +47,28 @@ pub enum ErrorCode {
     BadRequest,
     Internal,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub session_id: String,
+    pub nickname: String,
+    pub pid: u32,
+    pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task: Option<String>,
+    pub connected_at: i64,
+    pub last_heartbeat: i64,
+    #[serde(default)]
+    pub is_self: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    pub id: i64,
+    pub from_session: String,
+    pub from_nick: String,
+    pub body: String,
+    pub sent_at: i64,
+}
