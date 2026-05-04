@@ -93,12 +93,34 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    /// Send a `notifications/claude/channel` event. `meta` is rendered as
-    /// the `meta` field; `content` becomes the `content` field.
+    /// Send a `notifications/claude/channel` event. `meta` becomes the wire
+    /// `meta` field; `content` becomes the `content` field.
+    ///
+    /// Claude Code validates `params.meta` as `Record<string, string>` (Zod
+    /// schema in 2.1.x), so any non-string values silently fail validation
+    /// and the notification is dropped. We coerce nested values to JSON
+    /// strings here so callers can pass arbitrary objects without thinking
+    /// about the wire constraint.
     pub fn channel(&self, content: impl Into<String>, meta: Value) {
+        let coerced = match meta {
+            Value::Object(map) => {
+                let stringified: serde_json::Map<String, Value> = map
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let s = match v {
+                            Value::String(s) => s,
+                            other => other.to_string(),
+                        };
+                        (k, Value::String(s))
+                    })
+                    .collect();
+                Value::Object(stringified)
+            }
+            _ => Value::Object(serde_json::Map::new()),
+        };
         let params = serde_json::json!({
             "content": content.into(),
-            "meta": meta,
+            "meta": coerced,
         });
         self.send_raw("notifications/claude/channel", params);
     }
