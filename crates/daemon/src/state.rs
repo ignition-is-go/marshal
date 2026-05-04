@@ -16,6 +16,20 @@ impl Roster {
         g.insert(info.session_id.clone(), info);
     }
 
+    /// Insert only if the session_id is not already in the roster. Returns true on success.
+    pub fn try_insert(&self, info: SessionInfo) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        if g.contains_key(&info.session_id) { return false; }
+        g.insert(info.session_id.clone(), info);
+        true
+    }
+
+    /// Look up the nickname for a given session_id, if it is in the roster.
+    pub fn nickname_of(&self, session_id: &str) -> Option<String> {
+        let g = self.inner.lock().unwrap();
+        g.get(session_id).map(|s| s.nickname.clone())
+    }
+
     pub fn remove(&self, session_id: &str) {
         let mut g = self.inner.lock().unwrap();
         g.remove(session_id);

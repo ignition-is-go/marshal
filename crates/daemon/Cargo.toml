@@ -26,6 +26,7 @@ rusqlite = { workspace = true }
 directories = { workspace = true }
 nix = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

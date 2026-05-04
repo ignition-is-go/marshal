@@ -21,20 +21,32 @@ pub async fn handle(app: Arc<AppState>, mut sock: UnixStream) -> Result<()> {
         _ => return Err(anyhow!("expected Hello as first frame")),
     };
 
-    let session_id = new_session_id();
     let nickname = nickname_from_cwd(&cwd);
     let now = now_ms();
-    app.roster.insert(SessionInfo {
-        session_id: session_id.clone(),
-        nickname: nickname.clone(),
-        pid,
-        cwd,
-        git_branch,
-        current_task: None,
-        connected_at: now,
-        last_heartbeat: now,
-        is_self: false,
-    });
+    let session_id = {
+        let mut id = new_session_id();
+        let mut info = SessionInfo {
+            session_id: id.clone(),
+            nickname: nickname.clone(),
+            pid,
+            cwd: cwd.clone(),
+            git_branch: git_branch.clone(),
+            current_task: None,
+            connected_at: now,
+            last_heartbeat: now,
+            is_self: false,
+        };
+        let mut attempts = 0;
+        loop {
+            if app.roster.try_insert(info.clone()) { break id; }
+            attempts += 1;
+            if attempts >= 5 {
+                return Err(anyhow!("could not allocate unique session_id after 5 attempts"));
+            }
+            id = new_session_id();
+            info.session_id = id.clone();
+        }
+    };
 
     let welcome = ServerMsg::Welcome {
         session_id: session_id.clone(),
@@ -89,11 +101,9 @@ fn nickname_from_cwd(cwd: &std::path::Path) -> String {
 }
 
 fn new_session_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEED: AtomicU64 = AtomicU64::new(0);
-    let mut x = now_ms() as u64 ^ SEED.fetch_add(1, Ordering::Relaxed) ^ std::process::id() as u64;
-    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-    format!("s-{:04x}", (x as u16))
+    let mut bytes = [0u8; 4];
+    getrandom::getrandom(&mut bytes).expect("getrandom failed");
+    format!("s-{:08x}", u32::from_le_bytes(bytes))
 }
 
 pub fn now_ms() -> i64 {

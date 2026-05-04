@@ -180,6 +180,27 @@ async fn inbox_returns_unread_then_marks_read() {
 }
 
 #[tokio::test]
+async fn fifty_concurrent_sessions_have_distinct_ids() {
+    let h = Harness::new().await;
+    let mut socks = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    for i in 0..50 {
+        let mut s = h.connect().await;
+        let id = say_hello(&mut s, &format!("/x/sess{i}")).await;
+        assert!(ids.insert(id.clone()), "duplicate session_id {id}");
+        socks.push(s);
+    }
+    // Sanity: roster should have all 50.
+    let resp = rpc(&mut socks[0], 99, method::ROSTER, serde_json::json!({})).await;
+    let result = match resp {
+        ServerMsg::RpcOk { result, .. } => result,
+        other => panic!("{other:?}"),
+    };
+    let r: RosterResult = serde_json::from_value(result).unwrap();
+    assert_eq!(r.sessions.len(), 50);
+}
+
+#[tokio::test]
 async fn recent_messages_includes_sent_and_received() {
     let h = Harness::new().await;
     let mut sender = h.connect().await;
