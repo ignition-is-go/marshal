@@ -25,6 +25,7 @@ tracing-appender = { workspace = true }
 rusqlite = { workspace = true }
 directories = { workspace = true }
 nix = { workspace = true }
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
