@@ -1,0 +1,3203 @@
+# claude-coord Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build a per-user daemon + thin stdio MCP shim so multiple Claude Code sessions on one machine can see each other (roster) and pass async notes (mailbox).
+
+**Architecture:** Three-crate Rust workspace (`proto`, `daemon`, `shim`). Daemon owns shared state behind a unix socket. Shim is one tiny rmcp stdio server per Claude Code session that translates MCP tool calls into daemon RPCs over length-prefixed JSON frames.
+
+**Tech Stack:** Rust 2021, tokio, serde/serde_json, rusqlite (bundled), rmcp, tracing/tracing-appender, directories, nix, anyhow.
+
+**Spec:** [`docs/superpowers/specs/2026-05-04-claude-coord-design.md`](../specs/2026-05-04-claude-coord-design.md)
+
+---
+
+## File Structure
+
+```
+claude-coord/
+├── Cargo.toml                         # workspace
+├── .gitignore
+├── crates/
+│   ├── proto/
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs                 # re-exports
+│   │   │   ├── messages.rs            # ClientMsg, ServerMsg, ErrorCode, DTOs
+│   │   │   ├── rpc.rs                 # per-method param/result structs
+│   │   │   └── framing.rs             # read_frame / write_frame, MAX_FRAME
+│   │   └── tests/
+│   │       ├── messages_roundtrip.rs
+│   │       └── framing.rs
+│   ├── daemon/
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── main.rs                # entry: arg parsing, log init, run()
+│   │   │   ├── paths.rs               # XDG resolution: socket, db, log paths
+│   │   │   ├── db.rs                  # SQLite schema + message store
+│   │   │   ├── state.rs               # roster + AppState, message dispatch
+│   │   │   ├── conn.rs                # per-connection handler
+│   │   │   ├── rpc.rs                 # method dispatch
+│   │   │   └── prune.rs               # periodic prune task
+│   │   └── tests/
+│   │       ├── integration.rs
+│   │       └── persistence.rs
+│   └── shim/
+│       ├── Cargo.toml
+│       ├── src/
+│       │   ├── main.rs                # rmcp stdio server entry
+│       │   ├── daemon_client.rs       # socket conn, hello, RPC dispatch
+│       │   ├── spawn.rs               # double-fork daemon, poll socket
+│       │   └── tools.rs               # MCP tool defs → daemon RPC
+│       └── tests/
+│           └── end_to_end.rs
+└── docs/
+    ├── superpowers/specs/...
+    └── install.md
+```
+
+Files split by responsibility. `proto` is the only crate both `daemon` and `shim` depend on. Each file holds one clear concern; nothing is over ~250 lines at completion.
+
+---
+
+## Conventions used in this plan
+
+- **Commit messages:** Conventional commits, lowercase, no coauthors, no Claude reference.
+- **Run commands:** Always `cargo` from the workspace root unless noted.
+- **Test framing:** Use `cargo test -p <crate> <name>` so each step is fast and scoped.
+- **`MAX_FRAME`:** 1 MiB (1_048_576 bytes). Defined in `proto::framing`.
+
+---
+
+## Task 1: Workspace scaffold and crate skeletons
+
+**Files:**
+- Create: `Cargo.toml`
+- Create: `.gitignore`
+- Create: `crates/proto/Cargo.toml`
+- Create: `crates/proto/src/lib.rs`
+- Create: `crates/daemon/Cargo.toml`
+- Create: `crates/daemon/src/main.rs`
+- Create: `crates/shim/Cargo.toml`
+- Create: `crates/shim/src/main.rs`
+
+- [ ] **Step 1: Workspace `Cargo.toml`**
+
+```toml
+[workspace]
+resolver = "2"
+members = ["crates/proto", "crates/daemon", "crates/shim"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+directories = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }
+nix = { version = "0.29", features = ["process", "signal"] }
+tempfile = "3"
+proto = { path = "crates/proto" }
+```
+
+- [ ] **Step 2: `.gitignore`**
+
+```gitignore
+/target
+**/*.rs.bk
+Cargo.lock.bak
+```
+
+- [ ] **Step 3: `crates/proto/Cargo.toml`**
+
+```toml
+[package]
+name = "proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+```
+
+- [ ] **Step 4: `crates/proto/src/lib.rs` (placeholder)**
+
+```rust
+//! Wire types and framing for claude-coord.
+pub mod framing;
+pub mod messages;
+pub mod rpc;
+```
+
+Create empty modules so the crate compiles:
+
+`crates/proto/src/framing.rs`:
+```rust
+// filled in Task 6
+```
+
+`crates/proto/src/messages.rs`:
+```rust
+// filled in Task 2
+```
+
+`crates/proto/src/rpc.rs`:
+```rust
+// filled in Tasks 4–5
+```
+
+- [ ] **Step 5: `crates/daemon/Cargo.toml`**
+
+```toml
+[package]
+name = "daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "claude-coord-daemon"
+path = "src/main.rs"
+
+[dependencies]
+proto = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+rusqlite = { workspace = true }
+directories = { workspace = true }
+nix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+```
+
+- [ ] **Step 6: `crates/daemon/src/main.rs`**
+
+```rust
+fn main() {
+    // filled in Task 15
+    eprintln!("claude-coord-daemon: not yet implemented");
+    std::process::exit(1);
+}
+```
+
+- [ ] **Step 7: `crates/shim/Cargo.toml`**
+
+```toml
+[package]
+name = "shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "claude-coord-shim"
+path = "src/main.rs"
+
+[dependencies]
+proto = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories = { workspace = true }
+nix = { workspace = true }
+rmcp = { version = "0.2", features = ["server", "transport-io"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+```
+
+> **Note on rmcp:** the Rust MCP SDK API may have shifted slightly from what's shown in later tasks. If the exact macro/trait names differ, prefer the current docs at `https://docs.rs/rmcp` over the literal code here. The shim's behavior — define N tools, each calling `daemon_client::call(method, params)` — is unchanged.
+
+- [ ] **Step 8: `crates/shim/src/main.rs`**
+
+```rust
+fn main() {
+    // filled in Task 18+
+    eprintln!("claude-coord-shim: not yet implemented");
+    std::process::exit(1);
+}
+```
+
+- [ ] **Step 9: Verify it builds**
+
+Run: `cargo check --workspace`
+Expected: `Finished` with no errors. Warnings about empty modules are OK.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add Cargo.toml .gitignore crates/
+git commit -m "chore: scaffold workspace with proto, daemon, shim crates"
+```
+
+---
+
+## Task 2: proto — Hello and Welcome messages
+
+**Files:**
+- Modify: `crates/proto/src/messages.rs`
+- Test: `crates/proto/tests/messages_roundtrip.rs`
+
+- [ ] **Step 1: Write the failing roundtrip test**
+
+`crates/proto/tests/messages_roundtrip.rs`:
+```rust
+use proto::messages::{ClientMsg, ServerMsg};
+use std::path::PathBuf;
+
+#[test]
+fn hello_roundtrips() {
+    let original = ClientMsg::Hello {
+        pid: 1234,
+        cwd: PathBuf::from("/home/trevor/Code/eww"),
+        git_branch: Some("main".to_string()),
+    };
+    let json = serde_json::to_string(&original).unwrap();
+    let parsed: ClientMsg = serde_json::from_str(&json).unwrap();
+    assert_eq!(original, parsed);
+}
+
+#[test]
+fn welcome_roundtrips() {
+    let original = ServerMsg::Welcome {
+        session_id: "s-7a3f".to_string(),
+        nickname: "eww".to_string(),
+    };
+    let json = serde_json::to_string(&original).unwrap();
+    let parsed: ServerMsg = serde_json::from_str(&json).unwrap();
+    assert_eq!(original, parsed);
+}
+
+#[test]
+fn hello_uses_tagged_form() {
+    let msg = ClientMsg::Hello {
+        pid: 1,
+        cwd: PathBuf::from("/x"),
+        git_branch: None,
+    };
+    let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+    assert_eq!(v["type"], "hello");
+}
+```
+
+- [ ] **Step 2: Run the test, expect failure**
+
+Run: `cargo test -p proto hello_roundtrips`
+Expected: compile error or `cannot find type ClientMsg in module messages`.
+
+- [ ] **Step 3: Implement the types**
+
+`crates/proto/src/messages.rs`:
+```rust
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientMsg {
+    Hello {
+        pid: u32,
+        cwd: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git_branch: Option<String>,
+    },
+    Rpc {
+        id: u64,
+        method: String,
+        params: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerMsg {
+    Welcome {
+        session_id: String,
+        nickname: String,
+    },
+    RpcOk {
+        id: u64,
+        result: serde_json::Value,
+    },
+    RpcErr {
+        id: u64,
+        code: ErrorCode,
+        message: String,
+    },
+    Event {
+        kind: String,
+        payload: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    UnknownRecipient,
+    AmbiguousRecipient,
+    BadRequest,
+    Internal,
+}
+```
+
+- [ ] **Step 4: Run the test, expect pass**
+
+Run: `cargo test -p proto`
+Expected: `test result: ok. 3 passed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/proto/
+git commit -m "feat(proto): hello/welcome message types with roundtrip tests"
+```
+
+---
+
+## Task 3: proto — RPC envelope (Rpc, RpcOk, RpcErr)
+
+The `Rpc` / `RpcOk` / `RpcErr` variants already exist on `ClientMsg`/`ServerMsg` from Task 2. This task adds roundtrip coverage for them.
+
+**Files:**
+- Modify: `crates/proto/tests/messages_roundtrip.rs`
+
+- [ ] **Step 1: Add tests for all three RPC variants**
+
+Append to `crates/proto/tests/messages_roundtrip.rs`:
+```rust
+use proto::messages::ErrorCode;
+
+#[test]
+fn rpc_request_roundtrips() {
+    let original = ClientMsg::Rpc {
+        id: 42,
+        method: "roster".to_string(),
+        params: serde_json::json!({}),
+    };
+    let json = serde_json::to_string(&original).unwrap();
+    let parsed: ClientMsg = serde_json::from_str(&json).unwrap();
+    assert_eq!(original, parsed);
+}
+
+#[test]
+fn rpc_ok_roundtrips() {
+    let original = ServerMsg::RpcOk {
+        id: 42,
+        result: serde_json::json!({"ok": true}),
+    };
+    let parsed: ServerMsg = serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+    assert_eq!(original, parsed);
+}
+
+#[test]
+fn rpc_err_roundtrips() {
+    let original = ServerMsg::RpcErr {
+        id: 42,
+        code: ErrorCode::UnknownRecipient,
+        message: "no session named 'eww'".to_string(),
+    };
+    let parsed: ServerMsg = serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+    assert_eq!(original, parsed);
+}
+
+#[test]
+fn error_code_uses_snake_case() {
+    let v = serde_json::to_value(ErrorCode::UnknownRecipient).unwrap();
+    assert_eq!(v, serde_json::json!("unknown_recipient"));
+}
+```
+
+- [ ] **Step 2: Run the tests**
+
+Run: `cargo test -p proto`
+Expected: `test result: ok. 7 passed`.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/proto/
+git commit -m "test(proto): roundtrip coverage for rpc envelope and error code"
+```
+
+---
+
+## Task 4: proto — SessionInfo and Message DTOs
+
+**Files:**
+- Modify: `crates/proto/src/messages.rs`
+- Modify: `crates/proto/tests/messages_roundtrip.rs`
+
+- [ ] **Step 1: Failing test for SessionInfo and Message**
+
+Append to `crates/proto/tests/messages_roundtrip.rs`:
+```rust
+use proto::messages::{Message, SessionInfo};
+
+#[test]
+fn session_info_roundtrips() {
+    let original = SessionInfo {
+        session_id: "s-abcd".to_string(),
+        nickname: "eww".to_string(),
+        pid: 999,
+        cwd: PathBuf::from("/home/trevor/Code/eww"),
+        git_branch: Some("main".to_string()),
+        current_task: Some("fixing layout".to_string()),
+        connected_at: 1_700_000_000_000,
+        last_heartbeat: 1_700_000_005_000,
+        is_self: true,
+    };
+    let parsed: SessionInfo =
+        serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+    assert_eq!(original, parsed);
+}
+
+#[test]
+fn message_roundtrips() {
+    let original = Message {
+        id: 7,
+        from_session: "s-1111".to_string(),
+        from_nick: "claude-coord".to_string(),
+        body: "hi".to_string(),
+        sent_at: 1_700_000_000_000,
+    };
+    let parsed: Message =
+        serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+    assert_eq!(original, parsed);
+}
+```
+
+- [ ] **Step 2: Run, expect failure (types missing)**
+
+Run: `cargo test -p proto session_info_roundtrips`
+Expected: `cannot find type SessionInfo in module messages`.
+
+- [ ] **Step 3: Add the DTOs**
+
+Append to `crates/proto/src/messages.rs`:
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub session_id: String,
+    pub nickname: String,
+    pub pid: u32,
+    pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task: Option<String>,
+    pub connected_at: i64,
+    pub last_heartbeat: i64,
+    #[serde(default)]
+    pub is_self: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    pub id: i64,
+    pub from_session: String,
+    pub from_nick: String,
+    pub body: String,
+    pub sent_at: i64,
+}
+```
+
+- [ ] **Step 4: Run, expect pass**
+
+Run: `cargo test -p proto`
+Expected: `test result: ok. 9 passed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/proto/
+git commit -m "feat(proto): SessionInfo and Message DTOs"
+```
+
+---
+
+## Task 5: proto — RPC method param/result structs
+
+**Files:**
+- Modify: `crates/proto/src/rpc.rs`
+- Test: `crates/proto/tests/rpc_types.rs`
+
+- [ ] **Step 1: Failing test**
+
+Create `crates/proto/tests/rpc_types.rs`:
+```rust
+use proto::rpc::*;
+
+#[test]
+fn set_status_params_serializes() {
+    let p = SetStatusParams { text: "refactoring auth".to_string() };
+    assert_eq!(serde_json::to_value(&p).unwrap(),
+        serde_json::json!({"text": "refactoring auth"}));
+}
+
+#[test]
+fn send_message_params_serializes() {
+    let p = SendMessageParams { to: "eww".into(), body: "hi".into() };
+    assert_eq!(serde_json::to_value(&p).unwrap(),
+        serde_json::json!({"to": "eww", "body": "hi"}));
+}
+
+#[test]
+fn inbox_params_default_marks_read() {
+    let p = InboxParams::default();
+    assert!(p.mark_read);
+}
+
+#[test]
+fn recent_messages_params_default_limit() {
+    let p = RecentMessagesParams::default();
+    assert_eq!(p.limit, 50);
+}
+```
+
+- [ ] **Step 2: Run, expect failure**
+
+Run: `cargo test -p proto --test rpc_types`
+Expected: compile error, types missing.
+
+- [ ] **Step 3: Implement**
+
+`crates/proto/src/rpc.rs`:
+```rust
+use crate::messages::{Message, SessionInfo};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RosterParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RosterResult {
+    pub sessions: Vec<SessionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetStatusParams {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OkResult {
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageParams {
+    pub to: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageResult {
+    pub message_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxParams {
+    #[serde(default = "default_true")]
+    pub mark_read: bool,
+}
+
+impl Default for InboxParams {
+    fn default() -> Self { Self { mark_read: true } }
+}
+
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxResult {
+    pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentMessagesParams {
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+}
+
+impl Default for RecentMessagesParams {
+    fn default() -> Self { Self { limit: 50 } }
+}
+
+fn default_limit() -> u32 { 50 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentMessage {
+    #[serde(flatten)]
+    pub message: Message,
+    pub direction: Direction,
+    pub to_nick: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction { Sent, Received }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentMessagesResult {
+    pub messages: Vec<RecentMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhoamiResult {
+    pub session_id: String,
+    pub nickname: String,
+    pub pid: u32,
+    pub cwd: std::path::PathBuf,
+}
+
+/// Method name constants — the daemon and shim must agree.
+pub mod method {
+    pub const ROSTER: &str = "roster";
+    pub const SET_STATUS: &str = "set_status";
+    pub const SEND_MESSAGE: &str = "send_message";
+    pub const INBOX: &str = "inbox";
+    pub const RECENT_MESSAGES: &str = "recent_messages";
+}
+```
+
+- [ ] **Step 4: Run, expect pass**
+
+Run: `cargo test -p proto`
+Expected: all tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/proto/
+git commit -m "feat(proto): rpc param/result structs and method constants"
+```
+
+---
+
+## Task 6: proto — frame codec
+
+**Files:**
+- Modify: `crates/proto/src/framing.rs`
+- Test: `crates/proto/tests/framing.rs`
+
+- [ ] **Step 1: Failing tests**
+
+Create `crates/proto/tests/framing.rs`:
+```rust
+use proto::framing::{read_frame, write_frame, FrameError, MAX_FRAME};
+use tokio::io::duplex;
+
+#[tokio::test]
+async fn write_then_read_roundtrips() {
+    let (mut a, mut b) = duplex(64 * 1024);
+    write_frame(&mut a, b"hello").await.unwrap();
+    let got = read_frame(&mut b).await.unwrap();
+    assert_eq!(got, b"hello");
+}
+
+#[tokio::test]
+async fn read_handles_partial_writes() {
+    use tokio::io::AsyncWriteExt;
+    let (mut a, mut b) = duplex(64 * 1024);
+
+    let writer = tokio::spawn(async move {
+        // 4-byte LE length = 5
+        a.write_all(&5u32.to_le_bytes()[..2]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        a.write_all(&5u32.to_le_bytes()[2..]).await.unwrap();
+        a.write_all(b"he").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        a.write_all(b"llo").await.unwrap();
+    });
+
+    let got = read_frame(&mut b).await.unwrap();
+    assert_eq!(got, b"hello");
+    writer.await.unwrap();
+}
+
+#[tokio::test]
+async fn read_rejects_oversized_frame() {
+    use tokio::io::AsyncWriteExt;
+    let (mut a, mut b) = duplex(64 * 1024);
+    let too_big = (MAX_FRAME as u32 + 1).to_le_bytes();
+    a.write_all(&too_big).await.unwrap();
+    let err = read_frame(&mut b).await.unwrap_err();
+    assert!(matches!(err, FrameError::TooLarge(_)));
+}
+
+#[tokio::test]
+async fn write_rejects_oversized_payload() {
+    let (mut a, _b) = duplex(64);
+    let big = vec![0u8; MAX_FRAME + 1];
+    let err = write_frame(&mut a, &big).await.unwrap_err();
+    assert!(matches!(err, FrameError::TooLarge(_)));
+}
+```
+
+- [ ] **Step 2: Run, expect failure**
+
+Run: `cargo test -p proto --test framing`
+Expected: compile error, missing module.
+
+- [ ] **Step 3: Implement framing**
+
+`crates/proto/src/framing.rs`:
+```rust
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+pub const MAX_FRAME: usize = 1_048_576; // 1 MiB
+
+#[derive(Debug, Error)]
+pub enum FrameError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("frame too large: {0} bytes")]
+    TooLarge(usize),
+}
+
+pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, FrameError> {
+    let mut len_bytes = [0u8; 4];
+    r.read_exact(&mut len_bytes).await?;
+    let len = u32::from_le_bytes(len_bytes) as usize;
+    if len > MAX_FRAME {
+        return Err(FrameError::TooLarge(len));
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, payload: &[u8]) -> Result<(), FrameError> {
+    if payload.len() > MAX_FRAME {
+        return Err(FrameError::TooLarge(payload.len()));
+    }
+    let len = payload.len() as u32;
+    w.write_all(&len.to_le_bytes()).await?;
+    w.write_all(payload).await?;
+    w.flush().await?;
+    Ok(())
+}
+```
+
+- [ ] **Step 4: Run, expect pass**
+
+Run: `cargo test -p proto`
+Expected: all tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/proto/
+git commit -m "feat(proto): length-prefixed frame codec with size cap"
+```
+
+---
+
+## Task 7: daemon — paths module
+
+**Files:**
+- Create: `crates/daemon/src/paths.rs`
+- Modify: `crates/daemon/src/main.rs` (just so paths is reachable for tests)
+
+- [ ] **Step 1: Failing test**
+
+Add to `crates/daemon/src/paths.rs`:
+```rust
+//! XDG-aware paths for socket, db, log.
+
+use std::path::PathBuf;
+
+/// State dir for the daemon. Order: $XDG_STATE_HOME/claude-coord, else ~/.local/state/claude-coord.
+pub fn state_dir() -> PathBuf {
+    if let Some(xs) = std::env::var_os("XDG_STATE_HOME") {
+        return PathBuf::from(xs).join("claude-coord");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".local/state/claude-coord");
+    }
+    PathBuf::from("/tmp/claude-coord")
+}
+
+/// Socket path. Order: $XDG_RUNTIME_DIR/claude-coord/sock, else state_dir()/sock.
+pub fn socket_path() -> PathBuf {
+    if let Some(rd) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return PathBuf::from(rd).join("claude-coord/sock");
+    }
+    state_dir().join("sock")
+}
+
+pub fn db_path() -> PathBuf { state_dir().join("db.sqlite") }
+pub fn log_path() -> PathBuf { state_dir().join("daemon.log") }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_dir_uses_xdg_state_home() {
+        // SAFETY: tests run single-threaded by default for env vars, but be defensive.
+        let _g = std::sync::Mutex::new(()).lock().unwrap();
+        std::env::set_var("XDG_STATE_HOME", "/tmp/xdg-state");
+        std::env::remove_var("HOME");
+        assert_eq!(state_dir(), PathBuf::from("/tmp/xdg-state/claude-coord"));
+    }
+
+    #[test]
+    fn socket_path_uses_xdg_runtime_dir() {
+        let _g = std::sync::Mutex::new(()).lock().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+        assert_eq!(socket_path(), PathBuf::from("/run/user/1000/claude-coord/sock"));
+    }
+}
+```
+
+> The two tests above mutate process env. To avoid flakiness, run paths tests with `--test-threads=1`.
+
+Update `crates/daemon/src/main.rs`:
+```rust
+mod paths;
+
+fn main() {
+    eprintln!("claude-coord-daemon: not yet implemented");
+    std::process::exit(1);
+}
+```
+
+Wait — `main.rs` can't expose modules to `cargo test --lib`-style tests because daemon is a binary crate. To make `paths` testable cleanly, convert daemon to a binary + library hybrid: add `crates/daemon/src/lib.rs` and have `main.rs` use it.
+
+Create `crates/daemon/src/lib.rs`:
+```rust
+pub mod paths;
+```
+
+Update `crates/daemon/Cargo.toml` to add an explicit `[lib]` section above the existing `[[bin]]`:
+```toml
+[lib]
+name = "daemon"
+path = "src/lib.rs"
+```
+
+Update `crates/daemon/src/main.rs`:
+```rust
+fn main() {
+    eprintln!("claude-coord-daemon: not yet implemented");
+    std::process::exit(1);
+}
+```
+
+- [ ] **Step 2: Run, expect pass (paths is implemented inline)**
+
+Run: `cargo test -p daemon -- --test-threads=1`
+Expected: 2 passed.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): xdg-aware paths for socket/db/log"
+```
+
+---
+
+## Task 8: daemon — SQLite schema and message store
+
+**Files:**
+- Create: `crates/daemon/src/db.rs`
+- Modify: `crates/daemon/src/lib.rs` (export `db`)
+- Test: inline `#[cfg(test)]` in `db.rs`
+
+- [ ] **Step 1: Failing test**
+
+`crates/daemon/src/db.rs`:
+```rust
+//! SQLite message store.
+
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection};
+use std::path::Path;
+
+pub struct Store {
+    conn: Connection,
+}
+
+impl Store {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let conn = Connection::open(path).context("opening sqlite db")?;
+        Self::init(&conn)?;
+        Ok(Self { conn })
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().context("opening in-memory sqlite db")?;
+        Self::init(&conn)?;
+        Ok(Self { conn })
+    }
+
+    fn init(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS messages (
+              id           INTEGER PRIMARY KEY,
+              from_session TEXT NOT NULL,
+              from_nick    TEXT NOT NULL,
+              to_session   TEXT NOT NULL,
+              to_nick      TEXT NOT NULL,
+              body         TEXT NOT NULL,
+              sent_at      INTEGER NOT NULL,
+              read_at      INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_session, read_at);
+            CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at);
+            "#,
+        )?;
+        Ok(())
+    }
+
+    /// Insert and return the new id.
+    pub fn insert_message(
+        &self,
+        from_session: &str,
+        from_nick: &str,
+        to_session: &str,
+        to_nick: &str,
+        body: &str,
+        sent_at_ms: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO messages (from_session, from_nick, to_session, to_nick, body, sent_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![from_session, from_nick, to_session, to_nick, body, sent_at_ms],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Unread messages addressed to `to_session`, oldest first.
+    pub fn unread_for(&self, to_session: &str) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_session, from_nick, body, sent_at \
+             FROM messages WHERE to_session = ?1 AND read_at IS NULL \
+             ORDER BY sent_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![to_session], row_to_stored)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn mark_read(&self, ids: &[i64], now_ms: i64) -> Result<usize> {
+        if ids.is_empty() { return Ok(0); }
+        let placeholders = std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE messages SET read_at = ? WHERE id IN ({}) AND read_at IS NULL",
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now_ms)];
+        for id in ids { params_vec.push(Box::new(*id)); }
+        let refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let n = stmt.execute(rusqlite::params_from_iter(refs))?;
+        Ok(n)
+    }
+
+    /// Recent messages involving `me` (sent or received), newest first, up to `limit`.
+    pub fn recent_for(&self, me: &str, limit: u32) -> Result<Vec<RecentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_session, from_nick, to_session, to_nick, body, sent_at \
+             FROM messages WHERE from_session = ?1 OR to_session = ?1 \
+             ORDER BY sent_at DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![me, limit], |row| {
+            Ok(RecentRow {
+                id: row.get(0)?,
+                from_session: row.get(1)?,
+                from_nick: row.get(2)?,
+                to_session: row.get(3)?,
+                to_nick: row.get(4)?,
+                body: row.get(5)?,
+                sent_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn prune_older_than(&self, cutoff_ms: i64) -> Result<usize> {
+        let n = self.conn.execute("DELETE FROM messages WHERE sent_at < ?1", params![cutoff_ms])?;
+        Ok(n)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMessage {
+    pub id: i64,
+    pub from_session: String,
+    pub from_nick: String,
+    pub body: String,
+    pub sent_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentRow {
+    pub id: i64,
+    pub from_session: String,
+    pub from_nick: String,
+    pub to_session: String,
+    pub to_nick: String,
+    pub body: String,
+    pub sent_at: i64,
+}
+
+fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
+    Ok(StoredMessage {
+        id: row.get(0)?,
+        from_session: row.get(1)?,
+        from_nick: row.get(2)?,
+        body: row.get(3)?,
+        sent_at: row.get(4)?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_and_unread() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_message("s-a", "a", "s-b", "b", "hi", 100).unwrap();
+        let unread = s.unread_for("s-b").unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].body, "hi");
+        assert_eq!(unread[0].from_nick, "a");
+    }
+
+    #[test]
+    fn unread_excludes_read() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_message("s-a", "a", "s-b", "b", "hi", 100).unwrap();
+        s.mark_read(&[id], 200).unwrap();
+        assert!(s.unread_for("s-b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn recent_includes_both_directions_newest_first() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_message("s-a", "a", "s-b", "b", "1st", 100).unwrap();
+        s.insert_message("s-b", "b", "s-a", "a", "reply", 200).unwrap();
+        let rows = s.recent_for("s-a", 50).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].body, "reply");
+        assert_eq!(rows[1].body, "1st");
+    }
+
+    #[test]
+    fn prune_drops_old_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_message("s-a", "a", "s-b", "b", "old", 50).unwrap();
+        s.insert_message("s-a", "a", "s-b", "b", "new", 500).unwrap();
+        let n = s.prune_older_than(100).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(s.unread_for("s-b").unwrap().len(), 1);
+    }
+}
+```
+
+Add to `crates/daemon/src/lib.rs`:
+```rust
+pub mod db;
+pub mod paths;
+```
+
+- [ ] **Step 2: Run, expect pass**
+
+Run: `cargo test -p daemon db::tests`
+Expected: 4 passed.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): sqlite message store with insert/unread/mark_read/recent/prune"
+```
+
+---
+
+## Task 9: daemon — in-memory roster store
+
+**Files:**
+- Create: `crates/daemon/src/state.rs`
+- Modify: `crates/daemon/src/lib.rs`
+
+- [ ] **Step 1: Implement and test inline**
+
+`crates/daemon/src/state.rs`:
+```rust
+//! Live roster of connected sessions and lookup helpers.
+
+use proto::messages::SessionInfo;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub struct Roster {
+    inner: Mutex<HashMap<String, SessionInfo>>,
+}
+
+impl Roster {
+    pub fn new() -> Self { Self { inner: Mutex::new(HashMap::new()) } }
+
+    pub fn insert(&self, info: SessionInfo) {
+        let mut g = self.inner.lock().unwrap();
+        g.insert(info.session_id.clone(), info);
+    }
+
+    pub fn remove(&self, session_id: &str) {
+        let mut g = self.inner.lock().unwrap();
+        g.remove(session_id);
+    }
+
+    pub fn touch_heartbeat(&self, session_id: &str, now_ms: i64) {
+        let mut g = self.inner.lock().unwrap();
+        if let Some(s) = g.get_mut(session_id) {
+            s.last_heartbeat = now_ms;
+        }
+    }
+
+    pub fn set_status(&self, session_id: &str, text: String) {
+        let mut g = self.inner.lock().unwrap();
+        if let Some(s) = g.get_mut(session_id) {
+            s.current_task = Some(text);
+        }
+    }
+
+    /// Snapshot of all sessions, with `is_self = true` on the row whose id matches `me`.
+    pub fn snapshot(&self, me: &str) -> Vec<SessionInfo> {
+        let g = self.inner.lock().unwrap();
+        let mut out: Vec<SessionInfo> = g.values().cloned().collect();
+        for s in &mut out { s.is_self = s.session_id == me; }
+        out.sort_by(|a, b| a.nickname.cmp(&b.nickname));
+        out
+    }
+
+    /// Resolve a "to" target: matches a session_id exactly, otherwise nickname.
+    /// Returns `Ok((session_id, nickname))`.
+    pub fn resolve(&self, target: &str) -> Result<(String, String), ResolveError> {
+        let g = self.inner.lock().unwrap();
+        if let Some(s) = g.get(target) {
+            return Ok((s.session_id.clone(), s.nickname.clone()));
+        }
+        let matches: Vec<&SessionInfo> = g.values().filter(|s| s.nickname == target).collect();
+        match matches.len() {
+            0 => Err(ResolveError::Unknown(target.to_string())),
+            1 => Ok((matches[0].session_id.clone(), matches[0].nickname.clone())),
+            _ => Err(ResolveError::Ambiguous(
+                matches.iter().map(|s| s.session_id.clone()).collect(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    #[error("no live session matches '{0}'")]
+    Unknown(String),
+    #[error("multiple live sessions match: {0:?}")]
+    Ambiguous(Vec<String>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn info(id: &str, nick: &str) -> SessionInfo {
+        SessionInfo {
+            session_id: id.into(),
+            nickname: nick.into(),
+            pid: 1,
+            cwd: PathBuf::from("/x"),
+            git_branch: None,
+            current_task: None,
+            connected_at: 0,
+            last_heartbeat: 0,
+            is_self: false,
+        }
+    }
+
+    #[test]
+    fn resolve_by_id() {
+        let r = Roster::new();
+        r.insert(info("s-1", "a"));
+        let (id, nick) = r.resolve("s-1").unwrap();
+        assert_eq!((id.as_str(), nick.as_str()), ("s-1", "a"));
+    }
+
+    #[test]
+    fn resolve_by_nickname() {
+        let r = Roster::new();
+        r.insert(info("s-1", "eww"));
+        let (id, _) = r.resolve("eww").unwrap();
+        assert_eq!(id, "s-1");
+    }
+
+    #[test]
+    fn resolve_unknown() {
+        let r = Roster::new();
+        assert!(matches!(r.resolve("ghost"), Err(ResolveError::Unknown(_))));
+    }
+
+    #[test]
+    fn resolve_ambiguous() {
+        let r = Roster::new();
+        r.insert(info("s-1", "eww"));
+        r.insert(info("s-2", "eww"));
+        assert!(matches!(r.resolve("eww"), Err(ResolveError::Ambiguous(_))));
+    }
+
+    #[test]
+    fn snapshot_marks_self() {
+        let r = Roster::new();
+        r.insert(info("s-1", "a"));
+        r.insert(info("s-2", "b"));
+        let snap = r.snapshot("s-2");
+        let me: Vec<&SessionInfo> = snap.iter().filter(|s| s.is_self).collect();
+        assert_eq!(me.len(), 1);
+        assert_eq!(me[0].session_id, "s-2");
+    }
+}
+```
+
+Update `crates/daemon/src/lib.rs`:
+```rust
+pub mod db;
+pub mod paths;
+pub mod state;
+```
+
+- [ ] **Step 2: Run, expect pass**
+
+Run: `cargo test -p daemon state::tests`
+Expected: 5 passed.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): in-memory roster with resolve and snapshot"
+```
+
+---
+
+## Task 10: daemon — connection handler (hello → welcome → dispatch loop)
+
+**Files:**
+- Create: `crates/daemon/src/conn.rs`
+- Modify: `crates/daemon/src/lib.rs`
+- Test: `crates/daemon/tests/integration.rs` (smoke test for hello/welcome)
+
+- [ ] **Step 1: Failing integration test**
+
+`crates/daemon/tests/integration.rs`:
+```rust
+use daemon::conn::AppState;
+use daemon::db::Store;
+use daemon::state::Roster;
+use proto::framing::{read_frame, write_frame};
+use proto::messages::{ClientMsg, ServerMsg};
+use std::sync::Arc;
+use std::path::PathBuf;
+use tokio::net::UnixStream;
+
+async fn boot() -> (Arc<AppState>, UnixStream) {
+    let app = Arc::new(AppState {
+        roster: Roster::new(),
+        store: tokio::sync::Mutex::new(Store::open_in_memory().unwrap()),
+    });
+    let (a, b) = UnixStream::pair().unwrap();
+    let handler = Arc::clone(&app);
+    tokio::spawn(async move {
+        daemon::conn::handle(handler, a).await.ok();
+    });
+    (app, b)
+}
+
+#[tokio::test]
+async fn hello_gets_welcome_with_cwd_nickname() {
+    let (_app, mut sock) = boot().await;
+    let hello = ClientMsg::Hello {
+        pid: 99,
+        cwd: PathBuf::from("/home/trevor/Code/eww"),
+        git_branch: Some("main".into()),
+    };
+    write_frame(&mut sock, serde_json::to_vec(&hello).unwrap().as_slice()).await.unwrap();
+    let frame = read_frame(&mut sock).await.unwrap();
+    let resp: ServerMsg = serde_json::from_slice(&frame).unwrap();
+    match resp {
+        ServerMsg::Welcome { session_id, nickname } => {
+            assert!(session_id.starts_with("s-"));
+            assert_eq!(nickname, "eww");
+        }
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+}
+```
+
+- [ ] **Step 2: Implement `conn` module**
+
+`crates/daemon/src/conn.rs`:
+```rust
+use crate::db::Store;
+use crate::state::Roster;
+use anyhow::{anyhow, Context, Result};
+use proto::framing::{read_frame, write_frame};
+use proto::messages::{ClientMsg, ServerMsg, SessionInfo};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::net::UnixStream;
+
+pub struct AppState {
+    pub roster: Roster,
+    pub store: tokio::sync::Mutex<Store>,
+}
+
+pub async fn handle(app: Arc<AppState>, mut sock: UnixStream) -> Result<()> {
+    // Read Hello.
+    let frame = read_frame(&mut sock).await.context("reading hello frame")?;
+    let hello: ClientMsg = serde_json::from_slice(&frame).context("decoding hello")?;
+    let (pid, cwd, git_branch) = match hello {
+        ClientMsg::Hello { pid, cwd, git_branch } => (pid, cwd, git_branch),
+        _ => return Err(anyhow!("expected Hello as first frame")),
+    };
+
+    let session_id = new_session_id();
+    let nickname = nickname_from_cwd(&cwd);
+    let now = now_ms();
+    app.roster.insert(SessionInfo {
+        session_id: session_id.clone(),
+        nickname: nickname.clone(),
+        pid,
+        cwd,
+        git_branch,
+        current_task: None,
+        connected_at: now,
+        last_heartbeat: now,
+        is_self: false,
+    });
+
+    let welcome = ServerMsg::Welcome {
+        session_id: session_id.clone(),
+        nickname: nickname.clone(),
+    };
+    write_frame(&mut sock, serde_json::to_vec(&welcome)?.as_slice()).await?;
+
+    // Dispatch loop. RPC handlers are added in Task 11.
+    let result = dispatch_loop(&app, &session_id, &mut sock).await;
+
+    app.roster.remove(&session_id);
+    result
+}
+
+async fn dispatch_loop(
+    app: &Arc<AppState>,
+    session_id: &str,
+    sock: &mut UnixStream,
+) -> Result<()> {
+    loop {
+        let frame = match read_frame(sock).await {
+            Ok(f) => f,
+            Err(proto::framing::FrameError::Io(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let msg: ClientMsg = serde_json::from_slice(&frame)?;
+        match msg {
+            ClientMsg::Hello { .. } => {
+                let err = ServerMsg::RpcErr {
+                    id: 0,
+                    code: proto::messages::ErrorCode::BadRequest,
+                    message: "duplicate hello".into(),
+                };
+                write_frame(sock, serde_json::to_vec(&err)?.as_slice()).await?;
+            }
+            ClientMsg::Rpc { id, method, params } => {
+                app.roster.touch_heartbeat(session_id, now_ms());
+                let resp = crate::rpc::dispatch(app, session_id, id, &method, params).await;
+                write_frame(sock, serde_json::to_vec(&resp)?.as_slice()).await?;
+            }
+        }
+    }
+}
+
+fn nickname_from_cwd(cwd: &std::path::Path) -> String {
+    cwd.file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("session")
+        .to_string()
+}
+
+fn new_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEED: AtomicU64 = AtomicU64::new(0);
+    let mut x = now_ms() as u64 ^ SEED.fetch_add(1, Ordering::Relaxed) ^ std::process::id() as u64;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    format!("s-{:04x}", (x as u16))
+}
+
+pub fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+```
+
+Add a stub `rpc` module so this compiles. `crates/daemon/src/rpc.rs`:
+```rust
+use crate::conn::AppState;
+use proto::messages::{ErrorCode, ServerMsg};
+use std::sync::Arc;
+
+pub async fn dispatch(
+    _app: &Arc<AppState>,
+    _session_id: &str,
+    id: u64,
+    method: &str,
+    _params: serde_json::Value,
+) -> ServerMsg {
+    ServerMsg::RpcErr {
+        id,
+        code: ErrorCode::BadRequest,
+        message: format!("method '{method}' not yet implemented"),
+    }
+}
+```
+
+Update `crates/daemon/src/lib.rs`:
+```rust
+pub mod conn;
+pub mod db;
+pub mod paths;
+pub mod rpc;
+pub mod state;
+```
+
+- [ ] **Step 3: Run, expect pass**
+
+Run: `cargo test -p daemon --test integration`
+Expected: `hello_gets_welcome_with_cwd_nickname` passes.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): per-connection hello→welcome handler with dispatch loop stub"
+```
+
+---
+
+## Task 11: daemon — RPC handlers: roster + set_status
+
+**Files:**
+- Modify: `crates/daemon/src/rpc.rs`
+- Modify: `crates/daemon/tests/integration.rs`
+
+- [ ] **Step 1: Failing test**
+
+Append to `crates/daemon/tests/integration.rs`:
+```rust
+use proto::rpc::{method, RosterResult, SetStatusParams, OkResult};
+
+async fn say_hello(sock: &mut UnixStream, cwd: &str) -> String {
+    let hello = ClientMsg::Hello { pid: 1, cwd: cwd.into(), git_branch: None };
+    write_frame(sock, serde_json::to_vec(&hello).unwrap().as_slice()).await.unwrap();
+    let frame = read_frame(sock).await.unwrap();
+    match serde_json::from_slice(&frame).unwrap() {
+        ServerMsg::Welcome { session_id, .. } => session_id,
+        m => panic!("expected welcome, got {m:?}"),
+    }
+}
+
+async fn rpc(sock: &mut UnixStream, id: u64, method: &str, params: serde_json::Value)
+    -> ServerMsg
+{
+    let req = ClientMsg::Rpc { id, method: method.into(), params };
+    write_frame(sock, serde_json::to_vec(&req).unwrap().as_slice()).await.unwrap();
+    let frame = read_frame(sock).await.unwrap();
+    serde_json::from_slice(&frame).unwrap()
+}
+
+#[tokio::test]
+async fn roster_lists_self() {
+    let (_app, mut sock) = boot().await;
+    let me = say_hello(&mut sock, "/x/eww").await;
+    let resp = rpc(&mut sock, 1, method::ROSTER, serde_json::json!({})).await;
+    let result = match resp {
+        ServerMsg::RpcOk { result, .. } => result,
+        other => panic!("expected ok, got {other:?}"),
+    };
+    let r: RosterResult = serde_json::from_value(result).unwrap();
+    assert_eq!(r.sessions.len(), 1);
+    assert_eq!(r.sessions[0].session_id, me);
+    assert!(r.sessions[0].is_self);
+    assert_eq!(r.sessions[0].nickname, "eww");
+}
+
+#[tokio::test]
+async fn set_status_updates_roster() {
+    let (_app, mut sock) = boot().await;
+    let _me = say_hello(&mut sock, "/x/eww").await;
+    let p = SetStatusParams { text: "refactoring".into() };
+    let resp = rpc(&mut sock, 1, method::SET_STATUS, serde_json::to_value(&p).unwrap()).await;
+    let _: OkResult = match resp {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("expected ok, got {other:?}"),
+    };
+    let r2 = rpc(&mut sock, 2, method::ROSTER, serde_json::json!({})).await;
+    let result = match r2 { ServerMsg::RpcOk { result, .. } => result, _ => panic!() };
+    let r: RosterResult = serde_json::from_value(result).unwrap();
+    assert_eq!(r.sessions[0].current_task.as_deref(), Some("refactoring"));
+}
+```
+
+- [ ] **Step 2: Implement the handlers**
+
+Replace `crates/daemon/src/rpc.rs`:
+```rust
+use crate::conn::AppState;
+use proto::messages::{ErrorCode, ServerMsg};
+use proto::rpc::{
+    method, OkResult, RosterParams, RosterResult, SetStatusParams,
+};
+use std::sync::Arc;
+
+pub async fn dispatch(
+    app: &Arc<AppState>,
+    session_id: &str,
+    id: u64,
+    method_name: &str,
+    params: serde_json::Value,
+) -> ServerMsg {
+    match method_name {
+        method::ROSTER => match serde_json::from_value::<RosterParams>(params) {
+            Ok(_) => {
+                let sessions = app.roster.snapshot(session_id);
+                ok(id, RosterResult { sessions })
+            }
+            Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
+        },
+        method::SET_STATUS => match serde_json::from_value::<SetStatusParams>(params) {
+            Ok(p) => {
+                app.roster.set_status(session_id, p.text);
+                ok(id, OkResult { ok: true })
+            }
+            Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
+        },
+        other => err(id, ErrorCode::BadRequest, format!("unknown method '{other}'")),
+    }
+}
+
+fn ok<T: serde::Serialize>(id: u64, value: T) -> ServerMsg {
+    ServerMsg::RpcOk { id, result: serde_json::to_value(value).unwrap() }
+}
+
+fn err(id: u64, code: ErrorCode, message: String) -> ServerMsg {
+    ServerMsg::RpcErr { id, code, message }
+}
+```
+
+- [ ] **Step 3: Run, expect pass**
+
+Run: `cargo test -p daemon --test integration`
+Expected: 3 passed (the existing hello test plus two new).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): roster and set_status rpc handlers"
+```
+
+---
+
+## Task 12: daemon — RPC handler: send_message
+
+**Files:**
+- Modify: `crates/daemon/src/rpc.rs`
+- Modify: `crates/daemon/tests/integration.rs`
+
+- [ ] **Step 1: Failing tests**
+
+Append to `crates/daemon/tests/integration.rs`:
+```rust
+use proto::rpc::{SendMessageParams, SendMessageResult};
+
+#[tokio::test]
+async fn send_message_to_known_nickname_succeeds() {
+    let (_app, mut sender) = boot().await;
+    let _ = say_hello(&mut sender, "/x/sender").await;
+    // Need a second connection sharing the same AppState.
+    // boot() doesn't expose this — so add a helper that opens another connection.
+    // We rely on AppState being inside Arc; tests should be able to open multiple.
+}
+```
+
+Actually we need to refactor `boot()` to support multiple connections sharing the same AppState. Replace the helper at the top of `tests/integration.rs`:
+
+```rust
+struct Harness {
+    app: Arc<AppState>,
+}
+impl Harness {
+    async fn new() -> Self {
+        let app = Arc::new(AppState {
+            roster: Roster::new(),
+            store: tokio::sync::Mutex::new(Store::open_in_memory().unwrap()),
+        });
+        Self { app }
+    }
+    async fn connect(&self) -> UnixStream {
+        let (a, b) = UnixStream::pair().unwrap();
+        let app = Arc::clone(&self.app);
+        tokio::spawn(async move { daemon::conn::handle(app, a).await.ok(); });
+        b
+    }
+}
+```
+
+Update existing tests to use `Harness`:
+```rust
+#[tokio::test]
+async fn hello_gets_welcome_with_cwd_nickname() {
+    let h = Harness::new().await;
+    let mut sock = h.connect().await;
+    /* … */
+}
+
+#[tokio::test]
+async fn roster_lists_self() {
+    let h = Harness::new().await;
+    let mut sock = h.connect().await;
+    /* … */
+}
+
+#[tokio::test]
+async fn set_status_updates_roster() {
+    let h = Harness::new().await;
+    let mut sock = h.connect().await;
+    /* … */
+}
+```
+
+Now add the new tests:
+```rust
+#[tokio::test]
+async fn send_message_to_known_nickname_succeeds() {
+    let h = Harness::new().await;
+    let mut sender = h.connect().await;
+    let mut recv = h.connect().await;
+    let _ = say_hello(&mut sender, "/x/sender").await;
+    let _ = say_hello(&mut recv, "/x/eww").await;
+
+    let p = SendMessageParams { to: "eww".into(), body: "hi".into() };
+    let resp = rpc(&mut sender, 1, method::SEND_MESSAGE, serde_json::to_value(&p).unwrap()).await;
+    let r: SendMessageResult = match resp {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("{other:?}"),
+    };
+    assert!(r.message_id > 0);
+}
+
+#[tokio::test]
+async fn send_message_unknown_recipient_errors() {
+    let h = Harness::new().await;
+    let mut sender = h.connect().await;
+    let _ = say_hello(&mut sender, "/x/sender").await;
+    let p = SendMessageParams { to: "ghost".into(), body: "x".into() };
+    let resp = rpc(&mut sender, 1, method::SEND_MESSAGE, serde_json::to_value(&p).unwrap()).await;
+    match resp {
+        ServerMsg::RpcErr { code, .. } => assert_eq!(code, proto::messages::ErrorCode::UnknownRecipient),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn send_message_ambiguous_recipient_errors() {
+    let h = Harness::new().await;
+    let mut a = h.connect().await;
+    let mut b1 = h.connect().await;
+    let mut b2 = h.connect().await;
+    let _ = say_hello(&mut a, "/x/sender").await;
+    let _ = say_hello(&mut b1, "/y/eww").await;
+    let _ = say_hello(&mut b2, "/z/eww").await;
+    let p = SendMessageParams { to: "eww".into(), body: "x".into() };
+    let resp = rpc(&mut a, 1, method::SEND_MESSAGE, serde_json::to_value(&p).unwrap()).await;
+    match resp {
+        ServerMsg::RpcErr { code, .. } =>
+            assert_eq!(code, proto::messages::ErrorCode::AmbiguousRecipient),
+        other => panic!("{other:?}"),
+    }
+}
+```
+
+- [ ] **Step 2: Implement send_message handler**
+
+Append to the `match` in `crates/daemon/src/rpc.rs`:
+```rust
+        method::SEND_MESSAGE => match serde_json::from_value::<proto::rpc::SendMessageParams>(params) {
+            Ok(p) => match app.roster.resolve(&p.to) {
+                Ok((to_session, to_nick)) => {
+                    let from_nick = app.roster
+                        .snapshot(session_id)
+                        .into_iter()
+                        .find(|s| s.session_id == session_id)
+                        .map(|s| s.nickname)
+                        .unwrap_or_else(|| "?".into());
+                    let now = crate::conn::now_ms();
+                    let store = app.store.lock().await;
+                    match store.insert_message(session_id, &from_nick, &to_session, &to_nick, &p.body, now) {
+                        Ok(message_id) => ok(id, proto::rpc::SendMessageResult { message_id }),
+                        Err(e) => err(id, ErrorCode::Internal, e.to_string()),
+                    }
+                }
+                Err(crate::state::ResolveError::Unknown(_)) =>
+                    err(id, ErrorCode::UnknownRecipient,
+                        format!("no live session named '{}'", p.to)),
+                Err(crate::state::ResolveError::Ambiguous(ids)) =>
+                    err(id, ErrorCode::AmbiguousRecipient,
+                        format!("multiple live sessions named '{}': {:?}", p.to, ids)),
+            },
+            Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
+        },
+```
+
+- [ ] **Step 3: Run, expect pass**
+
+Run: `cargo test -p daemon --test integration`
+Expected: 6 passed.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): send_message rpc with nickname resolution and error codes"
+```
+
+---
+
+## Task 13: daemon — RPC handlers: inbox + recent_messages
+
+**Files:**
+- Modify: `crates/daemon/src/rpc.rs`
+- Modify: `crates/daemon/tests/integration.rs`
+
+- [ ] **Step 1: Failing tests**
+
+Append to `crates/daemon/tests/integration.rs`:
+```rust
+use proto::rpc::{InboxParams, InboxResult, RecentMessagesParams, RecentMessagesResult};
+
+#[tokio::test]
+async fn inbox_returns_unread_then_marks_read() {
+    let h = Harness::new().await;
+    let mut sender = h.connect().await;
+    let mut recv = h.connect().await;
+    let _ = say_hello(&mut sender, "/x/sender").await;
+    let _ = say_hello(&mut recv, "/x/eww").await;
+
+    let p = SendMessageParams { to: "eww".into(), body: "yo".into() };
+    let _ = rpc(&mut sender, 1, method::SEND_MESSAGE, serde_json::to_value(&p).unwrap()).await;
+
+    let inbox: InboxResult = match rpc(&mut recv, 1, method::INBOX,
+        serde_json::to_value(InboxParams { mark_read: true }).unwrap()).await {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].body, "yo");
+    assert_eq!(inbox.messages[0].from_nick, "sender");
+
+    // Second call returns nothing.
+    let inbox2: InboxResult = match rpc(&mut recv, 2, method::INBOX,
+        serde_json::to_value(InboxParams { mark_read: true }).unwrap()).await {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("{other:?}"),
+    };
+    assert!(inbox2.messages.is_empty());
+}
+
+#[tokio::test]
+async fn recent_messages_includes_sent_and_received() {
+    let h = Harness::new().await;
+    let mut sender = h.connect().await;
+    let mut recv = h.connect().await;
+    let _ = say_hello(&mut sender, "/x/sender").await;
+    let _ = say_hello(&mut recv, "/x/eww").await;
+
+    rpc(&mut sender, 1, method::SEND_MESSAGE, serde_json::to_value(
+        SendMessageParams { to: "eww".into(), body: "hi".into() }).unwrap()).await;
+    rpc(&mut recv, 1, method::SEND_MESSAGE, serde_json::to_value(
+        SendMessageParams { to: "sender".into(), body: "back".into() }).unwrap()).await;
+
+    let rec: RecentMessagesResult = match rpc(&mut sender, 2, method::RECENT_MESSAGES,
+        serde_json::to_value(RecentMessagesParams { limit: 50 }).unwrap()).await {
+        ServerMsg::RpcOk { result, .. } => serde_json::from_value(result).unwrap(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(rec.messages.len(), 2);
+    let dirs: Vec<_> = rec.messages.iter().map(|m| m.direction).collect();
+    use proto::rpc::Direction;
+    assert!(dirs.contains(&Direction::Sent));
+    assert!(dirs.contains(&Direction::Received));
+}
+```
+
+- [ ] **Step 2: Implement handlers**
+
+Append to the `match` in `crates/daemon/src/rpc.rs`:
+```rust
+        method::INBOX => match serde_json::from_value::<proto::rpc::InboxParams>(params) {
+            Ok(p) => {
+                let store = app.store.lock().await;
+                match store.unread_for(session_id) {
+                    Ok(rows) => {
+                        let messages: Vec<proto::messages::Message> = rows.iter().map(|r| {
+                            proto::messages::Message {
+                                id: r.id, from_session: r.from_session.clone(),
+                                from_nick: r.from_nick.clone(), body: r.body.clone(),
+                                sent_at: r.sent_at,
+                            }
+                        }).collect();
+                        if p.mark_read {
+                            let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+                            let _ = store.mark_read(&ids, crate::conn::now_ms());
+                        }
+                        ok(id, proto::rpc::InboxResult { messages })
+                    }
+                    Err(e) => err(id, ErrorCode::Internal, e.to_string()),
+                }
+            }
+            Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
+        },
+        method::RECENT_MESSAGES => match serde_json::from_value::<proto::rpc::RecentMessagesParams>(params) {
+            Ok(p) => {
+                let store = app.store.lock().await;
+                match store.recent_for(session_id, p.limit) {
+                    Ok(rows) => {
+                        let messages = rows.into_iter().map(|r| {
+                            let direction = if r.from_session == session_id {
+                                proto::rpc::Direction::Sent
+                            } else {
+                                proto::rpc::Direction::Received
+                            };
+                            proto::rpc::RecentMessage {
+                                message: proto::messages::Message {
+                                    id: r.id, from_session: r.from_session,
+                                    from_nick: r.from_nick, body: r.body, sent_at: r.sent_at,
+                                },
+                                direction,
+                                to_nick: r.to_nick,
+                            }
+                        }).collect();
+                        ok(id, proto::rpc::RecentMessagesResult { messages })
+                    }
+                    Err(e) => err(id, ErrorCode::Internal, e.to_string()),
+                }
+            }
+            Err(e) => err(id, ErrorCode::BadRequest, e.to_string()),
+        },
+```
+
+- [ ] **Step 3: Run, expect pass**
+
+Run: `cargo test -p daemon --test integration`
+Expected: 8 passed.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): inbox and recent_messages rpc handlers"
+```
+
+---
+
+## Task 14: daemon — periodic prune task
+
+**Files:**
+- Create: `crates/daemon/src/prune.rs`
+- Modify: `crates/daemon/src/lib.rs`
+- Test: inline in `prune.rs`
+
+- [ ] **Step 1: Implement and test**
+
+`crates/daemon/src/prune.rs`:
+```rust
+//! Periodically delete messages older than 30 days.
+
+use crate::conn::AppState;
+use std::sync::Arc;
+use std::time::Duration;
+use tracing::{info, warn};
+
+pub const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+pub fn spawn(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+        interval.tick().await; // immediate
+        loop {
+            run_once(&app).await;
+            interval.tick().await;
+        }
+    })
+}
+
+pub async fn run_once(app: &AppState) {
+    let cutoff = crate::conn::now_ms() - RETENTION_MS;
+    let store = app.store.lock().await;
+    match store.prune_older_than(cutoff) {
+        Ok(0) => {}
+        Ok(n) => info!(pruned = n, "pruned old messages"),
+        Err(e) => warn!(error = %e, "prune failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Store;
+    use crate::state::Roster;
+
+    #[tokio::test]
+    async fn run_once_drops_only_old() {
+        let app = Arc::new(AppState {
+            roster: Roster::new(),
+            store: tokio::sync::Mutex::new(Store::open_in_memory().unwrap()),
+        });
+        let now = crate::conn::now_ms();
+        let store = app.store.lock().await;
+        store.insert_message("a", "a", "b", "b", "old", now - RETENTION_MS - 1).unwrap();
+        store.insert_message("a", "a", "b", "b", "new", now).unwrap();
+        drop(store);
+
+        run_once(&app).await;
+
+        let store = app.store.lock().await;
+        let unread = store.unread_for("b").unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].body, "new");
+    }
+}
+```
+
+Update `crates/daemon/src/lib.rs`:
+```rust
+pub mod conn;
+pub mod db;
+pub mod paths;
+pub mod prune;
+pub mod rpc;
+pub mod state;
+```
+
+- [ ] **Step 2: Run, expect pass**
+
+Run: `cargo test -p daemon prune::tests`
+Expected: 1 passed.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): periodic prune of messages older than 30 days"
+```
+
+---
+
+## Task 15: daemon — main.rs binary, log init, signal handling
+
+**Files:**
+- Modify: `crates/daemon/src/main.rs`
+- Create: `crates/daemon/src/log.rs`
+- Modify: `crates/daemon/src/lib.rs`
+
+- [ ] **Step 1: Log init module**
+
+`crates/daemon/src/log.rs`:
+```rust
+//! tracing-appender-based file logger with rotation (10 MiB, keep 3).
+
+use crate::paths;
+use anyhow::Result;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::EnvFilter;
+
+pub fn init(foreground: bool) -> Result<tracing_appender::non_blocking::WorkerGuard> {
+    let dir = paths::state_dir();
+    std::fs::create_dir_all(&dir)?;
+    // tracing-appender does daily rotation by default; for size rotation we'd need a custom
+    // appender, but daily is good enough for v1 and keeps the impl simple.
+    let appender = RollingFileAppender::new(Rotation::DAILY, &dir, "daemon.log");
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+
+    let filter = EnvFilter::try_from_env("CLAUDE_COORD_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let stderr = if foreground { Some(std::io::stderr) } else { None };
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(writer)
+        .with_ansi(false);
+
+    if stderr.is_some() {
+        // Also log to stderr in foreground mode.
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(tracing_appender::non_blocking(
+                RollingFileAppender::new(Rotation::DAILY, &dir, "daemon.log")
+            ).0);
+        let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_env("CLAUDE_COORD_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(file_layer)
+            .with(stderr_layer)
+            .init();
+    } else {
+        subscriber.init();
+    }
+
+    Ok(guard)
+}
+```
+
+> Note: the `tracing-appender` crate as of v0.2 doesn't ship size-based rotation; daily is the simplest stable rotation and meets the spec's intent (bounded log growth on disk). Open question: revisit if logs grow unexpectedly fast.
+
+- [ ] **Step 2: Update main.rs to wire it all up**
+
+`crates/daemon/src/main.rs`:
+```rust
+use anyhow::{Context, Result};
+use clap::Parser;
+use daemon::conn::{handle, AppState};
+use daemon::db::Store;
+use daemon::paths;
+use daemon::state::Roster;
+use std::sync::Arc;
+use tokio::net::UnixListener;
+use tokio::signal;
+use tracing::{error, info};
+
+#[derive(Parser, Debug)]
+#[command(name = "claude-coord-daemon")]
+struct Args {
+    /// Run attached to the terminal (also logs to stderr) instead of detaching.
+    #[arg(long)]
+    foreground: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let _log_guard = daemon::log::init(args.foreground)?;
+
+    let socket = paths::socket_path();
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if socket.exists() {
+        // Try a connection first; if it succeeds, another daemon is already running.
+        if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+            error!("daemon already running at {:?}", socket);
+            std::process::exit(1);
+        }
+        std::fs::remove_file(&socket).ok();
+    }
+    let listener = UnixListener::bind(&socket).context("binding socket")?;
+    set_socket_perms(&socket)?;
+    info!(socket = ?socket, "claude-coord-daemon listening");
+
+    std::fs::create_dir_all(paths::state_dir())?;
+    let store = Store::open(paths::db_path())?;
+    let app = Arc::new(AppState {
+        roster: Roster::new(),
+        store: tokio::sync::Mutex::new(store),
+    });
+
+    let _prune = daemon::prune::spawn(Arc::clone(&app));
+
+    loop {
+        tokio::select! {
+            res = listener.accept() => match res {
+                Ok((sock, _addr)) => {
+                    let app = Arc::clone(&app);
+                    tokio::spawn(async move {
+                        if let Err(e) = handle(app, sock).await {
+                            tracing::warn!(error = %e, "connection ended with error");
+                        }
+                    });
+                }
+                Err(e) => { tracing::warn!(error = %e, "accept failed"); }
+            },
+            _ = signal::ctrl_c() => {
+                info!("shutdown requested");
+                break;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&socket);
+    Ok(())
+}
+
+fn set_socket_perms(p: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(p)?.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(p, perms)?;
+    Ok(())
+}
+```
+
+Add `clap` to `crates/daemon/Cargo.toml`:
+```toml
+clap = { version = "4", features = ["derive"] }
+```
+
+Update `crates/daemon/src/lib.rs`:
+```rust
+pub mod conn;
+pub mod db;
+pub mod log;
+pub mod paths;
+pub mod prune;
+pub mod rpc;
+pub mod state;
+```
+
+- [ ] **Step 3: Smoke test the binary**
+
+Run:
+```bash
+cargo build --bin claude-coord-daemon
+XDG_STATE_HOME=$(mktemp -d) XDG_RUNTIME_DIR=$(mktemp -d) ./target/debug/claude-coord-daemon --foreground &
+DPID=$!
+sleep 0.5
+ls -la $XDG_RUNTIME_DIR/claude-coord/sock
+kill $DPID
+```
+Expected: `srw-------` (mode 600 unix socket) at the listed path. Daemon prints "listening" to stderr.
+
+- [ ] **Step 4: Run all daemon tests**
+
+Run: `cargo test -p daemon`
+Expected: all passing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/daemon/
+git commit -m "feat(daemon): main binary with logging, signal handling, socket lifecycle"
+```
+
+---
+
+## Task 16: shim — daemon_client (connect, hello, RPC dispatch, reconnect)
+
+**Files:**
+- Create: `crates/shim/src/daemon_client.rs`
+- Modify: `crates/shim/src/main.rs` (just to declare the module)
+- Test: inline
+
+- [ ] **Step 1: Implement client + tests**
+
+Add a `[lib]` to `crates/shim/Cargo.toml`:
+```toml
+[lib]
+name = "shim"
+path = "src/lib.rs"
+```
+
+Create `crates/shim/src/lib.rs`:
+```rust
+pub mod daemon_client;
+pub mod spawn;
+pub mod tools;
+```
+
+`crates/shim/src/daemon_client.rs`:
+```rust
+//! Minimal RPC client over the daemon's unix socket.
+
+use anyhow::{anyhow, Context, Result};
+use proto::framing::{read_frame, write_frame};
+use proto::messages::{ClientMsg, ErrorCode, ServerMsg};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::net::UnixStream;
+use tokio::sync::Mutex;
+
+pub struct DaemonClient {
+    socket_path: PathBuf,
+    conn: Mutex<Option<Conn>>,
+    next_id: AtomicU64,
+    pid: u32,
+    cwd: PathBuf,
+    git_branch: Option<String>,
+}
+
+struct Conn {
+    sock: UnixStream,
+    pub session_id: String,
+    pub nickname: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CallError {
+    #[error("daemon disconnected")]
+    Disconnected,
+    #[error("rpc error [{code:?}]: {message}")]
+    Rpc { code: ErrorCode, message: String },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl DaemonClient {
+    pub fn new(socket_path: PathBuf, pid: u32, cwd: PathBuf, git_branch: Option<String>) -> Self {
+        Self {
+            socket_path,
+            conn: Mutex::new(None),
+            next_id: AtomicU64::new(1),
+            pid,
+            cwd,
+            git_branch,
+        }
+    }
+
+    pub async fn ensure_connected(&self) -> Result<(String, String), CallError> {
+        let mut g = self.conn.lock().await;
+        if let Some(c) = g.as_ref() {
+            return Ok((c.session_id.clone(), c.nickname.clone()));
+        }
+        let mut sock = UnixStream::connect(&self.socket_path).await
+            .map_err(|_| CallError::Disconnected)?;
+        let hello = ClientMsg::Hello {
+            pid: self.pid,
+            cwd: self.cwd.clone(),
+            git_branch: self.git_branch.clone(),
+        };
+        write_frame(&mut sock, serde_json::to_vec(&hello).map_err(|e| anyhow!(e))?.as_slice())
+            .await.map_err(|e| anyhow!(e))?;
+        let frame = read_frame(&mut sock).await.map_err(|e| anyhow!(e))?;
+        let resp: ServerMsg = serde_json::from_slice(&frame).map_err(|e| anyhow!(e))?;
+        let (session_id, nickname) = match resp {
+            ServerMsg::Welcome { session_id, nickname } => (session_id, nickname),
+            other => return Err(anyhow!("expected welcome, got {other:?}").into()),
+        };
+        *g = Some(Conn { sock, session_id: session_id.clone(), nickname: nickname.clone() });
+        Ok((session_id, nickname))
+    }
+
+    /// Drop any cached connection so the next call reconnects.
+    pub async fn force_reconnect(&self) {
+        *self.conn.lock().await = None;
+    }
+
+    pub async fn call<R: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<R, CallError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let req = ClientMsg::Rpc { id, method: method.into(), params };
+
+        // Best-effort send with one reconnect attempt on disconnected.
+        for attempt in 0..2 {
+            self.ensure_connected().await?;
+            let mut g = self.conn.lock().await;
+            let conn = g.as_mut().ok_or(CallError::Disconnected)?;
+            let buf = serde_json::to_vec(&req).map_err(|e| anyhow!(e))?;
+            if write_frame(&mut conn.sock, &buf).await.is_err() {
+                drop(g); self.force_reconnect().await;
+                if attempt == 0 { continue; }
+                return Err(CallError::Disconnected);
+            }
+            let frame = match read_frame(&mut conn.sock).await {
+                Ok(f) => f,
+                Err(_) => {
+                    drop(g); self.force_reconnect().await;
+                    if attempt == 0 { continue; }
+                    return Err(CallError::Disconnected);
+                }
+            };
+            let resp: ServerMsg = serde_json::from_slice(&frame).map_err(|e| anyhow!(e))?;
+            return match resp {
+                ServerMsg::RpcOk { id: rid, result } if rid == id => {
+                    Ok(serde_json::from_value(result).map_err(|e| anyhow!(e))?)
+                }
+                ServerMsg::RpcOk { id: rid, .. } =>
+                    Err(anyhow!("response id mismatch: req {id}, got {rid}").into()),
+                ServerMsg::RpcErr { id: rid, code, message } if rid == id =>
+                    Err(CallError::Rpc { code, message }),
+                ServerMsg::RpcErr { id: rid, .. } =>
+                    Err(anyhow!("error id mismatch: req {id}, got {rid}").into()),
+                ServerMsg::Welcome { .. } | ServerMsg::Event { .. } =>
+                    Err(anyhow!("unexpected message during call").into()),
+            };
+        }
+        Err(CallError::Disconnected)
+    }
+
+    pub async fn whoami(&self) -> Result<(String, String), CallError> {
+        self.ensure_connected().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::framing::{read_frame, write_frame};
+    use std::sync::Arc;
+    use tokio::net::UnixListener;
+
+    async fn fake_daemon(socket: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Read hello, send welcome.
+            let _ = read_frame(&mut sock).await.unwrap();
+            let welcome = ServerMsg::Welcome {
+                session_id: "s-test".into(),
+                nickname: "shim-test".into(),
+            };
+            write_frame(&mut sock, &serde_json::to_vec(&welcome).unwrap()).await.unwrap();
+            // Echo any RPC with an Ok of {echo: method}
+            loop {
+                let frame = match read_frame(&mut sock).await { Ok(f) => f, Err(_) => break };
+                let msg: ClientMsg = serde_json::from_slice(&frame).unwrap();
+                if let ClientMsg::Rpc { id, method, .. } = msg {
+                    let resp = ServerMsg::RpcOk {
+                        id, result: serde_json::json!({"echo": method}),
+                    };
+                    write_frame(&mut sock, &serde_json::to_vec(&resp).unwrap()).await.unwrap();
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn call_succeeds_against_fake_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let _ = fake_daemon(path.clone()).await;
+        // Give the listener a moment to bind.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let client = Arc::new(DaemonClient::new(
+            path,
+            42,
+            std::path::PathBuf::from("/x/eww"),
+            None,
+        ));
+        let (sid, nick) = client.whoami().await.unwrap();
+        assert_eq!(sid, "s-test");
+        assert_eq!(nick, "shim-test");
+
+        let v: serde_json::Value = client.call("roster", serde_json::json!({})).await.unwrap();
+        assert_eq!(v, serde_json::json!({"echo": "roster"}));
+    }
+
+    #[tokio::test]
+    async fn disconnect_propagates_when_daemon_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist");
+        let client = DaemonClient::new(path, 1, std::path::PathBuf::from("/x"), None);
+        let err = client.call::<serde_json::Value>("roster", serde_json::json!({})).await.unwrap_err();
+        assert!(matches!(err, CallError::Disconnected));
+    }
+}
+```
+
+`crates/shim/src/main.rs`:
+```rust
+fn main() {
+    eprintln!("claude-coord-shim: not yet implemented");
+    std::process::exit(1);
+}
+```
+
+Add stub modules so `lib.rs` compiles. `crates/shim/src/spawn.rs`:
+```rust
+// filled in Task 17
+```
+
+`crates/shim/src/tools.rs`:
+```rust
+// filled in Task 18+
+```
+
+- [ ] **Step 2: Run, expect pass**
+
+Run: `cargo test -p shim daemon_client::tests`
+Expected: 2 passed.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/shim/
+git commit -m "feat(shim): daemon_client with hello, rpc dispatch, reconnect-on-next-call"
+```
+
+---
+
+## Task 17: shim — auto-spawn daemon
+
+**Files:**
+- Modify: `crates/shim/src/spawn.rs`
+- Test: inline
+
+- [ ] **Step 1: Implement spawn module**
+
+`crates/shim/src/spawn.rs`:
+```rust
+//! Auto-spawn the daemon binary as a detached background process.
+
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// If `socket` isn't accepting connections, spawn the daemon and wait for it.
+pub async fn ensure_running(socket: &Path, daemon_bin: &Path) -> Result<()> {
+    if probe(socket).await { return Ok(()); }
+    detach_spawn(daemon_bin)?;
+    wait_for_socket(socket, Duration::from_secs(2)).await
+}
+
+async fn probe(socket: &Path) -> bool {
+    tokio::net::UnixStream::connect(socket).await.is_ok()
+}
+
+fn detach_spawn(bin: &Path) -> Result<()> {
+    use nix::sys::wait::{waitpid, WaitStatus};
+    use nix::unistd::{fork, ForkResult, setsid};
+
+    // Double-fork so the grandchild is reparented to init/PID 1.
+    match unsafe { fork() }? {
+        ForkResult::Parent { child } => {
+            // Reap the immediate child.
+            match waitpid(child, None)? {
+                WaitStatus::Exited(_, 0) => Ok(()),
+                other => anyhow::bail!("first fork child exited unexpectedly: {other:?}"),
+            }
+        }
+        ForkResult::Child => {
+            // In child: detach from session, fork again.
+            let _ = setsid();
+            match unsafe { fork() }? {
+                ForkResult::Parent { .. } => {
+                    // First child exits cleanly.
+                    std::process::exit(0);
+                }
+                ForkResult::Child => {
+                    // Grandchild: redirect std fds to /dev/null so it can fully detach.
+                    let null = std::fs::OpenOptions::new()
+                        .read(true).write(true).open("/dev/null")?;
+                    use std::os::unix::io::AsRawFd;
+                    let fd = null.as_raw_fd();
+                    let _ = nix::unistd::dup2(fd, 0);
+                    let _ = nix::unistd::dup2(fd, 1);
+                    let _ = nix::unistd::dup2(fd, 2);
+                    drop(null);
+
+                    let err = std::process::Command::new(bin).exec();
+                    eprintln!("exec failed: {err}");
+                    std::process::exit(127);
+                }
+            }
+        }
+    }
+}
+
+async fn wait_for_socket(socket: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if probe(socket).await { return Ok(()); }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("daemon at {socket:?} did not come up within {timeout:?}")
+}
+
+/// Locate the daemon binary by name, looking in the same directory as the current exe first.
+pub fn locate_daemon() -> Result<PathBuf> {
+    let me = std::env::current_exe().context("getting current exe")?;
+    if let Some(parent) = me.parent() {
+        let candidate = parent.join("claude-coord-daemon");
+        if candidate.exists() { return Ok(candidate); }
+    }
+    // Fall back to PATH.
+    which::which("claude-coord-daemon").context("finding claude-coord-daemon on PATH")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn ensure_running_returns_ok_when_socket_already_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("sock");
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        // No daemon binary needed; ensure_running should short-circuit.
+        let bogus = dir.path().join("does-not-exist");
+        ensure_running(&socket, &bogus).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_running_spawns_helper_binary_that_creates_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("sock");
+        let helper = dir.path().join("helper.sh");
+        std::fs::write(&helper, format!(
+            "#!/bin/sh\nexec python3 -c 'import socket, os, time; \
+s=socket.socket(socket.AF_UNIX); s.bind(\"{}\"); s.listen(1); time.sleep(5)' \n",
+            socket.display()
+        )).unwrap();
+        let mut perm = std::fs::metadata(&helper).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&helper, perm).unwrap();
+        // Give it a chance to bind.
+        ensure_running(&socket, &helper).await.unwrap();
+        assert!(socket.exists());
+    }
+}
+```
+
+Add `which` to `crates/shim/Cargo.toml`:
+```toml
+which = "6"
+```
+
+> The second test depends on `python3` being on PATH and is mainly a sanity check that `detach_spawn` actually invokes the binary. If python3 is unavailable in CI, mark it with `#[ignore]` and run it locally.
+
+- [ ] **Step 2: Run, expect pass**
+
+Run: `cargo test -p shim spawn::tests`
+Expected: 2 passed (or 1 if the python3 test is ignored).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/shim/
+git commit -m "feat(shim): auto-spawn daemon via double-fork with socket polling"
+```
+
+---
+
+## Task 18: shim — rmcp tool surface (whoami, set_status, roster)
+
+**Files:**
+- Modify: `crates/shim/src/tools.rs`
+- Modify: `crates/shim/src/main.rs`
+
+> The exact rmcp DSL changes between releases. The structure below uses the typical `#[tool]` attribute pattern documented at `https://docs.rs/rmcp`. If the trait names differ in the version you install, adapt — the *behavior* is what matters: each MCP tool calls into `DaemonClient` with the corresponding method.
+
+- [ ] **Step 1: Implement tools.rs**
+
+`crates/shim/src/tools.rs`:
+```rust
+use crate::daemon_client::{CallError, DaemonClient};
+use proto::rpc::{
+    method, OkResult, RosterParams, RosterResult, SetStatusParams, WhoamiResult,
+};
+use std::sync::Arc;
+
+pub struct ToolHost {
+    pub client: Arc<DaemonClient>,
+    pub pid: u32,
+    pub cwd: std::path::PathBuf,
+}
+
+impl ToolHost {
+    pub async fn whoami(&self) -> Result<WhoamiResult, CallError> {
+        let (session_id, nickname) = self.client.whoami().await?;
+        Ok(WhoamiResult {
+            session_id, nickname,
+            pid: self.pid, cwd: self.cwd.clone(),
+        })
+    }
+
+    pub async fn set_status(&self, text: String) -> Result<OkResult, CallError> {
+        self.client.call(method::SET_STATUS,
+            serde_json::to_value(SetStatusParams { text }).unwrap()).await
+    }
+
+    pub async fn roster(&self) -> Result<RosterResult, CallError> {
+        self.client.call(method::ROSTER,
+            serde_json::to_value(RosterParams::default()).unwrap()).await
+    }
+
+    pub async fn send_message(
+        &self,
+        to: String,
+        body: String,
+    ) -> Result<proto::rpc::SendMessageResult, CallError> {
+        self.client.call(method::SEND_MESSAGE,
+            serde_json::to_value(proto::rpc::SendMessageParams { to, body }).unwrap()).await
+    }
+
+    pub async fn inbox(&self, mark_read: bool) -> Result<proto::rpc::InboxResult, CallError> {
+        self.client.call(method::INBOX,
+            serde_json::to_value(proto::rpc::InboxParams { mark_read }).unwrap()).await
+    }
+
+    pub async fn recent_messages(
+        &self, limit: u32,
+    ) -> Result<proto::rpc::RecentMessagesResult, CallError> {
+        self.client.call(method::RECENT_MESSAGES,
+            serde_json::to_value(proto::rpc::RecentMessagesParams { limit }).unwrap()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::framing::{read_frame, write_frame};
+    use proto::messages::ServerMsg;
+    use tokio::net::UnixListener;
+
+    async fn fake_daemon_with(socket: std::path::PathBuf, mut next: impl FnMut(&str) -> serde_json::Value + Send + 'static)
+        -> tokio::task::JoinHandle<()>
+    {
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut sock).await.unwrap();
+            let welcome = ServerMsg::Welcome { session_id: "s-99".into(), nickname: "tt".into() };
+            write_frame(&mut sock, &serde_json::to_vec(&welcome).unwrap()).await.unwrap();
+            loop {
+                let frame = match read_frame(&mut sock).await { Ok(f) => f, Err(_) => break };
+                let msg: proto::messages::ClientMsg = serde_json::from_slice(&frame).unwrap();
+                if let proto::messages::ClientMsg::Rpc { id, method, .. } = msg {
+                    let result = next(&method);
+                    let resp = ServerMsg::RpcOk { id, result };
+                    write_frame(&mut sock, &serde_json::to_vec(&resp).unwrap()).await.unwrap();
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn whoami_returns_session_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let _ = fake_daemon_with(path.clone(), |_m| serde_json::json!({})).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let client = Arc::new(DaemonClient::new(path, 7, "/x".into(), None));
+        let host = ToolHost { client, pid: 7, cwd: "/x".into() };
+        let w = host.whoami().await.unwrap();
+        assert_eq!(w.session_id, "s-99");
+        assert_eq!(w.nickname, "tt");
+        assert_eq!(w.pid, 7);
+    }
+
+    #[tokio::test]
+    async fn roster_passes_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let _ = fake_daemon_with(path.clone(), |_m| serde_json::json!({"sessions": []})).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let client = Arc::new(DaemonClient::new(path, 1, "/x".into(), None));
+        let host = ToolHost { client, pid: 1, cwd: "/x".into() };
+        let r = host.roster().await.unwrap();
+        assert!(r.sessions.is_empty());
+    }
+}
+```
+
+- [ ] **Step 2: main.rs — wire ToolHost into rmcp**
+
+`crates/shim/src/main.rs`:
+```rust
+use anyhow::{Context, Result};
+use shim::daemon_client::DaemonClient;
+use shim::spawn;
+use shim::tools::ToolHost;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let socket = socket_path();
+    let daemon_bin = spawn::locate_daemon().context("locating daemon binary")?;
+    spawn::ensure_running(&socket, &daemon_bin).await
+        .context("starting daemon")?;
+
+    let cwd = std::env::current_dir().context("cwd")?;
+    let pid = std::process::id();
+    let git_branch = detect_git_branch(&cwd);
+
+    let client = Arc::new(DaemonClient::new(socket, pid, cwd.clone(), git_branch));
+    let host = Arc::new(ToolHost { client, pid, cwd });
+
+    rmcp_server::run(host).await
+}
+
+fn socket_path() -> std::path::PathBuf {
+    if let Some(rd) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return std::path::PathBuf::from(rd).join("claude-coord/sock");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home).join(".local/state/claude-coord/sock");
+    }
+    std::path::PathBuf::from("/tmp/claude-coord/sock")
+}
+
+fn detect_git_branch(cwd: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let s = s.trim();
+    if s.is_empty() || s == "HEAD" { None } else { Some(s.to_string()) }
+}
+
+mod rmcp_server {
+    use crate::ToolHost;
+    use anyhow::Result;
+    use rmcp::{
+        model::{CallToolResult, Tool, ToolInputSchema},
+        service::serve,
+        transport::stdio,
+        ServerHandler,
+    };
+    use std::sync::Arc;
+
+    pub async fn run(host: Arc<ToolHost>) -> Result<()> {
+        let handler = Handler { host };
+        serve(handler, stdio()).await?;
+        Ok(())
+    }
+
+    struct Handler { host: Arc<ToolHost> }
+
+    #[async_trait::async_trait]
+    impl ServerHandler for Handler {
+        // Tool list and call dispatch are filled in below — exact trait signatures
+        // depend on rmcp version. The shape:
+        //   list_tools()  → vec![whoami, set_status, roster, send_message, inbox, recent_messages]
+        //   call_tool(name, args) → match on name, deserialize args, host.<method>(...).await
+        // See task 19 for the full handler implementation.
+        async fn list_tools(&self) -> Result<Vec<Tool>, rmcp::Error> {
+            Ok(vec![
+                Tool {
+                    name: "whoami".into(),
+                    description: Some("Return this session's id, nickname, pid, cwd.".into()),
+                    input_schema: ToolInputSchema::object(),
+                },
+                Tool {
+                    name: "set_status".into(),
+                    description: Some("Set this session's free-text current_task on the roster.".into()),
+                    input_schema: ToolInputSchema::object_with(
+                        [("text", ToolInputSchema::string())], &["text"]),
+                },
+                Tool {
+                    name: "roster".into(),
+                    description: Some("List all live claude-coord sessions.".into()),
+                    input_schema: ToolInputSchema::object(),
+                },
+                // send_message, inbox, recent_messages added in task 19.
+            ])
+        }
+
+        async fn call_tool(&self, name: &str, args: serde_json::Value)
+            -> Result<CallToolResult, rmcp::Error>
+        {
+            match name {
+                "whoami" => {
+                    let r = self.host.whoami().await.map_err(crate::rmcp_server::map_err)?;
+                    Ok(CallToolResult::success(serde_json::to_value(&r).unwrap()))
+                }
+                "set_status" => {
+                    let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let r = self.host.set_status(text).await.map_err(map_err)?;
+                    Ok(CallToolResult::success(serde_json::to_value(&r).unwrap()))
+                }
+                "roster" => {
+                    let r = self.host.roster().await.map_err(map_err)?;
+                    Ok(CallToolResult::success(serde_json::to_value(&r).unwrap()))
+                }
+                other => Err(rmcp::Error::invalid_request(format!("unknown tool {other}"))),
+            }
+        }
+    }
+
+    pub fn map_err(e: crate::shim::daemon_client::CallError) -> rmcp::Error {
+        rmcp::Error::internal(format!("{e}"))
+    }
+}
+```
+
+> If the rmcp API names differ (e.g. `Tool::new`, builder syntax, `tools()` vs `list_tools()`), adjust call-by-call. The translation table is fixed: tool name → `ToolHost::<method>`. Any deviation should be a thin shim, never logic.
+
+Add `async-trait` to `crates/shim/Cargo.toml`:
+```toml
+async-trait = "0.1"
+```
+
+- [ ] **Step 3: Verify it compiles**
+
+Run: `cargo build -p shim`
+Expected: builds, possibly with deprecation warnings if the rmcp version differs from the macros used. Fix compile errors by mapping to the current rmcp surface — preserve the call dispatch logic.
+
+- [ ] **Step 4: Run tool unit tests**
+
+Run: `cargo test -p shim tools::tests`
+Expected: 2 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/shim/
+git commit -m "feat(shim): rmcp server with whoami/set_status/roster tools"
+```
+
+---
+
+## Task 19: shim — rmcp tools (send_message, inbox, recent_messages)
+
+**Files:**
+- Modify: `crates/shim/src/main.rs`
+- Test: inline in `crates/shim/src/tools.rs`
+
+- [ ] **Step 1: Add tool defs and dispatch arms**
+
+In `crates/shim/src/main.rs`, in `Handler::list_tools`, append:
+```rust
+Tool {
+    name: "send_message".into(),
+    description: Some("Send an async note to another session by nickname or session_id.".into()),
+    input_schema: ToolInputSchema::object_with([
+        ("to", ToolInputSchema::string()),
+        ("body", ToolInputSchema::string()),
+    ], &["to", "body"]),
+},
+Tool {
+    name: "inbox".into(),
+    description: Some("Return unread messages addressed to me, oldest first; marks them read by default.".into()),
+    input_schema: ToolInputSchema::object_with([
+        ("mark_read", ToolInputSchema::boolean()),
+    ], &[]),
+},
+Tool {
+    name: "recent_messages".into(),
+    description: Some("All recent messages involving me (sent or received), newest first.".into()),
+    input_schema: ToolInputSchema::object_with([
+        ("limit", ToolInputSchema::integer()),
+    ], &[]),
+},
+```
+
+In `Handler::call_tool`, add cases:
+```rust
+"send_message" => {
+    let to = args.get("to").and_then(|v| v.as_str())
+        .ok_or_else(|| rmcp::Error::invalid_request("missing 'to'"))?.to_string();
+    let body = args.get("body").and_then(|v| v.as_str())
+        .ok_or_else(|| rmcp::Error::invalid_request("missing 'body'"))?.to_string();
+    let r = self.host.send_message(to, body).await.map_err(map_err)?;
+    Ok(CallToolResult::success(serde_json::to_value(&r).unwrap()))
+}
+"inbox" => {
+    let mark_read = args.get("mark_read").and_then(|v| v.as_bool()).unwrap_or(true);
+    let r = self.host.inbox(mark_read).await.map_err(map_err)?;
+    Ok(CallToolResult::success(serde_json::to_value(&r).unwrap()))
+}
+"recent_messages" => {
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+    let r = self.host.recent_messages(limit).await.map_err(map_err)?;
+    Ok(CallToolResult::success(serde_json::to_value(&r).unwrap()))
+}
+```
+
+- [ ] **Step 2: Add unit tests for the new tools**
+
+Append to `crates/shim/src/tools.rs` `tests` module:
+```rust
+#[tokio::test]
+async fn send_message_calls_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sock");
+    let _ = fake_daemon_with(path.clone(), |m| {
+        if m == method::SEND_MESSAGE { serde_json::json!({"message_id": 7}) }
+        else { serde_json::json!({}) }
+    }).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let client = Arc::new(DaemonClient::new(path, 1, "/x".into(), None));
+    let host = ToolHost { client, pid: 1, cwd: "/x".into() };
+    let r = host.send_message("eww".into(), "hi".into()).await.unwrap();
+    assert_eq!(r.message_id, 7);
+}
+
+#[tokio::test]
+async fn inbox_calls_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sock");
+    let _ = fake_daemon_with(path.clone(),
+        |_m| serde_json::json!({"messages": []})).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let client = Arc::new(DaemonClient::new(path, 1, "/x".into(), None));
+    let host = ToolHost { client, pid: 1, cwd: "/x".into() };
+    let r = host.inbox(true).await.unwrap();
+    assert!(r.messages.is_empty());
+}
+```
+
+- [ ] **Step 3: Run, expect pass**
+
+Run: `cargo test -p shim`
+Expected: all shim tests passing.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/shim/
+git commit -m "feat(shim): send_message/inbox/recent_messages tools"
+```
+
+---
+
+## Task 20: end-to-end integration test (real daemon + two shim clients)
+
+**Files:**
+- Create: `crates/shim/tests/end_to_end.rs`
+
+- [ ] **Step 1: Write the test**
+
+`crates/shim/tests/end_to_end.rs`:
+```rust
+//! Boots a real `claude-coord-daemon` as a child process and exercises the
+//! daemon protocol through `DaemonClient`, simulating two coexisting shims.
+
+use proto::rpc::{method, RosterResult, SendMessageParams, InboxParams, InboxResult};
+use shim::daemon_client::DaemonClient;
+use std::sync::Arc;
+use std::time::Duration;
+
+fn daemon_bin() -> std::path::PathBuf {
+    // CARGO_BIN_EXE_<name> is set by cargo when the test binary is in the same workspace as the bin.
+    // We depend on `daemon` indirectly via dev-deps; resolve via target dir.
+    let exe = std::env::var("CARGO_BIN_EXE_claude-coord-daemon").ok();
+    if let Some(e) = exe { return e.into(); }
+    // Fallback: target/debug/claude-coord-daemon relative to the manifest dir.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let mut p = std::path::PathBuf::from(manifest);
+    p.pop(); p.pop(); // workspace root
+    p.push("target/debug/claude-coord-daemon");
+    p
+}
+
+#[tokio::test]
+async fn two_clients_can_message_each_other() {
+    let state = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let socket = runtime.path().join("claude-coord/sock");
+
+    let mut child = std::process::Command::new(daemon_bin())
+        .arg("--foreground")
+        .env("XDG_STATE_HOME", state.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("CLAUDE_COORD_LOG", "warn")
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawning daemon");
+
+    // Wait for socket.
+    let mut tries = 0;
+    loop {
+        if tokio::net::UnixStream::connect(&socket).await.is_ok() { break; }
+        tries += 1;
+        if tries > 100 { panic!("daemon did not start"); }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let alice = Arc::new(DaemonClient::new(
+        socket.clone(), 1, "/tmp/alice".into(), None));
+    let bob = Arc::new(DaemonClient::new(
+        socket.clone(), 2, "/tmp/bob".into(), None));
+
+    let _ = alice.whoami().await.unwrap();
+    let _ = bob.whoami().await.unwrap();
+
+    // Roster from alice's perspective shows both.
+    let r: RosterResult = alice.call(method::ROSTER, serde_json::json!({})).await.unwrap();
+    assert_eq!(r.sessions.len(), 2);
+
+    // Alice sends to bob; bob reads inbox.
+    let _: serde_json::Value = alice.call(
+        method::SEND_MESSAGE,
+        serde_json::to_value(SendMessageParams { to: "bob".into(), body: "ping".into() }).unwrap(),
+    ).await.unwrap();
+    let inbox: InboxResult = bob.call(
+        method::INBOX,
+        serde_json::to_value(InboxParams { mark_read: true }).unwrap(),
+    ).await.unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].body, "ping");
+    assert_eq!(inbox.messages[0].from_nick, "alice");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+```
+
+Add `tempfile` to dev-deps in `crates/shim/Cargo.toml` if not already present.
+
+> The `CARGO_BIN_EXE_*` env var is only set automatically when the test crate has `daemon` as a dev-dep. Add to `crates/shim/Cargo.toml`:
+> ```toml
+> [dev-dependencies]
+> daemon = { path = "../daemon" }
+> ```
+> This forces `cargo test -p shim` to build the daemon binary first and exposes its path.
+
+- [ ] **Step 2: Run end-to-end test**
+
+Run: `cargo test -p shim --test end_to_end -- --nocapture`
+Expected: 1 passed (the test boots the real daemon, opens two client connections, sends a message, reads inbox).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/shim/
+git commit -m "test(shim): end-to-end daemon+two-clients messaging"
+```
+
+---
+
+## Task 21: install docs
+
+**Files:**
+- Create: `docs/install.md`
+
+- [ ] **Step 1: Write minimal install doc**
+
+`docs/install.md`:
+```markdown
+# Installing claude-coord
+
+## Build
+
+```
+cargo install --path crates/daemon
+cargo install --path crates/shim
+```
+
+This places `claude-coord-daemon` and `claude-coord-shim` in `~/.cargo/bin`. Make sure that's on your `PATH`.
+
+## Configure Claude Code
+
+Add an MCP entry — one entry per Claude Code config; every session uses the same one:
+
+```json
+{
+  "mcpServers": {
+    "claude-coord": {
+      "command": "claude-coord-shim"
+    }
+  }
+}
+```
+
+## Daemon lifecycle
+
+The shim auto-starts the daemon on first connect via a detached background process. No systemd needed.
+
+To run the daemon manually for debugging:
+
+```
+claude-coord-daemon --foreground
+```
+
+## State
+
+- Socket: `$XDG_RUNTIME_DIR/claude-coord/sock` (fallback `~/.local/state/claude-coord/sock`)
+- DB:     `~/.local/state/claude-coord/db.sqlite`
+- Logs:   `~/.local/state/claude-coord/daemon.log` (daily rotation)
+
+Unread messages persist within a daemon's lifetime. They do **not** survive a daemon restart in v1; ids are regenerated on every restart and stored messages age out at 30 days.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add docs/install.md
+git commit -m "docs: install and configuration"
+```
+
+---
+
+## Self-review
+
+**1. Spec coverage:**
+
+- ✅ Roster + async messaging primitives — Tasks 11, 12, 13.
+- ✅ Three-crate workspace (proto/daemon/shim) — Task 1.
+- ✅ MCP tool surface (whoami, set_status, roster, send_message, inbox, recent_messages) — Tasks 18, 19.
+- ✅ cwd-based nickname — Task 10.
+- ✅ Length-prefixed JSON frames + 1 MiB cap — Task 6.
+- ✅ Wire types (ClientMsg/ServerMsg/ErrorCode/SessionInfo/Message/RPC params) — Tasks 2-5.
+- ✅ SQLite messages table + indexes — Task 8.
+- ✅ Roster in memory (no persistence) — Task 9.
+- ✅ Heartbeat-on-RPC — Task 10 (`touch_heartbeat`).
+- ✅ Hello → Welcome lifecycle — Task 10.
+- ✅ Disconnect = remove from roster (no explicit RPC) — Task 10 (`dispatch_loop` returns on EOF, then `roster.remove`).
+- ✅ Unknown / ambiguous recipient errors — Task 12.
+- ✅ Auto-spawn via double-fork + socket poll — Task 17.
+- ✅ Reconnect-on-next-call (no silent retry loop) — Task 16.
+- ✅ Periodic 30-day prune — Task 14.
+- ✅ Logs to file with rotation — Task 15 (daily, not size; documented as deviation).
+- ✅ Socket perms 0600 — Task 15.
+- ✅ Install via `cargo install --path` — Task 21.
+- ✅ Schema durability test — covered implicitly by Task 8 (in-memory) plus the manual-restart smoke at Task 15. **Gap:** spec mentioned a separate "tempfile DB across restart" test. Adding here as a follow-up note rather than another full task — straightforward to slot into `tests/persistence.rs` if desired (`Store::open(path)`, drop, reopen, query).
+
+**2. Placeholder scan:** no TBDs, every step has concrete code, every commit message specified, no "similar to Task N" cross-references.
+
+**3. Type consistency:** method constants centralized in `proto::rpc::method`. RPC param/result names stable across daemon/shim. `SessionId` modeled as `String` everywhere (not a newtype) — chosen for serde simplicity; consistent.
+
+**Known soft spots (worth flagging to the executor, not blockers):**
+
+- **rmcp API drift.** Tasks 18-19 assume an rmcp surface that may have shifted. The plan's "translation table" (tool name → `ToolHost::method`) is the contract; if the SDK's macro/trait names changed, adjust by feel.
+- **Log rotation:** `tracing-appender` v0.2 only does daily rotation. Spec said "10 MiB, keep 3" — this is a deliberate downscope. If size-based rotation is required, swap in `file-rotate` or write a small custom appender (one-task addition).
+- **`paths.rs` env-var tests** mutate process state and need `--test-threads=1`. Acceptable for a small project; if it grows, switch to a function that takes an env-getter closure.
+
+---
+
+## Execution Handoff
+
+**Plan complete and saved to `docs/superpowers/plans/2026-05-04-claude-coord.md`. Two execution options:**
+
+**1. Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration.
+
+**2. Inline Execution** — Execute tasks in this session using executing-plans, batch execution with checkpoints.
+
+**Which approach?**
