@@ -22,7 +22,7 @@ use myko::{
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 const DEFAULT_MYKO_ADDRESS: &str = "ws://localhost:6155";
@@ -38,6 +38,17 @@ async fn main() -> Result<()> {
     log::info!("[claude-coord-shim] connecting to {myko_address}");
 
     let client = Arc::new(MykoClient::new());
+
+    // Register on_command::<NotifyChannel> *before* we connect, so daemon-
+    // pushed notifications that arrive between Session-SET and MCP-init are
+    // buffered into a channel rather than dropped. The drain task that
+    // forwards buffered notifications onto stdout is spawned later, once
+    // the MCP `Notifier` exists.
+    let (notify_tx, notify_rx) = mpsc::unbounded_channel::<NotifyChannel>();
+    let notify_guard = client.on_command::<NotifyChannel, _>(move |cmd, _responder| {
+        let _ = notify_tx.send(cmd);
+    });
+    Box::leak(Box::new(notify_guard));
 
     // Track connected status so we can defer the initial Session SET until
     // the WebSocket actually opens.
@@ -131,15 +142,20 @@ async fn main() -> Result<()> {
         tools: tools_def(),
     };
 
-    let on_initialized_client = Arc::clone(&client);
+    let notify_rx = Mutex::new(Some(notify_rx));
     mcp::serve_stdio(config, handler, move |notifier| {
-        let guard = on_initialized_client.on_command::<NotifyChannel, _>(
-            move |cmd, _responder| {
-                notifier.channel(cmd.content, cmd.meta);
-            },
-        );
-        Box::leak(Box::new(guard));
-        log::info!("[claude-coord-shim] NotifyChannel handler registered");
+        // Spawn a task that drains the NotifyChannel buffer and emits each
+        // one onto stdout via the MCP writer. The buffer accumulated any
+        // notifications that fired before MCP init (the role-init message
+        // for the very first Session SET, in particular).
+        if let Some(mut rx) = notify_rx.lock().ok().and_then(|mut g| g.take()) {
+            tokio::spawn(async move {
+                while let Some(cmd) = rx.recv().await {
+                    notifier.channel(cmd.content, cmd.meta);
+                }
+            });
+            log::info!("[claude-coord-shim] notification drain task started");
+        }
     })
     .await
 }
