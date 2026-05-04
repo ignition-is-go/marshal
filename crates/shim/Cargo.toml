@@ -1,0 +1,25 @@
+[package]
+name = "shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "claude-coord-shim"
+path = "src/main.rs"
+
+[dependencies]
+proto = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories = { workspace = true }
+nix = { workspace = true }
+rmcp = { version = "0.2", features = ["server", "transport-io"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
