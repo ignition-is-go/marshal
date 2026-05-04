@@ -48,11 +48,17 @@ async fn main() -> Result<()> {
 
     let mut sigterm = unix_signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
 
-    // Self-replacement detection: capture the binary's mtime at startup.
-    // A periodic timer compares it to the current on-disk mtime; if a newer
-    // binary has been installed (e.g. via `cargo install`), the daemon exits
-    // gracefully so the next shim connect respawns the fresh build.
-    let start_mtime = current_exe_mtime();
+    // Self-replacement detection: capture the binary's path and mtime at
+    // startup, then poll the path's on-disk mtime; if a newer binary has been
+    // installed (e.g. via `cargo install`), exit so the next shim connect
+    // respawns the fresh build.
+    //
+    // We snapshot the path here because once the file is replaced, Linux
+    // reports `current_exe()` as `<path> (deleted)`, and `fs::metadata` fails
+    // on that literal string. Holding the original path lets us re-stat the
+    // new file at the same location.
+    let exe_path = std::env::current_exe().ok();
+    let start_mtime = exe_path.as_ref().and_then(|p| read_mtime(p));
     let mut staleness_check = tokio::time::interval(Duration::from_secs(5));
     staleness_check.tick().await; // consume the immediate first tick
 
@@ -78,7 +84,7 @@ async fn main() -> Result<()> {
                 break;
             }
             _ = staleness_check.tick() => {
-                if binary_replaced(start_mtime) {
+                if binary_replaced(exe_path.as_deref(), start_mtime) {
                     info!("binary replaced on disk; exiting so the next connect can respawn");
                     break;
                 }
@@ -89,26 +95,21 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Read the mtime of the running binary. Returns `None` if anything fails;
-/// in that case staleness detection is silently disabled (we'd rather miss a
-/// reload than crash on a weird filesystem).
-fn current_exe_mtime() -> Option<SystemTime> {
-    let path = std::env::current_exe().ok()?;
+fn read_mtime(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-/// Return true if the binary's current on-disk mtime is newer than `start`.
-fn binary_replaced(start: Option<SystemTime>) -> bool {
-    let start = match start {
-        Some(t) => t,
-        None => return false,
-    };
-    let now_mtime = match current_exe_mtime() {
-        Some(t) => t,
-        None => return false,
-    };
-    now_mtime > start
+/// Return true if the binary at `path` has been replaced since `start`.
+/// Disabled (returns false) if either input is `None`.
+fn binary_replaced(path: Option<&std::path::Path>, start: Option<SystemTime>) -> bool {
+    let path = match path { Some(p) => p, None => return false };
+    let start = match start { Some(t) => t, None => return false };
+    match read_mtime(path) {
+        Some(now) => now > start,
+        None => false,
+    }
 }
+
 
 fn set_socket_perms(p: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
