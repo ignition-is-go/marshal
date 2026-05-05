@@ -15,7 +15,11 @@ use crossterm::{
 };
 use entities::{GetAllMessages, GetAllSessions, Message, Session};
 use hyphae::{Signal, Watchable};
-use myko::client::{ConnectionStatus, MykoClient};
+use myko::{
+    client::{ConnectionStatus, MykoClient},
+    entities::client::{Client, GetAllClients},
+};
+use std::collections::HashSet;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -47,6 +51,11 @@ struct Args {
 struct StateInner {
     sessions: Vec<Arc<Session>>,
     messages: Vec<Arc<Message>>,
+    /// Live `Client` entity ids, used to render per-session connected /
+    /// disconnected status. A session whose `client_id` is not in this
+    /// set has lost its WS connection (or the daemon was just restarted
+    /// and its shim hasn't reconnected yet).
+    live_clients: HashSet<String>,
     connected: bool,
     last_event: Option<String>,
 }
@@ -118,6 +127,20 @@ async fn main() -> Result<()> {
     sessions_cell.own(sessions_guard);
     // Keep the cell alive for the lifetime of the process.
     Box::leak(Box::new(sessions_cell));
+
+    let clients_cell = client.watch_query::<GetAllClients>(GetAllClients {});
+    let clients_state = state.clone();
+    let clients_guard = clients_cell.subscribe(move |signal| {
+        if let Signal::Value(value) = signal {
+            let live: HashSet<String> = (**value)
+                .iter()
+                .map(|c: &Arc<Client>| c.id.0.as_ref().to_string())
+                .collect();
+            clients_state.update(|s| s.live_clients = live);
+        }
+    });
+    clients_cell.own(clients_guard);
+    Box::leak(Box::new(clients_cell));
 
     let messages_cell = client.watch_query::<GetAllMessages>(GetAllMessages {});
     let messages_state = state.clone();
@@ -227,12 +250,27 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     } else {
         Style::default().fg(Color::Red)
     };
+    let live = snap
+        .sessions
+        .iter()
+        .filter(|s| {
+            s.client_id
+                .as_ref()
+                .map(|cid| snap.live_clients.contains(cid.0.as_ref()))
+                .unwrap_or(false)
+        })
+        .count();
     let line = Line::from(vec![
         Span::styled(dot, dot_style),
         Span::raw(" claude-coord-tui — "),
         Span::styled(
             format!("{} sessions", snap.sessions.len()),
             Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("({live} live)"),
+            Style::default().fg(Color::Green),
         ),
         Span::raw("  "),
         Span::styled(
@@ -248,6 +286,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let now = now_ms();
 
     let header = Row::new(vec![
+        RowCell::from("conn"),
         RowCell::from("nick"),
         RowCell::from("session"),
         RowCell::from("role"),
@@ -271,7 +310,22 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                     .style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
                 None => RowCell::from("—").style(Style::default().fg(Color::DarkGray)),
             };
+            // A session is "live" if its bound client_id resolves to a
+            // Client in the current GetAllClients snapshot. Sessions with
+            // no client_id at all (e.g. just-replayed from disk before a
+            // shim has rebound) also count as disconnected.
+            let live = s
+                .client_id
+                .as_ref()
+                .map(|cid| snap.live_clients.contains(cid.0.as_ref()))
+                .unwrap_or(false);
+            let conn_cell = if live {
+                RowCell::from("● live").style(Style::default().fg(Color::Green))
+            } else {
+                RowCell::from("○ off ").style(Style::default().fg(Color::DarkGray))
+            };
             Row::new(vec![
+                conn_cell,
                 RowCell::from(s.nickname.clone())
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 RowCell::from(s.id.to_string()).style(Style::default().fg(Color::Cyan)),
@@ -288,6 +342,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let table = Table::new(
         rows,
         [
+            Constraint::Length(7),
             Constraint::Length(16),
             Constraint::Length(14),
             Constraint::Length(16),
