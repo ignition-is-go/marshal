@@ -1,12 +1,16 @@
 //! claude-coord-daemon — myko coordination server.
 //!
 //! Single binary: spins up a myko `CellServer` over WebSocket and registers
-//! the entities defined in the `entities` crate. No persistence is wired up
-//! — a restart drops everything. Bind address is configurable so the server
-//! can be hosted remotely; clients (shims, TUIs, web UIs) point their
+//! the entities defined in the `entities` crate. Events are persisted to an
+//! append-only JSONL log under `$CLAUDE_COORD_STATE_DIR`
+//! (default `~/.local/state/claude-coord/events.jsonl`); on startup the log
+//! is replayed into the registry so sessions, messages, and role
+//! assignments survive daemon restarts. Bind address is configurable so the
+//! server can be hosted remotely; clients (shims, TUIs, web UIs) point their
 //! `MykoClient` at it.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use daemon::persister::{DiskPersister, default_state_dir};
 use myko_server::{BlackholePersister, CellServer};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -27,10 +31,38 @@ async fn main() -> Result<()> {
     entities::link();
     daemon::link();
 
+    let state_dir = default_state_dir();
+    let log_path = state_dir.join("events.jsonl");
+    let persister = Arc::new(
+        DiskPersister::new(&log_path)
+            .with_context(|| format!("opening event log at {}", log_path.display()))?,
+    );
+    log::info!("claude-coord-daemon event log: {}", log_path.display());
+
+    // Default = persist to disk. Client/Server entities are WS-bound and
+    // intentionally transient — overriding them to Blackhole keeps the log
+    // free of connection bookkeeping that would only confuse a restart
+    // (replayed Clients reference WS connections that no longer exist).
+    let blackhole: Arc<dyn myko::server::Persister> = Arc::new(BlackholePersister);
     let server = CellServer::builder()
         .with_bind_addr(bind_addr)
-        .with_default_persister(Arc::new(BlackholePersister))
+        .with_default_persister(persister.clone() as Arc<dyn myko::server::Persister>)
+        .with_persister_override("Client", blackhole.clone())
+        .with_persister_override("Server", blackhole)
         .build();
+
+    // Replay the log into the just-built server before we accept any
+    // connection — sagas and entity stores must reflect the on-disk
+    // history before clients can race against it.
+    let ctx = server.ctx();
+    let restored = persister
+        .replay(&ctx)
+        .with_context(|| format!("replaying event log {}", log_path.display()))?;
+    log::info!("claude-coord-daemon restored {restored} entities from disk");
+
+    // Spawn the periodic sweeper that DELs sessions whose bound client
+    // has been gone for more than `cleanup::STALE_AFTER`.
+    tokio::spawn(daemon::cleanup::run_sweeper(server.ctx()));
 
     log::info!("claude-coord-daemon listening on ws://{bind_addr}");
     server.run().await.map_err(|e| anyhow::anyhow!(e))?;
