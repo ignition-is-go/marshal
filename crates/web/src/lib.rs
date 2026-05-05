@@ -5,10 +5,9 @@
 //! No `Session` entity is created — like the TUI, the web UI is a watcher,
 //! not a participant.
 
-use entities::{GetAllMessages, GetAllSessions, SetSessionRole, SessionId};
+use entities::{GetAllMessages, GetAllSessions};
 use leptos::prelude::*;
 use leptos_meta::{Title, provide_meta_context};
-use std::sync::Arc;
 
 const DEFAULT_ADDRESS: &str = "localhost:6155";
 
@@ -81,10 +80,7 @@ fn SessionsCard(sessions: ReadSignal<Vec<std::sync::Arc<entities::Session>>>) ->
                                 <td><strong>{s.nickname.clone()}</strong></td>
                                 <td class="mono text-muted">{short_id(&s.id.0)}</td>
                                 <td class="role-cell">
-                                    <RoleSelect
-                                        session_id=s.id.clone()
-                                        current=s.role.clone()
-                                    />
+                                    <RoleBadge role=s.role.clone() />
                                 </td>
                                 <td class="mono text-subtle truncate">{s.cwd.clone()}</td>
                                 <td class="mono text-muted">{s.git_branch.clone().unwrap_or_else(|| "—".into())}</td>
@@ -98,41 +94,15 @@ fn SessionsCard(sessions: ReadSignal<Vec<std::sync::Arc<entities::Session>>>) ->
     }
 }
 
-/// Roles offered in the session dropdown. The empty string means "clear".
-const ROLE_OPTIONS: &[(&str, &str)] = &[
-    ("", "—"),
-    ("worker", "worker"),
-    ("task_distributor", "task_distributor"),
-    ("communicator", "communicator"),
-];
-
+/// Read-only role display. Roles are assigned by the daemon's classifier
+/// based on cwd; the web UI is a passive observer and cannot mutate them.
 #[component]
-fn RoleSelect(session_id: SessionId, current: Option<String>) -> impl IntoView {
-    let current_value = current.clone().unwrap_or_default();
-    let id_for_change = session_id.clone();
-
-    let on_change = move |ev: leptos::ev::Event| {
-        let value = leptos::prelude::event_target_value(&ev);
-        let role = if value.is_empty() {
-            None
-        } else {
-            Some(Arc::<str>::from(value.as_str()))
-        };
-        myko_leptos::send_command::<SetSessionRole, ()>(SetSessionRole {
-            id: id_for_change.clone(),
-            role,
-        });
-    };
-
-    view! {
-        <select class="role-select" on:change=on_change prop:value=current_value.clone()>
-            {ROLE_OPTIONS.iter().map(|(value, label)| {
-                let selected = *value == current_value;
-                view! {
-                    <option value=value.to_string() selected=selected>{label.to_string()}</option>
-                }
-            }).collect_view()}
-        </select>
+fn RoleBadge(role: Option<String>) -> impl IntoView {
+    match role {
+        Some(r) if !r.is_empty() => {
+            view! { <span class="badge role">{r}</span> }.into_any()
+        }
+        _ => view! { <span class="text-muted">"—"</span> }.into_any(),
     }
 }
 
