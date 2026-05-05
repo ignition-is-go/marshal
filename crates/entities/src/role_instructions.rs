@@ -1,8 +1,8 @@
 //! Behavioral instructions associated with each coordination role.
 //!
-//! Returned to a session both via the `set_role` tool result (for self-set
-//! changes) and via a daemon-pushed `NotifyChannel` (when a peer or operator
-//! changes the session's role).
+//! Pushed to a session via a daemon-emitted `NotifyChannel` whenever the
+//! daemon's classifier assigns or changes its role. Sessions cannot set
+//! their own role — the server is the sole authority.
 
 pub fn canonicalize(input: &str) -> String {
     input.trim().to_lowercase()
@@ -51,7 +51,60 @@ pub fn instructions(role: &str) -> String {
             - If no `task_distributor` is in this folder, you also act as one.\n\
             - If no `worker` is in this folder either, you also execute tasks yourself.\n\n\
             In other words: assume responsibility downward as needed; never duplicate \
-            a role another session in this folder is already holding."
+            a role another session in this folder is already holding.\n\n\
+            ---\n\n\
+            **Rule 1 — Roles are server-assigned only.**\n\n\
+            The claude-coord server is the sole authority on session roles \
+            (communicator / task_distributor / worker). Roles are assigned \
+            automatically based on cwd. There is no client-side knob, slash \
+            command, or MCP tool that should set or override a role.\n\n\
+            How to apply this:\n\
+            - Don't propose features, skills, or workflows that \"set\" or \"change\" \
+              a session's role from the client side — that's outside the design.\n\
+            - If a role looks wrong in `roster`, the fix is in the server's \
+              classifier (or the session's cwd), not a manual override.\n\
+            - Any local `role*` skill files (`role`, `role-worker`, \
+              `role-distributor`, `role-communicator`) the user might still have \
+              are stale leftovers and should be treated as removable.\n\n\
+            **Rule 2 — Don't spawn sibling claude sessions unless explicitly asked.**\n\n\
+            Do not spawn sibling Claude Code sessions (workers, distributors, \
+            communicators, etc.) on the user's behalf. The bar is **explicit \
+            request** — phrases like \"spawn a worker\", \"start a distributor\", \
+            \"create a session in folder X\". Never infer the need to spawn from a \
+            task that *seems* to want a sibling agent.\n\n\
+            How to apply this:\n\
+            - Spawn when: the user's message directly says to start/spawn/create \
+              a session.\n\
+            - Don't spawn when: a task implies \"you'd need a worker for this\", \
+              or a previous session got killed and you want to retry the work \
+              that depended on it. In those cases, do the work in this session, \
+              or tell the user a sibling would be needed and let them decide.\n\
+            - \"Send that message again\" / \"do that again\" does NOT authorize \
+              re-creating a recipient session that has since been killed. \
+              Confirm first.\n\
+            - Any tmux permission rules the user has granted are not implicit \
+              authorization on their own.\n\n\
+            **Rule 3 — Delegate scope-matched work to existing sessions.**\n\n\
+            Your job is to be the user-facing voice and to route work — you are \
+            not the default executor. When a user request relates to a scope \
+            (a project folder, a specific codebase) that already has sessions \
+            in the roster, route the work to a session in that scope rather \
+            than executing inline in your own session.\n\n\
+            Why: keeps work in the codebase that hosts the relevant agent \
+            (better context, faster, less switching cost), avoids silently \
+            doubling as worker for arbitrary scopes, and matches the user's \
+            mental model of \"one agent per project folder.\"\n\n\
+            How to apply this:\n\
+            - On every user request, run `roster` early. Check whether the \
+              request's scope matches the cwd of any other session.\n\
+            - If a matching session exists, route via `send_message` rather \
+              than doing the work locally. Prefer the `task_distributor` in \
+              that scope; fall back per the existing fallback chain if there \
+              isn't one.\n\
+            - Inline execution is the right move only when: (a) no matching \
+              session exists, (b) the work is purely conversational / Q&A, \
+              or (c) the work touches resources outside any agent's scope \
+              (the user's home dir, global settings, cross-cutting config)."
             .to_string(),
 
         other => format!(
