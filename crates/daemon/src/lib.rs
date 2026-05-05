@@ -5,6 +5,7 @@
 
 pub mod cleanup;
 pub mod persister;
+pub mod rebalance;
 pub mod saga;
 
 pub fn link() {

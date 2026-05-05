@@ -3,21 +3,27 @@
 //! Three sagas run inside the daemon:
 //! - `MessageNotifySaga` — when a peer SETs a `Message`, push a
 //!   `NotifyChannel` at the recipient's WebSocket client so the affected
-//!   Claude session sees a `<channel>` block.
-//! - `DefaultRoleSaga` — when a session is created (its first SET event)
-//!   with no role set, compute the default role for it (communicator /
-//!   task_distributor / worker, by population in the global roster and the
-//!   per-cwd subset) and dispatch `SetSessionRole` to apply it.
-//! - `RoleChangeNotifySaga` — when a session's role changes, push a
-//!   `NotifyChannel` at its client containing the curated instructions for
-//!   the new role, so the affected Claude adopts the new behavior.
+//!   Claude session sees a `<channel>` block. (`NotifyChannel` is reserved
+//!   for inter-agent message delivery; role state is purely declarative
+//!   on the `Session` entity and surfaced to Claude by the shim watching
+//!   its own session via `GetAllSessions`.)
+//! - `DefaultRoleSaga` — when a session is created (its first SET event
+//!   from this daemon's perspective), dispatch `RebalanceRoles` to
+//!   re-solve the global role assignment so every session — including
+//!   the new arrival — ends up with the correct role.
+//! - `RebalanceOnSessionDelSaga` — fires on **any** `Session` DEL (not
+//!   just task_distributor exits) and dispatches the global
+//!   `RebalanceRoles` command. The command re-solves the steady-state
+//!   role assignment for every remaining session: most-senior globally is
+//!   the communicator; most-senior per cwd is that folder's
+//!   task_distributor unless the communicator already lives there;
+//!   everyone else is a worker. Emits a Session SET only for sessions
+//!   whose role actually changes; the resulting Session entity is then
+//!   observed by each shim's local role watcher and surfaced to Claude.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock},
-};
+use std::sync::Arc;
 
-use entities::{Message, NotifyChannel, Session, SessionId, role_instructions};
+use entities::{Message, NotifyChannel, Session, SessionId};
 use hyphae::Gettable;
 use myko::{
     command::CommandRequest,
@@ -77,97 +83,14 @@ impl SagaHandler for MessageNotifySaga {
     }
 }
 
-// ─── Default-role assignment on session creation ────────────────────────────
-
-/// Tracks which sessions we've already considered for default-role assignment.
-/// We only auto-assign on the *first* SET we see for a session_id; later SETs
-/// (e.g. status updates, explicit role clears) don't trigger another
-/// assignment.
-fn seen_for_default_role() -> &'static Mutex<HashSet<Arc<str>>> {
-    static SEEN: OnceLock<Mutex<HashSet<Arc<str>>>> = OnceLock::new();
-    SEEN.get_or_init(|| Mutex::new(HashSet::new()))
-}
+// ─── Trigger global rebalance whenever a session arrives without a role ─────
 
 #[myko_saga]
 pub struct DefaultRoleSaga;
 
 impl SagaHandler for DefaultRoleSaga {
     type EventItem = Session;
-    type Command = entities::SetSessionRole;
-    const EVENT_TYPE: MEventType = MEventType::SET;
-
-    fn handle(
-        session: Session,
-        _event: MEvent,
-        ctx: Arc<SagaContext>,
-    ) -> Option<Self::Command> {
-        // First time we've seen this session id?
-        {
-            let mut seen = seen_for_default_role().lock().unwrap();
-            if !seen.insert(session.id.0.clone()) {
-                return None;
-            }
-        }
-
-        // Only auto-assign if the shim didn't supply one.
-        if session.role.is_some() {
-            return None;
-        }
-
-        let role = compute_default_role(&ctx, &session);
-        log::info!(
-            "[default-role] session {} (cwd {}) → {role}",
-            session.id.0,
-            session.cwd
-        );
-
-        Some(entities::SetSessionRole {
-            id: session.id.clone(),
-            role: Some(role.into()),
-        })
-    }
-}
-
-/// Default role per the rules:
-/// - first session anywhere → communicator
-/// - first session in this cwd → task_distributor
-/// - else → worker
-fn compute_default_role(ctx: &SagaContext, session: &Session) -> &'static str {
-    let Some(store) = ctx.registry.get(Session::ENTITY_NAME_STATIC) else {
-        return "communicator";
-    };
-    let entries = store.entries().get();
-    let others: Vec<Session> = entries
-        .into_iter()
-        .filter_map(|(_id, item)| downcast_item::<Session>(&item))
-        .filter(|s| s.id.0 != session.id.0)
-        .collect();
-
-    if others.is_empty() {
-        "communicator"
-    } else if !others.iter().any(|s| s.cwd == session.cwd) {
-        "task_distributor"
-    } else {
-        "worker"
-    }
-}
-
-// ─── Role-change → channel push ──────────────────────────────────────────────
-
-/// Last-known role per session id. We compare incoming SETs against this so
-/// we only fire `NotifyChannel` when the role *actually* changes (not on
-/// every status / read_at / unrelated mutation).
-fn last_known_roles() -> &'static Mutex<HashMap<Arc<str>, Option<String>>> {
-    static ROLES: OnceLock<Mutex<HashMap<Arc<str>, Option<String>>>> = OnceLock::new();
-    ROLES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[myko_saga]
-pub struct RoleChangeNotifySaga;
-
-impl SagaHandler for RoleChangeNotifySaga {
-    type EventItem = Session;
-    type Command = NotifyChannel;
+    type Command = crate::rebalance::RebalanceRoles;
     const EVENT_TYPE: MEventType = MEventType::SET;
 
     fn handle(
@@ -175,45 +98,55 @@ impl SagaHandler for RoleChangeNotifySaga {
         _event: MEvent,
         _ctx: Arc<SagaContext>,
     ) -> Option<Self::Command> {
-        let new_role = session.role.clone();
-        {
-            let mut state = last_known_roles().lock().unwrap();
-            // Flatten Option<Option<_>> so "never seen" and "seen with None"
-            // both compare as None — that way the first SET (role=None) does
-            // not fire a spurious "cleared" notification.
-            let prev_role: Option<String> = state.get(&session.id.0).cloned().flatten();
-            if prev_role == new_role {
-                return None;
-            }
-            state.insert(session.id.0.clone(), new_role.clone());
+        // Fire whenever the post-SET role is None. That covers:
+        //   - a brand-new session arriving for the first time,
+        //   - a shim reconnect that re-published its `Session` with role
+        //     blanked back out (the shim is intentionally not the source
+        //     of truth on roles, so its full-Session SETs always carry
+        //     `role: None`),
+        //   - a daemon restart whose persister loaded sessions but lost
+        //     in-memory saga state.
+        //
+        // RebalanceRoles is idempotent: it only emits Session SETs for
+        // sessions whose role *actually* changes, so the SET emitted by
+        // a successful rebalance lands here with `role: Some(_)` and the
+        // loop terminates after exactly one cycle. Status updates flow
+        // through `SetSessionCurrentTask` (a partial-update setter) which
+        // preserves the role field, so they don't kick the rebalance.
+        if session.role.is_some() {
+            return None;
         }
-
-        let client_id = session.client_id.as_ref()?;
-        let canonical = new_role
-            .as_deref()
-            .map(role_instructions::canonicalize)
-            .unwrap_or_default();
-        let instructions = role_instructions::instructions(&canonical);
-
-        let content = if canonical.is_empty() {
-            format!("claude-coord: your role has been cleared.\n\n{instructions}")
-        } else {
-            format!(
-                "claude-coord: your role was set to '{canonical}'.\n\n{instructions}"
-            )
-        };
-
-        dispatch_notify_channel(
-            client_id.0.as_ref(),
-            content,
-            serde_json::json!({
-                "source": "claude-coord",
-                "kind": "role_changed",
-                "role": canonical,
-            }),
+        log::info!(
+            "[default-role] session {} in {} has no role; triggering rebalance",
+            session.id.0,
+            session.cwd,
         );
+        Some(crate::rebalance::RebalanceRoles {})
+    }
+}
 
-        None
+// ─── Global rebalance on any session DEL ────────────────────────────────────
+
+#[myko_saga]
+pub struct RebalanceOnSessionDelSaga;
+
+impl SagaHandler for RebalanceOnSessionDelSaga {
+    type EventItem = Session;
+    type Command = crate::rebalance::RebalanceRoles;
+    const EVENT_TYPE: MEventType = MEventType::DEL;
+
+    fn handle(
+        deleted: Session,
+        _event: MEvent,
+        _ctx: Arc<SagaContext>,
+    ) -> Option<Self::Command> {
+        log::info!(
+            "[rebalance-on-del] session {} (role {:?}, cwd {}) left; triggering global rebalance",
+            deleted.id.0,
+            deleted.role,
+            deleted.cwd,
+        );
+        Some(crate::rebalance::RebalanceRoles {})
     }
 }
 
@@ -225,7 +158,11 @@ fn dispatch_notify_channel(client_id: &str, content: String, meta: serde_json::V
     let request = CommandRequest::new(cmd);
     let dispatched = registry.send_command_request_to(client_id, &request);
     if !dispatched {
-        log::debug!("notify_channel: client {client_id} not connected; dropping");
+        log::warn!(
+            "[notify_channel] client {client_id} not in client_registry; dropping notification"
+        );
+    } else {
+        log::debug!("[notify_channel] dispatched to client {client_id}");
     }
 }
 
