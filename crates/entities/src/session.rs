@@ -1,13 +1,15 @@
-use myko::{entities::client::{Client, ClientId}, myko_item};
+use myko::{entities::client::ClientId, myko_item};
 
 #[myko_item]
 pub struct Session {
-    /// WebSocket client this session is bound to. Cascade-deleted when the
-    /// client disconnects, so dropped shims naturally fall off the roster.
-    /// Auto-populated by the server from the WS connection — clients send
-    /// the SET command without providing it.
+    /// WebSocket client this session is currently bound to. Auto-populated
+    /// by the server from the WS connection — clients send the SET command
+    /// without providing it. There is intentionally no `belongs_to(Client)`
+    /// cascade: sessions are durable roster entries that survive
+    /// disconnects (and daemon restarts, via the disk persister). Whether
+    /// a session's shim is currently live is determined by looking up
+    /// `client_id` in the Client store; absent there ⇒ disconnected.
     #[myko_client_id]
-    #[belongs_to(Client)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<ClientId>,
 
