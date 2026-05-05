@@ -12,12 +12,11 @@ mod tools;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use entities::{GetAllSessions, NotifyChannel, Session, SessionId};
-use hyphae::Watchable;
+use entities::{GetAllSessions, NotifyChannel, Session, SessionId, role_instructions};
+use hyphae::{Signal, Watchable};
 use mcp::{ServerConfig, ToolDef};
 use myko::{
     client::{ConnectionStatus, MykoClient},
-    core::item::Eventable,
     wire::{MEvent, MEventType},
 };
 use serde_json::{Value, json};
@@ -45,8 +44,9 @@ async fn main() -> Result<()> {
     // forwards buffered notifications onto stdout is spawned later, once
     // the MCP `Notifier` exists.
     let (notify_tx, notify_rx) = mpsc::unbounded_channel::<NotifyChannel>();
+    let notify_tx_oncmd = notify_tx.clone();
     let notify_guard = client.on_command::<NotifyChannel, _>(move |cmd, _responder| {
-        let _ = notify_tx.send(cmd);
+        let _ = notify_tx_oncmd.send(cmd);
     });
     Box::leak(Box::new(notify_guard));
 
@@ -78,6 +78,74 @@ async fn main() -> Result<()> {
     };
     let session = Arc::new(Mutex::new(session));
 
+    // Open every query/subscription BEFORE we ask the client to connect.
+    // Once `set_address` returns, the WS handshake races the rest of this
+    // setup; if the handshake wins, the `Connected` callback fires and
+    // emits our first Session SET, which kicks off classification on the
+    // daemon and produces a `NotifyChannel` role assignment. If our
+    // queries / on_command handlers aren't all registered by then, the
+    // first round of state can be missed (e.g. the role notification
+    // arrives before there's a place to receive it). Registering them
+    // pre-connect closes that window.
+    //
+    // The long-lived `GetAllSessions` cell — kept hot so tools that
+    // snapshot it (roster, send_message recipient resolution) don't
+    // race the server's first response.
+    let sessions_cell = client.watch_query::<GetAllSessions>(GetAllSessions {});
+
+    // Local role watcher: surface our own role to Claude as a
+    // `NotifyChannel`-style notification whenever it changes. The daemon
+    // also pushes `NotifyChannel` for role changes via
+    // `RoleChangeNotifySaga`, but shim-side detection is a resilient
+    // backup: it doesn't depend on the daemon-side
+    // `client_registry.send_command_request_to(...)` resolving to a live
+    // writer at the exact moment classification fires. We dedupe on
+    // last-seen role so the daemon push and this push don't both surface
+    // the same change to Claude.
+    let last_role: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let last_role_watch = Arc::clone(&last_role);
+    let session_id_watch = session_id.clone();
+    let notify_tx_watch = notify_tx.clone();
+    let role_guard = sessions_cell.subscribe(move |signal| {
+        let Signal::Value(value) = signal else { return };
+        let Some(my_session) = value
+            .iter()
+            .find(|s| s.id.0.as_ref() == session_id_watch.0.as_ref())
+        else {
+            return;
+        };
+        let new_role = my_session.role.clone();
+        {
+            let mut last = last_role_watch.lock().unwrap();
+            if *last == new_role {
+                return;
+            }
+            *last = new_role.clone();
+        }
+        let canonical = new_role
+            .as_deref()
+            .map(role_instructions::canonicalize)
+            .unwrap_or_default();
+        let instructions = role_instructions::instructions(&canonical);
+        let content = if canonical.is_empty() {
+            format!("claude-coord: your role has been cleared.\n\n{instructions}")
+        } else {
+            format!(
+                "claude-coord: your role was set to '{canonical}'.\n\n{instructions}"
+            )
+        };
+        let cmd = NotifyChannel {
+            content,
+            meta: serde_json::json!({
+                "source": "claude-coord",
+                "kind": "role_changed",
+                "role": canonical,
+            }),
+        };
+        let _ = notify_tx_watch.send(cmd);
+    });
+    sessions_cell.own(role_guard);
+
     // Re-SET our Session on every connect. The daemon holds session state
     // in-memory, so a daemon restart drops every roster entry; we have to
     // re-publish on reconnect or peers can't see us anymore. This also
@@ -103,13 +171,10 @@ async fn main() -> Result<()> {
         }
     });
     client.connection_status().own(conn_guard);
-    client.set_address(Some(myko_address));
 
-    // Open the long-lived sessions subscription before we start serving MCP.
-    // The cell starts empty and fills in once the server responds; tools
-    // that snapshot it (roster, send_message recipient resolution) need it
-    // hot, not freshly-opened on every call.
-    let sessions_cell = client.watch_query::<GetAllSessions>(GetAllSessions {});
+    // All queries / handlers / connection subscribers are registered.
+    // Now it's safe to start the WS handshake.
+    client.set_address(Some(myko_address));
 
     let host = Arc::new(tools::ToolHost {
         client: Arc::clone(&client),
@@ -128,9 +193,11 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION").into(),
         instructions: format!(
             "Coordinate with sibling Claude sessions via the claude-coord daemon. \
-             Tools: whoami, set_status, set_role, roster, send_message. You are \
+             Tools: whoami, set_status, roster, send_message. You are \
              session '{nickname}' (id {}). New messages addressed to you arrive \
-             as notifications/claude/channel events.",
+             as notifications/claude/channel events. Your role on the roster is \
+             assigned automatically by the daemon based on your cwd — there is \
+             no client-side way to set or change it.",
             session_id.0
         ),
         tools: tools_def(),
@@ -140,8 +207,8 @@ async fn main() -> Result<()> {
     mcp::serve_stdio(config, handler, move |notifier| {
         // Spawn a task that drains the NotifyChannel buffer and emits each
         // one onto stdout via the MCP writer. The buffer accumulated any
-        // notifications that fired before MCP init (the role-init message
-        // for the very first Session SET, in particular).
+        // notifications that fired before MCP init (the daemon's role
+        // assignment for the very first Session SET, in particular).
         if let Some(mut rx) = notify_rx.lock().ok().and_then(|mut g| g.take()) {
             tokio::spawn(async move {
                 while let Some(cmd) = rx.recv().await {
@@ -225,19 +292,6 @@ fn tools_def() -> Vec<ToolDef> {
                     }
                 }),
                 &["text"],
-            ),
-        },
-        ToolDef {
-            name: "set_role".into(),
-            description: "Assign this session a role and receive behavioral instructions to follow going forward. The tool result is a directive — read and follow it before doing anything else.".into(),
-            input_schema: schema_object(
-                json!({
-                    "role": {
-                        "type": "string",
-                        "description": "Role name. Built-ins: 'worker', 'task_distributor' (alias 'distributor'), 'communicator'. Empty string clears."
-                    }
-                }),
-                &["role"],
             ),
         },
         ToolDef {

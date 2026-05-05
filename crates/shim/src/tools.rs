@@ -4,11 +4,10 @@ use crate::mcp::{
     INVALID_PARAMS, METHOD_NOT_FOUND, Notifier, ToolError, ToolFuture, ToolHandler, ToolOutcome,
 };
 use chrono::Utc;
-use entities::{GetAllSessions, Message, MessageId, Session, SessionId, role_instructions};
+use entities::{Message, MessageId, Session, SessionId, SetSessionCurrentTask};
 use hyphae::{Cell, CellImmutable, Gettable};
 use myko::{
     client::MykoClient,
-    core::item::Eventable,
     wire::{MEvent, MEventType},
 };
 use serde_json::{Value, json};
@@ -21,9 +20,10 @@ pub struct ToolHost {
     pub nickname: String,
     pub pid: u32,
     pub cwd: String,
-    /// The shim's local copy of its Session entity. Mutations (set_status,
-    /// set_role) update this and re-emit a SET event so the server's view
-    /// stays in sync.
+    /// The shim's local copy of its Session entity. Mutations (set_status)
+    /// update this and re-emit a SET event so the server's view stays in
+    /// sync. The `role` field is owned by the server (assigned by the
+    /// daemon's classifier), so the shim never writes to it.
     pub session: Arc<Mutex<Session>>,
     /// Long-lived `GetAllSessions` subscription. We hold this so the cell
     /// is kept warm across tool calls — otherwise creating it inside
@@ -53,44 +53,38 @@ impl ToolHandler for CoordHandler {
                     "cwd": host.cwd,
                 }))),
 
-                "set_role" => {
-                    let role = args
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| ToolError::invalid_params("set_role: missing `role`"))?
-                        .to_string();
-                    let canonical = role_instructions::canonicalize(&role);
-                    let instructions = role_instructions::instructions(&canonical);
-
-                    // Mutate our local session and re-emit. Empty string clears.
-                    {
-                        let mut sess = host.session.lock().unwrap();
-                        sess.role = if canonical.is_empty() {
-                            None
-                        } else {
-                            Some(canonical.clone())
-                        };
-                        emit_session_set(&host.client, &sess)
-                            .map_err(|e| ToolError::internal(format!("set_role: {e}")))?;
-                    }
-
-                    Ok(ToolOutcome::Json(json!({
-                        "role": canonical,
-                        "instructions": instructions,
-                    })))
-                }
-
                 "set_status" => {
                     let text = args
                         .get("text")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| ToolError::invalid_params("set_status: missing `text`"))?
                         .to_string();
+                    // Dispatch the auto-generated `SetSessionCurrentTask`
+                    // setter command rather than emitting a full Session
+                    // SET. A full SET would include `role: None` (the
+                    // shim's local default — the shim is intentionally
+                    // not the source of truth on roles), which would
+                    // clobber whatever role the daemon's classifier had
+                    // already assigned. The setter command is a partial
+                    // update server-side, so other fields (role,
+                    // client_id, connected_at) are preserved.
+                    let new_task = if text.is_empty() {
+                        None
+                    } else {
+                        Some(Arc::<str>::from(text.as_str()))
+                    };
+                    let _resp = host.client.send_command::<SetSessionCurrentTask, ()>(
+                        &SetSessionCurrentTask {
+                            id: host.session_id.clone(),
+                            current_task: new_task,
+                        },
+                    );
+                    // Keep our local mirror in sync so subsequent
+                    // reconnect re-SETs (which still send the full
+                    // entity, by design) include the latest text.
                     {
                         let mut sess = host.session.lock().unwrap();
                         sess.current_task = if text.is_empty() { None } else { Some(text) };
-                        emit_session_set(&host.client, &sess)
-                            .map_err(|e| ToolError::internal(format!("set_status: {e}")))?;
                     }
                     Ok(ToolOutcome::Json(json!({ "ok": true })))
                 }
@@ -199,11 +193,6 @@ fn resolve_recipient(
         });
     }
     None
-}
-
-fn emit_session_set(client: &MykoClient, session: &Session) -> Result<(), String> {
-    let event = MEvent::from_item(session, MEventType::SET, &Uuid::new_v4().to_string());
-    client.send_event(event)
 }
 
 #[allow(dead_code)]
