@@ -21,3 +21,12 @@ myko = { workspace = true }
 myko-server = { workspace = true }
 hyphae = { workspace = true }
 entities = { workspace = true }
+notify-debouncer-mini = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+serde_json = "1"
+chrono = { workspace = true }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+hyphae = { workspace = true }

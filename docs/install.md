@@ -1,4 +1,4 @@
-# Installing claude-coord
+# Installing marshal
 
 ## Build
 
@@ -7,7 +7,7 @@ cargo install --path crates/daemon
 cargo install --path crates/shim
 ```
 
-This places `claude-coord-daemon` and `claude-coord-shim` in `~/.cargo/bin`. Make sure that's on your `PATH`.
+This places `marshal-daemon` and `marshal-shim` in `~/.cargo/bin`. Make sure that's on your `PATH`.
 
 ## Configure Claude Code
 
@@ -16,8 +16,8 @@ Add an MCP entry — one entry per Claude Code config; every session uses the sa
 ```json
 {
   "mcpServers": {
-    "claude-coord": {
-      "command": "claude-coord-shim"
+    "marshal": {
+      "command": "marshal-shim"
     }
   }
 }
@@ -30,13 +30,30 @@ The shim auto-starts the daemon on first connect via a detached background proce
 To run the daemon manually for debugging:
 
 ```
-claude-coord-daemon --foreground
+marshal-daemon --foreground
 ```
 
 ## State
 
-- Socket: `$XDG_RUNTIME_DIR/claude-coord/sock` (fallback `~/.local/state/claude-coord/sock`)
-- DB:     `~/.local/state/claude-coord/db.sqlite`
-- Logs:   `~/.local/state/claude-coord/daemon.log` (daily rotation)
+- Socket: `$XDG_RUNTIME_DIR/marshal/sock` (fallback `~/.local/state/marshal/sock`)
+- DB:     `~/.local/state/marshal/db.sqlite`
+- Logs:   `~/.local/state/marshal/daemon.log` (daily rotation)
 
-Unread messages persist within a daemon's lifetime. They do **not** survive a daemon restart in v1; ids are regenerated on every restart and stored messages age out at 30 days.
+## Coordinating with peers
+
+Each Claude session that connects via `marshal-shim` shows up on the
+roster with a unique nickname (the shim's cwd basename, with `-N`
+appended on collision). Sessions coordinate by sending free-form
+messages to each other:
+
+- `roster` — list every live session with its nickname, cwd, branch,
+  and current status text.
+- `send_message` — deliver a message to another session by nickname or
+  id. Inbound messages surface as `notifications/claude/channel`
+  events, so the recipient sees them mid-conversation without polling.
+- `set_status` — publish a free-form line about what this session is
+  currently doing; visible to all peers via `roster`.
+- `whoami` — your own session id / nickname / cwd.
+
+That's the whole surface. Asking a peer a question, splitting work,
+flagging a blocker — all of it goes through `send_message`.

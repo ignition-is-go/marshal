@@ -1,4 +1,4 @@
-# claude-coord — design
+# marshal — design
 
 ## Goal
 
@@ -17,7 +17,7 @@ A long-running per-user daemon owns the shared state. Each Claude Code session l
 Claude Code session A ──┐
                         ├── stdio MCP shim A ──┐
 Claude Code session B ──┤                       │   unix socket
-                        ├── stdio MCP shim B ──┼─────────────────► claude-coord-daemon
+                        ├── stdio MCP shim B ──┼─────────────────► marshal-daemon
 Claude Code session C ──┘                       │                   (roster + SQLite inbox)
                         └── stdio MCP shim C ──┘
 ```
@@ -25,7 +25,7 @@ Claude Code session C ──┘                       │                   (ros
 Shim and daemon are separate Rust binaries in one workspace.
 
 ```
-claude-coord/
+marshal/
 ├── crates/
 │   ├── proto/      # shared wire types (serde) + length-prefixed framing
 │   ├── daemon/     # long-running tokio binary, owns state
@@ -66,7 +66,7 @@ Identity is `(session_id, nickname)`.
 - `roster: HashMap<SessionId, SessionInfo>` where `SessionInfo` is `{ nickname, pid, cwd, git_branch, current_task, connected_at, last_heartbeat }`.
 - A tokio `broadcast` channel for "roster changed" / "new message" events. Unused by v1 tools but plumbed for future push-style features.
 
-**Persistent (SQLite at `~/.local/state/claude-coord/db.sqlite`):**
+**Persistent (SQLite at `~/.local/state/marshal/db.sqlite`):**
 
 ```sql
 CREATE TABLE messages (
@@ -86,8 +86,8 @@ Roster is not persisted — sessions re-announce on connect. Messages persist; `
 
 ## Session lifecycle
 
-1. Shim starts. Tries to `connect()` the unix socket at `$XDG_RUNTIME_DIR/claude-coord/sock` (fallback `~/.local/state/claude-coord/sock`).
-2. On `ENOENT` or `ECONNREFUSED`, shim forks `claude-coord-daemon` as a detached background process (double-fork), polls the socket for up to ~2s, retries.
+1. Shim starts. Tries to `connect()` the unix socket at `$XDG_RUNTIME_DIR/marshal/sock` (fallback `~/.local/state/marshal/sock`).
+2. On `ENOENT` or `ECONNREFUSED`, shim forks `marshal-daemon` as a detached background process (double-fork), polls the socket for up to ~2s, retries.
 3. Shim sends `Hello { pid, cwd, git_branch? }`. Daemon assigns a fresh `session_id`, derives the nickname from `cwd.file_name()`, and replies `Welcome { session_id, nickname }`.
 4. Each MCP tool call becomes one daemon RPC. Any RPC counts as a heartbeat — `last_heartbeat` updates on every call. No separate ping in v1.
 5. On clean disconnect (shim process exits), daemon removes the session from the roster. Persistent messages addressed to that id remain in SQLite (they will simply never be read unless the same id reconnects, which v1 doesn't support — they age out at 30 days).
@@ -126,21 +126,21 @@ There is no explicit disconnect RPC. The shim closes the socket on exit; the dae
 
 ## Errors and edge cases
 
-- **Daemon not running and auto-spawn fails:** every MCP tool call returns a clear error explaining how to start the daemon manually (`claude-coord-daemon --foreground`). The shim does not retry forever.
+- **Daemon not running and auto-spawn fails:** every MCP tool call returns a clear error explaining how to start the daemon manually (`marshal-daemon --foreground`). The shim does not retry forever.
 - **Daemon crashes mid-session:** shim's next tool call fails with `daemon disconnected`. Shim attempts one reconnect on the *following* call. No silent retry loops — the model needs to see that something went wrong.
 - **Unknown recipient:** `send_message` returns `UnknownRecipient` with the current roster in the error body.
 - **Ambiguous nickname:** `send_message` returns `AmbiguousRecipient` with the matching `session_id`s.
 - **Oversized frame (> 1 MiB):** daemon rejects the frame and closes the connection. Tool body should be small notes, not file dumps.
-- **SQLite errors:** logged to `~/.local/state/claude-coord/daemon.log`; surfaced as `Internal` RPC errors. No retry magic.
+- **SQLite errors:** logged to `~/.local/state/marshal/daemon.log`; surfaced as `Internal` RPC errors. No retry magic.
 - **Two sessions with the same `session_id`:** can't happen during a daemon's lifetime (daemon assigns ids). Across daemon restarts, ids are regenerated; nothing relies on cross-restart stability in v1.
 
 ## Install and lifecycle
 
 - `cargo install --path crates/shim --path crates/daemon` puts both binaries in `~/.cargo/bin`.
-- Claude Code MCP entry: `command: "claude-coord-shim"`, no args. One entry, used by every session.
+- Claude Code MCP entry: `command: "marshal-shim"`, no args. One entry, used by every session.
 - Daemon auto-spawns on first shim connect (see "Session lifecycle" above).
-- `claude-coord-daemon --foreground` runs the daemon attached to a terminal for debugging or for wrapping in a systemd user unit. A sample unit file ships in `contrib/systemd/` but is not required.
-- Logs: `~/.local/state/claude-coord/daemon.log`, rotated at 10 MiB, keeping 3 files.
+- `marshal-daemon --foreground` runs the daemon attached to a terminal for debugging or for wrapping in a systemd user unit. A sample unit file ships in `contrib/systemd/` but is not required.
+- Logs: `~/.local/state/marshal/daemon.log`, rotated at 10 MiB, keeping 3 files.
 
 ## Testing
 

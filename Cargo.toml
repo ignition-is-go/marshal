@@ -16,6 +16,7 @@ anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
+notify-debouncer-mini = "0.7"
 
 # Myko stack (path-patched below for hot-reload against the local checkout).
 myko = "^4.10.0"

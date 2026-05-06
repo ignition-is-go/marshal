@@ -13,3 +13,5 @@ serde_json = "1"
 chrono = { workspace = true }
 myko = { workspace = true }
 myko-macros = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+log = { workspace = true }

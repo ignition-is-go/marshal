@@ -1,9 +1,11 @@
-//! claude-coord-tui — terminal dashboard powered by a MykoClient.
+//! marshal-tui — terminal dashboard powered by a MykoClient.
 //!
 //! Connects to the daemon as a passive observer (no Session item is
 //! created — peers don't see the TUI on the roster), subscribes to live
 //! `GetAllSessions` and `GetAllMessages` queries via hyphae cells, and
 //! renders the result with ratatui.
+
+mod self_update;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -39,12 +41,19 @@ const RECENT_LIMIT: usize = 50;
 const DEFAULT_MYKO_ADDRESS: &str = "ws://localhost:6155";
 
 #[derive(Parser, Debug)]
-#[command(name = "claude-coord-tui")]
+#[command(name = "marshal-tui")]
 struct Args {
     /// Override the daemon WebSocket URL. Defaults to MYKO_ADDRESS env var,
     /// then to ws://localhost:6155.
     #[arg(long)]
     address: Option<String>,
+
+    /// Smoke-test mode used by the self-update watcher to verify a
+    /// newly-installed binary spawns cleanly before re-execing. Prints
+    /// "ok" and exits 0; doesn't touch the terminal, the network, or
+    /// any state. Mirrors the shim's `--check`.
+    #[arg(long, hide = true)]
+    check: bool,
 }
 
 #[derive(Default, Clone)]
@@ -89,6 +98,12 @@ fn now_ms() -> i64 {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.check {
+        println!("ok");
+        return Ok(());
+    }
+
     let address = args
         .address
         .or_else(|| std::env::var("MYKO_ADDRESS").ok())
@@ -98,6 +113,14 @@ async fn main() -> Result<()> {
 
     let state = State::new();
     let client = Arc::new(MykoClient::new());
+
+    // Self-update watcher: polls `current_exe()` mtime every 5s, runs
+    // the smoke test, then re-execs into the new binary. Gated on
+    // 500ms keystroke-idle so an actively-typing operator doesn't lose
+    // focus mid-input. The render thread bumps `key_activity` on every
+    // keypress.
+    let key_activity = Arc::new(self_update::KeyActivity::new());
+    self_update::spawn(Arc::clone(&key_activity));
 
     // Connection-status callback flips state.connected for the header dot.
     let conn_state = state.clone();
@@ -113,9 +136,6 @@ async fn main() -> Result<()> {
     client.connection_status().own(conn_guard);
     client.set_address(Some(address));
 
-    // Live query subscriptions. The cells start empty and refill as the daemon
-    // streams query responses; we drain them into our shared state on every
-    // signal.
     let sessions_cell = client.watch_query::<GetAllSessions>(GetAllSessions {});
     let sessions_state = state.clone();
     let sessions_guard = sessions_cell.subscribe(move |signal| {
@@ -125,7 +145,6 @@ async fn main() -> Result<()> {
         }
     });
     sessions_cell.own(sessions_guard);
-    // Keep the cell alive for the lifetime of the process.
     Box::leak(Box::new(sessions_cell));
 
     let clients_cell = client.watch_query::<GetAllClients>(GetAllClients {});
@@ -147,7 +166,6 @@ async fn main() -> Result<()> {
     let messages_guard = messages_cell.subscribe(move |signal| {
         if let Signal::Value(value) = signal {
             let mut messages = (**value).clone();
-            // Newest first, capped to RECENT_LIMIT for the renderer.
             messages.sort_by_key(|m| std::cmp::Reverse(m.sent_at));
             messages.truncate(RECENT_LIMIT);
             messages_state.update(|s| s.messages = messages);
@@ -156,16 +174,13 @@ async fn main() -> Result<()> {
     messages_cell.own(messages_guard);
     Box::leak(Box::new(messages_cell));
 
-    // The MykoClient must outlive both the subscription guards and the render
-    // loop — once dropped, its WebSocket reader stops and the cells stop
-    // updating. We leak it on purpose: the process owns it for its lifetime.
     Box::leak(Box::new(client));
 
-    // Render in a dedicated OS thread; ratatui + crossterm don't need tokio.
     let render_state = state.clone();
+    let key_activity_for_render = Arc::clone(&key_activity);
     let handle = std::thread::Builder::new()
         .name("tui-render".into())
-        .spawn(move || render_loop(render_state))
+        .spawn(move || render_loop(render_state, key_activity_for_render))
         .context("spawning render thread")?;
     handle
         .join()
@@ -190,7 +205,10 @@ fn time_str() -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-fn render_loop(state: State) -> Result<()> {
+fn render_loop(
+    state: State,
+    key_activity: Arc<self_update::KeyActivity>,
+) -> Result<()> {
     enable_raw_mode().context("enable_raw_mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("enter alt screen")?;
@@ -204,6 +222,7 @@ fn render_loop(state: State) -> Result<()> {
             if event::poll(FRAME_POLL)? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
+                        key_activity.bump();
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break,
                             KeyCode::Char('c')
@@ -231,8 +250,8 @@ fn draw(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
             Constraint::Length(2),  // header
-            Constraint::Min(8),     // agents
-            Constraint::Length(14), // recent messages
+            Constraint::Min(6),     // agents
+            Constraint::Length(12), // recent messages
             Constraint::Length(1),  // status bar
         ])
         .split(area);
@@ -262,7 +281,7 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         .count();
     let line = Line::from(vec![
         Span::styled(dot, dot_style),
-        Span::raw(" claude-coord-tui — "),
+        Span::raw(" marshal-tui — "),
         Span::styled(
             format!("{} sessions", snap.sessions.len()),
             Style::default().add_modifier(Modifier::BOLD),
@@ -289,10 +308,10 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         RowCell::from("conn"),
         RowCell::from("nick"),
         RowCell::from("session"),
-        RowCell::from("role"),
         RowCell::from("cwd"),
         RowCell::from("branch"),
         RowCell::from("status"),
+        RowCell::from("activity"),
         RowCell::from("uptime"),
     ])
     .style(
@@ -305,15 +324,6 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         .sessions
         .iter()
         .map(|s| {
-            let role_cell = match s.role.as_deref() {
-                Some(r) => RowCell::from(r.to_string())
-                    .style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                None => RowCell::from("—").style(Style::default().fg(Color::DarkGray)),
-            };
-            // A session is "live" if its bound client_id resolves to a
-            // Client in the current GetAllClients snapshot. Sessions with
-            // no client_id at all (e.g. just-replayed from disk before a
-            // shim has rebound) also count as disconnected.
             let live = s
                 .client_id
                 .as_ref()
@@ -324,15 +334,16 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             } else {
                 RowCell::from("○ off ").style(Style::default().fg(Color::DarkGray))
             };
+            let activity_cell = build_activity_cell(s, now);
             Row::new(vec![
                 conn_cell,
                 RowCell::from(s.nickname.clone())
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 RowCell::from(s.id.to_string()).style(Style::default().fg(Color::Cyan)),
-                role_cell,
                 RowCell::from(s.cwd.clone()).style(Style::default().fg(Color::Gray)),
                 RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
                 RowCell::from(s.current_task.clone().unwrap_or_else(|| "—".into())),
+                activity_cell,
                 RowCell::from(format_duration(now - s.connected_at))
                     .style(Style::default().fg(Color::DarkGray)),
             ])
@@ -345,9 +356,9 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             Constraint::Length(7),
             Constraint::Length(16),
             Constraint::Length(14),
-            Constraint::Length(16),
             Constraint::Min(20),
             Constraint::Length(14),
+            Constraint::Length(20),
             Constraint::Length(20),
             Constraint::Length(8),
         ],
@@ -408,6 +419,57 @@ fn draw_status(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         Span::styled("q quit", Style::default().fg(Color::DarkGray)),
     ]));
     frame.render_widget(p, area);
+}
+
+/// Build the agents-table activity cell from a session's liveness
+/// fields (`last_activity_at`, `last_tool`, `last_tool_at`). Color
+/// drains from green → yellow → red as `last_activity_at` ages past
+/// 60s and 5min — same thresholds the web SessionsCard uses, so an
+/// operator switching between web and TUI sees consistent color
+/// language. A session with no recorded activity yet (newly
+/// connected, hasn't pushed its first liveness flush) renders as
+/// dim "—" rather than implying it's stuck.
+fn build_activity_cell<'a>(s: &Session, now_ms: i64) -> RowCell<'a> {
+    let style = match s.last_activity_at {
+        None => Style::default().fg(Color::DarkGray),
+        Some(ts) => {
+            let age_ms = now_ms.saturating_sub(ts);
+            if age_ms < 60_000 {
+                Style::default().fg(Color::Green)
+            } else if age_ms < 300_000 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            }
+        }
+    };
+    let body = match (s.last_tool.as_deref(), s.last_tool_at, s.last_activity_at) {
+        (Some(tool), Some(at), _) => {
+            format!("{tool} {}", format_age_short(now_ms.saturating_sub(at)))
+        }
+        (None, _, Some(at)) => {
+            format!("— {}", format_age_short(now_ms.saturating_sub(at)))
+        }
+        (None, _, None) => "—".into(),
+        (Some(tool), None, _) => tool.to_string(),
+    };
+    RowCell::from(body).style(style)
+}
+
+fn format_age_short(ms: i64) -> String {
+    if ms <= 0 {
+        return "0s".into();
+    }
+    let secs = ms / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
 }
 
 fn format_duration(diff_ms: i64) -> String {

@@ -20,3 +20,7 @@ log = { workspace = true }
 myko = { workspace = true }
 myko-leptos = { workspace = true }
 entities = { workspace = true }
+# Web targets WASM, so use `wasmbind` and skip default features to keep
+# the bundle small. Don't inherit from workspace — Cargo can't override
+# the workspace's implicit `default-features = true` from a member.
+chrono = { version = "0.4", default-features = false, features = ["wasmbind", "clock", "serde"] }

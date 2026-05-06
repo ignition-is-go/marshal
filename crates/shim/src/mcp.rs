@@ -1,6 +1,6 @@
 //! Minimal MCP (Model Context Protocol) server over stdio.
 //!
-//! Implements just enough of MCP for the claude-coord-shim's needs:
+//! Implements just enough of MCP for the marshal-shim's needs:
 //! - line-delimited JSON-RPC 2.0 framing on stdin/stdout
 //! - `initialize` / `tools/list` / `tools/call` / `ping` request handlers
 //! - `notifications/initialized` listener
@@ -10,6 +10,7 @@
 //! Outbound writes go through a single writer task so notifications can't
 //! interleave with response bytes on stdout.
 
+use crate::activity::Activity;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -118,10 +119,27 @@ impl Notifier {
             }
             _ => Value::Object(serde_json::Map::new()),
         };
+        let kind = coerced
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
         let params = serde_json::json!({
             "content": content.into(),
             "meta": coerced,
         });
+        // Trace the handoff into the writer task: a missing log here
+        // means the drain task pulled a buffered cmd but Notifier dropped
+        // it (e.g. out_tx closed). Pair with the writer-task `wrote N
+        // bytes` log to confirm the bytes actually leave the process.
+        let serialized_len = params
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.len())
+            .unwrap_or(0);
+        log::info!(
+            "[trace-pushpipe] site=Notifier::channel kind={kind} content_len={serialized_len}",
+        );
         self.send_raw("notifications/claude/channel", params);
     }
 
@@ -129,7 +147,7 @@ impl Notifier {
     pub fn log(&self, level: &str, data: Value) {
         let params = serde_json::json!({
             "level": level,
-            "logger": "claude-coord",
+            "logger": "marshal",
             "data": data,
         });
         self.send_raw("notifications/message", params);
@@ -217,13 +235,22 @@ pub trait ToolHandler: Send + Sync + 'static {
 // Server
 // =============================================================================
 
-/// Run the MCP server on stdin/stdout. `on_initialized` is invoked once after
-/// the client sends `notifications/initialized`; use the Notifier to send any
-/// startup notifications and to spawn long-lived event forwarders.
+/// Run the MCP server on stdin/stdout. `on_ready` is invoked once the
+/// writer task is up (immediately, before any client `initialize` /
+/// `notifications/initialized` exchange) so callers can spawn long-lived
+/// notification forwarders that survive a self-update re-exec.
+///
+/// The previous incarnation of this hook fired on `notifications/initialized`,
+/// but after `execve` the host does not re-send `initialized` (same stdio
+/// from its perspective). Deferring drain-task spawn to that callback meant
+/// every post-self-update process buffered NotifyChannel commands forever.
+/// Firing on writer-ready instead keeps notifications flowing across exec
+/// without depending on host re-handshakes.
 pub async fn serve_stdio<H, F>(
     config: ServerConfig,
     handler: Arc<H>,
-    on_initialized: F,
+    activity: Arc<Activity>,
+    on_ready: F,
 ) -> Result<()>
 where
     H: ToolHandler,
@@ -231,14 +258,15 @@ where
 {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    serve(config, handler, on_initialized, stdin, stdout).await
+    serve(config, handler, activity, on_ready, stdin, stdout).await
 }
 
 /// Like `serve_stdio` but with explicit transport handles (used by tests).
 pub async fn serve<H, F, R, W>(
     config: ServerConfig,
     handler: Arc<H>,
-    on_initialized: F,
+    activity: Arc<Activity>,
+    on_ready: F,
     reader: R,
     writer: W,
 ) -> Result<()>
@@ -307,6 +335,24 @@ where
                         }
                     }
                 };
+                // Trace the final byte-write for Notification messages so
+                // we can correlate the drain → notifier → writer chain
+                // end-to-end. Missing log here = bytes never reached the
+                // OS pipe (writer task gone, stdout closed, etc.).
+                let is_notification =
+                    matches!(&msg, OutboundMessage::Notification { .. });
+                let notification_kind = match &msg {
+                    OutboundMessage::Notification { method, params } => {
+                        let kind = params
+                            .get("meta")
+                            .and_then(|m| m.get("kind"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        Some((method.clone(), kind.to_string()))
+                    }
+                    _ => None,
+                };
+                let line_bytes = line.len();
                 let mut w = writer.lock().await;
                 if w.write_all(line.as_bytes()).await.is_err() {
                     break;
@@ -317,15 +363,28 @@ where
                 if w.flush().await.is_err() {
                     break;
                 }
+                if is_notification
+                    && let Some((method, kind)) = notification_kind
+                {
+                    log::info!(
+                        "[trace-pushpipe] site=writer_task wrote method={method} kind={kind} bytes={line_bytes}",
+                    );
+                }
             }
         })
     };
+
+    // Hand the caller a Notifier as soon as the writer task is up. This
+    // is *before* the MCP `initialize` handshake — but writes go through
+    // the writer task's mpsc, which buffers until the host picks them up,
+    // and any drain task we start here keeps forwarding across a future
+    // re-exec when the host won't re-send `notifications/initialized`.
+    on_ready(notifier.clone());
 
     // Reader loop: parse line-delimited JSON-RPC requests/notifications and
     // dispatch them. Spawns each `tools/call` so a slow tool can't block other
     // requests.
     let mut reader = BufReader::new(reader);
-    let mut on_initialized = Some(on_initialized);
     let mut line = String::new();
     loop {
         line.clear();
@@ -359,16 +418,11 @@ where
                 id,
                 &config,
                 Arc::clone(&handler),
+                Arc::clone(&activity),
                 notifier.clone(),
             ),
             None => {
-                if req.method == "notifications/initialized" {
-                    if let Some(cb) = on_initialized.take() {
-                        cb(notifier.clone());
-                    }
-                } else {
-                    log::debug!("ignoring notification: {}", req.method);
-                }
+                log::debug!("ignoring notification: {}", req.method);
             }
         }
     }
@@ -384,10 +438,12 @@ fn dispatch_request<H>(
     id: Value,
     config: &ServerConfig,
     handler: Arc<H>,
+    activity: Arc<Activity>,
     notifier: Notifier,
 ) where
     H: ToolHandler,
 {
+    activity.bump();
     match method.as_str() {
         "initialize" => {
             let result = serde_json::json!({
@@ -422,6 +478,9 @@ fn dispatch_request<H>(
                 .send(OutboundMessage::Reply { id, result });
         }
         "tools/call" => {
+            // Track the tools/call as in-flight so the self-update watcher
+            // doesn't re-exec mid-request.
+            activity.start();
             // Spawn so a slow tool doesn't block the read loop.
             tokio::spawn(async move {
                 let name = params
@@ -430,6 +489,12 @@ fn dispatch_request<H>(
                     .unwrap_or("")
                     .to_string();
                 let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+
+                // Record the tool's name (no args) so the roster's
+                // liveness flusher can surface "last tool" upstream.
+                if !name.is_empty() {
+                    activity.record_tool(&name);
+                }
 
                 let result = handler.call_tool(&name, &args, &notifier).await;
                 let msg = match result {
@@ -447,6 +512,7 @@ fn dispatch_request<H>(
                     },
                 };
                 let _ = notifier.out_tx.send(msg);
+                activity.end();
             });
         }
         other => {
@@ -525,6 +591,7 @@ mod tests {
         let server = tokio::spawn(serve(
             make_config(),
             Arc::new(EchoHandler),
+            Arc::new(Activity::new()),
             |_| {},
             server_r,
             server_w,
@@ -559,6 +626,7 @@ mod tests {
         let server = tokio::spawn(serve(
             make_config(),
             Arc::new(EchoHandler),
+            Arc::new(Activity::new()),
             |_| {},
             server_r,
             server_w,
@@ -588,6 +656,7 @@ mod tests {
         let server = tokio::spawn(serve(
             make_config(),
             Arc::new(EchoHandler),
+            Arc::new(Activity::new()),
             |_| {},
             server_r,
             server_w,
@@ -620,13 +689,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_initialized_callback_can_send_channel_notification() {
+    async fn on_ready_callback_fires_before_initialize_handshake() {
+        // Pin the post-self-update behavior: the on_ready callback must
+        // fire (and its channel notification must reach stdout) without
+        // the client sending `initialize` / `notifications/initialized`.
+        // After execve, the host doesn't re-handshake — if we waited for
+        // it, every notification queued by the new shim would be lost.
         let (client_w, server_r) = duplex(64 * 1024);
         let (server_w, client_r) = duplex(64 * 1024);
 
         let server = tokio::spawn(serve(
             make_config(),
             Arc::new(EchoHandler),
+            Arc::new(Activity::new()),
             |notifier| {
                 notifier.channel("hello", serde_json::json!({"source": "test"}));
             },
@@ -634,20 +709,8 @@ mod tests {
             server_w,
         ));
 
-        let mut client_w = client_w;
-        // Initialize handshake then send notifications/initialized.
-        client_w
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n")
-            .await
-            .unwrap();
+        // Read the channel notification straight away — no handshake.
         let mut client_r = client_r;
-        let _ = read_line(&mut client_r).await; // initialize reply
-
-        client_w
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
-            .await
-            .unwrap();
-
         let line = read_line(&mut client_r).await;
         let n: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(n["method"], "notifications/claude/channel");

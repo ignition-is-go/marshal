@@ -1,28 +1,27 @@
-//! claude-coord-daemon — myko coordination server.
+//! marshal-daemon — myko coordination server.
 //!
 //! Single binary: spins up a myko `CellServer` over WebSocket and registers
 //! the entities defined in the `entities` crate. Events are persisted to an
-//! append-only JSONL log under `$CLAUDE_COORD_STATE_DIR`
-//! (default `~/.local/state/claude-coord/events.jsonl`); on startup the log
-//! is replayed into the registry so sessions, messages, and role
-//! assignments survive daemon restarts. Bind address is configurable so the
-//! server can be hosted remotely; clients (shims, TUIs, web UIs) point their
-//! `MykoClient` at it.
+//! append-only JSONL log under `$MARSHAL_STATE_DIR`
+//! (default `~/.local/state/marshal/events.jsonl`); on startup the log
+//! is replayed into the registry so sessions and messages survive daemon
+//! restarts. Bind address is configurable so the server can be hosted
+//! remotely; clients (shims, TUIs, web UIs) point their `MykoClient` at it.
 
 use anyhow::{Context, Result};
-use daemon::persister::{DiskPersister, default_state_dir};
+use daemon::persister::{DiskPersister, default_state_dir, migrate_from_claude_coord};
 use myko_server::{BlackholePersister, CellServer};
 use std::{net::SocketAddr, sync::Arc};
 
 /// Default bind address. Port 6155 is deliberately distinct from myko's
-/// default 5155 — claude-coord may run on the same host as a myko server.
+/// default 5155 — marshal may run on the same host as a myko server.
 const DEFAULT_BIND: &str = "127.0.0.1:6155";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
 
-    let bind_addr: SocketAddr = std::env::var("CLAUDE_COORD_BIND")
+    let bind_addr: SocketAddr = std::env::var("MARSHAL_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_string())
         .parse()?;
 
@@ -33,11 +32,18 @@ async fn main() -> Result<()> {
 
     let state_dir = default_state_dir();
     let log_path = state_dir.join("events.jsonl");
+    if let Err(e) = migrate_from_claude_coord(&log_path) {
+        log::warn!(
+            "[migrate] legacy claude-coord log migration failed: {e} \
+             (continuing with empty {})",
+            log_path.display(),
+        );
+    }
     let persister = Arc::new(
         DiskPersister::new(&log_path)
             .with_context(|| format!("opening event log at {}", log_path.display()))?,
     );
-    log::info!("claude-coord-daemon event log: {}", log_path.display());
+    log::info!("marshal-daemon event log: {}", log_path.display());
 
     // Default = persist to disk. Client/Server entities are WS-bound and
     // intentionally transient — overriding them to Blackhole keeps the log
@@ -58,13 +64,20 @@ async fn main() -> Result<()> {
     let restored = persister
         .replay(&ctx)
         .with_context(|| format!("replaying event log {}", log_path.display()))?;
-    log::info!("claude-coord-daemon restored {restored} entities from disk");
+    log::info!("marshal-daemon restored {restored} entities from disk");
+
+    // Tail the log so external appends / migrations against a running
+    // daemon get picked up live. `_watcher` must be held for the lifetime
+    // of the daemon — dropping it stops the notify thread.
+    let _watcher = persister
+        .start_watcher(server.ctx())
+        .with_context(|| format!("starting watcher on {}", log_path.display()))?;
 
     // Spawn the periodic sweeper that DELs sessions whose bound client
     // has been gone for more than `cleanup::STALE_AFTER`.
     tokio::spawn(daemon::cleanup::run_sweeper(server.ctx()));
 
-    log::info!("claude-coord-daemon listening on ws://{bind_addr}");
+    log::info!("marshal-daemon listening on ws://{bind_addr}");
     server.run().await.map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
 }

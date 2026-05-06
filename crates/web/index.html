@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
-    <title>claude-coord</title>
+    <title>marshal</title>
     <link data-trunk rel="rust" data-wasm-opt="z"/>
     <style>
         :root {
@@ -103,19 +103,6 @@
             background: rgba(236, 236, 236, 0.03);
         }
 
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 1px 8px;
-            border-radius: var(--radius-sm);
-            font-size: 0.85rem;
-            font-weight: 600;
-        }
-        .badge.role {
-            background: rgba(192, 132, 252, 0.12);
-            color: var(--accent);
-        }
-
         .messages {
             list-style: none;
             display: flex;
@@ -156,6 +143,20 @@
             text-align: center;
             font-size: 0.9rem;
         }
+
+        /* ── Session liveness panel ─────────────────────────────
+           Three-line stack inside the SessionsCard's status column:
+           current status text, last tool + age, activity age.
+           `freshness-*` classes drain the activity-age color from
+           green (fresh < 60s) to yellow (60s-5min) to red (≥ 5min)
+           so the operator can spot a stuck peer at a glance. */
+        .liveness-task   { line-height: 1.4; }
+        .liveness-tool   { line-height: 1.3; font-size: 0.85rem; }
+        .liveness-age    { line-height: 1.3; font-size: 0.78rem; font-style: italic; }
+        .freshness-fresh        { color: #86efac; }
+        .freshness-stale-soft   { color: #fde047; }
+        .freshness-stale-hard   { color: #fca5a5; font-weight: 600; }
+        .freshness-unknown      { color: var(--fg-muted); }
     </style>
 </head>
 <body></body>
