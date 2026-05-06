@@ -1,16 +1,25 @@
 [package]
-name = "web"
+name = "marshal-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Leptos-based operator dashboard for the marshal coordination daemon."
+repository = "https://github.com/ignition-is-go/marshal"
+keywords = ["marshal", "agent", "leptos", "wasm", "myko"]
+categories = ["wasm", "web-programming"]
 
 [lib]
-name = "claude_coord_web"
+name = "marshal_web"
 path = "src/lib.rs"
 
 [[bin]]
-name = "claude-coord-web"
+name = "marshal-web"
 path = "src/main.rs"
+
+[package.metadata.flux]
+# Web is build-and-test-only — the leptos operator dashboard isn't
+# intended for `cargo install`, so it stays out of the publish task.
+tasks = ["check", "build", "test", "lint"]
 
 [dependencies]
 leptos = { version = "0.8", features = ["csr"] }

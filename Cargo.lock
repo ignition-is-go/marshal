@@ -708,25 +708,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "entities",
- "env_logger",
- "hyphae",
- "log",
- "myko",
- "myko-server",
- "notify-debouncer-mini",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -895,19 +876,6 @@ checksum = "5060e0a4cbf26a87550792688ade88e6b8aec9208613631a7a363bda7bc2d4cd"
 dependencies = [
  "paste",
  "pin-project-lite",
-]
-
-[[package]]
-name = "entities"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "log",
- "myko",
- "myko-macros",
- "serde",
- "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -1973,6 +1941,86 @@ dependencies = [
  "proc-macro-utils",
  "proc-macro2",
  "quote",
+]
+
+[[package]]
+name = "marshal-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "env_logger",
+ "hyphae",
+ "log",
+ "marshal-entities",
+ "myko",
+ "myko-server",
+ "notify-debouncer-mini",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "marshal-entities"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "log",
+ "myko",
+ "myko-macros",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "marshal-shim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "env_logger",
+ "hyphae",
+ "log",
+ "marshal-entities",
+ "myko",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "marshal-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm",
+ "env_logger",
+ "hyphae",
+ "log",
+ "marshal-entities",
+ "myko",
+ "ratatui",
+ "tokio",
+]
+
+[[package]]
+name = "marshal-web"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "console_error_panic_hook",
+ "leptos",
+ "leptos_meta",
+ "log",
+ "marshal-entities",
+ "myko",
+ "myko-leptos",
 ]
 
 [[package]]
@@ -3162,23 +3210,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shim"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "entities",
- "env_logger",
- "hyphae",
- "log",
- "myko",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3810,23 +3841,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "entities",
- "env_logger",
- "hyphae",
- "log",
- "myko",
- "ratatui",
- "tokio",
-]
-
-[[package]]
 name = "tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4172,20 +4186,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
-]
-
-[[package]]
-name = "web"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "console_error_panic_hook",
- "entities",
- "leptos",
- "leptos_meta",
- "log",
- "myko",
- "myko-leptos",
 ]
 
 [[package]]

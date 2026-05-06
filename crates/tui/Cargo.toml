@@ -1,12 +1,19 @@
 [package]
-name = "tui"
+name = "marshal-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Terminal UI for the marshal coordination daemon — live roster + message stream."
+repository = "https://github.com/ignition-is-go/marshal"
+keywords = ["marshal", "agent", "tui", "ratatui", "myko"]
+categories = ["command-line-utilities"]
 
 [[bin]]
-name = "claude-coord-tui"
+name = "marshal-tui"
 path = "src/main.rs"
+
+[package.metadata.flux]
+tasks = ["check", "build", "test", "lint", "publish"]
 
 [dependencies]
 anyhow = { workspace = true }

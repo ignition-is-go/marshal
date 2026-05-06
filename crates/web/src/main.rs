@@ -1,4 +1,4 @@
 fn main() {
     console_error_panic_hook::set_once();
-    leptos::mount::mount_to_body(claude_coord_web::App);
+    leptos::mount::mount_to_body(marshal_web::App);
 }

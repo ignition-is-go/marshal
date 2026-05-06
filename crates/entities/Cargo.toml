@@ -1,11 +1,21 @@
 [package]
-name = "entities"
+name = "marshal-entities"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Shared entity types and server-handled commands for the marshal multi-agent coordination service."
+repository = "https://github.com/ignition-is-go/marshal"
+keywords = ["marshal", "agent", "coordination", "myko"]
+categories = ["network-programming"]
 
 [lib]
 name = "entities"
+
+[package.metadata.flux]
+# Published as a transitive dep of marshal-daemon/shim/tui. Cargo
+# requires path deps to also be published (with a matching version),
+# so this crate ships even though it isn't a user-facing artifact.
+tasks = ["check", "build", "test", "lint", "publish"]
 
 [dependencies]
 serde = { workspace = true }
