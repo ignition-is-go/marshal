@@ -1,0 +1,67 @@
+name: Release
+
+# Triggered on every push to main / dev. cargo-flux computes the next
+# version from conventional commits since the last tag, stamps every
+# Cargo.toml, commits the bump, tags it, pushes, and creates a GitHub
+# Release. Publishing happens in publish.yml in response to that
+# release event.
+
+on:
+  push:
+    branches: [main, dev]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          # `persist-credentials: true` (the default) leaves the auth
+          # header in place so the later `git push` with GITHUB_TOKEN
+          # can write back to the protected refs.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo install cargo-flux
+
+      # Avoid an infinite release-on-release loop: the previous run of
+      # this workflow committed `chore(release): vX`. If we re-trigger
+      # on that push, skip and exit cleanly.
+      - name: Skip if release commit
+        id: check
+        run: |
+          if git log -1 --format='%s' | grep -q '^chore(release):'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure git identity
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Stamp, commit, tag, and create GitHub Release
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(cargo flux version)
+          cargo flux stamp "$VERSION"
+          cargo update --workspace
+          cargo fmt --all
+          git add -A
+          git commit -m "chore(release): v$VERSION"
+          git tag "v$VERSION" -m "Release $VERSION"
+          git push origin HEAD "v$VERSION"
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$BRANCH" = "main" ]; then
+            gh release create "v$VERSION" --title "v$VERSION" --generate-notes --latest
+          else
+            gh release create "v$VERSION" --title "v$VERSION" --generate-notes --prerelease
+          fi

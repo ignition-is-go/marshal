@@ -1,0 +1,33 @@
+name: Publish
+
+# Triggered when release.yml creates a GitHub Release (release events
+# are exempt from the GITHUB_TOKEN no-downstream-trigger rule, so this
+# fires reliably). Don't switch to `on: push: tags:` without
+# revisiting that — tag-pushes by GITHUB_TOKEN do NOT trigger workflows.
+
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo install cargo-flux
+      - run: cargo flux run publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

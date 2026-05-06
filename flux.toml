@@ -1,0 +1,33 @@
+# cargo-flux configuration. Drives `cargo flux run <task>` across the
+# workspace. Each publishable crate opts into tasks via its own
+# `[package.metadata.flux]` block.
+
+[channels]
+# Push to `main` cuts a stable release; push to `dev` cuts a canary
+# prerelease. The release workflow keys version stamping off these.
+main = "production"
+dev = { channel = "canary", prerelease = true }
+
+[tasks.check]
+workspace_batchable = true
+cargo = ["cargo", "check", "--all-targets"]
+
+[tasks.build]
+workspace_batchable = true
+cargo = ["cargo", "build"]
+
+[tasks.test]
+workspace_batchable = true
+cargo = ["cargo", "test"]
+
+[tasks.lint]
+cargo = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.publish]
+# `cascade = "all"` makes flux walk every crate that opted into the
+# `publish` task; `depends_on = ["build"]` ensures the build task runs
+# first so we don't publish a workspace that doesn't compile.
+cascade = "all"
+autoapply = "inherit"
+depends_on = ["build"]
+cargo = ["cargo", "publish"]
