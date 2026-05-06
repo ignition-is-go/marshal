@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/entities", "crates/daemon", "crates/shim", "crates/tui", "crates/web"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
@@ -29,4 +29,4 @@ hyphae = "^1.0.0"
 # path dep — flux stamps both this and `workspace.package.version` to
 # keep them in sync. `package` exposes the published crates.io name
 # while keeping `entities` as the in-source identifier.
-entities = { path = "crates/entities", package = "marshal-entities", version = "0.1.1" }
+entities = { path = "crates/entities", package = "marshal-entities", version = "0.1.2" }
