@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "marshal": {
+      "command": "marshal-shim"
+    }
+  }
+}

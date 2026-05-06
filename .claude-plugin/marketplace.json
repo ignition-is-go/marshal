@@ -1,0 +1,14 @@
+{
+  "name": "marshal",
+  "owner": {
+    "name": "Ignition",
+    "url": "https://github.com/ignition-is-go"
+  },
+  "plugins": [
+    {
+      "name": "marshal-shim",
+      "source": "./plugins/marshal-shim",
+      "description": "Register the marshal-shim MCP server so Claude Code sessions can talk to other live Claude sessions via the marshal coordination daemon."
+    }
+  ]
+}
