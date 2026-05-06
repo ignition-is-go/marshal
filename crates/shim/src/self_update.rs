@@ -29,9 +29,7 @@ pub fn spawn(activity: Arc<Activity>) {
     let exe_path = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            log::warn!(
-                "[marshal-shim] cannot resolve current_exe ({e}); auto-restart disabled"
-            );
+            log::warn!("[marshal-shim] cannot resolve current_exe ({e}); auto-restart disabled");
             return;
         }
     };

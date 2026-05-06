@@ -110,11 +110,7 @@ impl SagaHandler for DedupeNicknameSaga {
     type Command = DedupeNicknames;
     const EVENT_TYPE: MEventType = MEventType::SET;
 
-    fn handle(
-        session: Session,
-        _event: MEvent,
-        ctx: Arc<SagaContext>,
-    ) -> Option<Self::Command> {
+    fn handle(session: Session, _event: MEvent, ctx: Arc<SagaContext>) -> Option<Self::Command> {
         let store = ctx.registry.get(Session::ENTITY_NAME_STATIC)?;
         // Build the collision set from OTHER sessions only — including
         // ourselves would make a re-SET of an already-deduped name flag
@@ -189,9 +185,7 @@ impl CommandHandler for DedupeNicknames {
 /// deterministic ordering `GetAllSessions` returns (HashMap iteration
 /// in practice), which would produce different "first collider"
 /// pickings across runs and make integration tests flaky.
-fn pick_one_correction(
-    sessions: &[Arc<Session>],
-) -> Option<(&Arc<Session>, String)> {
+fn pick_one_correction(sessions: &[Arc<Session>]) -> Option<(&Arc<Session>, String)> {
     // Index into `sessions` sorted by seniority (oldest first), with
     // session_id as the tiebreaker.
     let mut ordered: Vec<usize> = (0..sessions.len()).collect();
@@ -234,10 +228,7 @@ fn pick_one_correction(
 /// asynchronously: each corrective SET re-fires the saga, which
 /// dispatches another `DedupeNicknames`. This helper just collapses
 /// that loop into a tight in-process iteration for test determinism.
-pub fn run_until_converged(
-    ctx: &CellServerCtx,
-    max_passes: usize,
-) -> Result<usize, String> {
+pub fn run_until_converged(ctx: &CellServerCtx, max_passes: usize) -> Result<usize, String> {
     let mut applied = 0usize;
     for _ in 0..max_passes {
         let store = ctx
@@ -287,7 +278,10 @@ mod tests {
 
     #[test]
     fn first_collision_picks_two() {
-        assert_eq!(dedupe_nickname("marshal", &taken(&["marshal"])), "marshal-2");
+        assert_eq!(
+            dedupe_nickname("marshal", &taken(&["marshal"])),
+            "marshal-2"
+        );
     }
 
     #[test]

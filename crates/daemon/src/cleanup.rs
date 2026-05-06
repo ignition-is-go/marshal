@@ -81,9 +81,7 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
         }
 
         still_disconnected.insert(id.clone());
-        let first_seen = *disconnected_since
-            .entry(id.clone())
-            .or_insert(now);
+        let first_seen = *disconnected_since.entry(id.clone()).or_insert(now);
         if now.duration_since(first_seen) >= STALE_AFTER {
             to_delete.push(id);
         }
@@ -94,7 +92,11 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
     disconnected_since.retain(|id, _| still_disconnected.contains(id));
 
     for id in to_delete {
-        log::info!("[cleanup] DELing session {} (disconnected ≥ {:?})", id, STALE_AFTER);
+        log::info!(
+            "[cleanup] DELing session {} (disconnected ≥ {:?})",
+            id,
+            STALE_AFTER
+        );
         if let Err(e) = ctx.del_by_id(Session::ENTITY_NAME_STATIC, &id) {
             log::warn!("[cleanup] del session {} failed: {}", id, e);
             continue;

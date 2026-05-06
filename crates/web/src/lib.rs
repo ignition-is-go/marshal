@@ -225,10 +225,7 @@ fn MessagesCard(messages: ReadSignal<Vec<std::sync::Arc<entities::Message>>>) ->
 }
 
 fn short_id(id: &std::sync::Arc<str>) -> String {
-    id.as_ref()
-        .chars()
-        .take(8)
-        .collect()
+    id.as_ref().chars().take(8).collect()
 }
 
 #[cfg(test)]

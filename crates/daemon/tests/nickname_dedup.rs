@@ -30,7 +30,12 @@ use myko_server::CellServer;
 /// while still failing fast if a regression ever sends us into a loop.
 const MAX_PASSES: usize = 32;
 
-fn setup() -> (PathBuf, Arc<DiskPersister>, CellServerCtx, tempfile::TempDir) {
+fn setup() -> (
+    PathBuf,
+    Arc<DiskPersister>,
+    CellServerCtx,
+    tempfile::TempDir,
+) {
     entities::link();
     daemon::link();
 
@@ -70,12 +75,14 @@ fn session(id: &str, nickname: &str, connected_at: i64) -> Session {
 
 fn set_session(ctx: &CellServerCtx, s: &Session) {
     let event = MEvent::from_item(s, MEventType::SET, &uuid::Uuid::new_v4().to_string());
-    ctx.apply_event_batch(vec![event]).expect("apply Session SET");
+    ctx.apply_event_batch(vec![event])
+        .expect("apply Session SET");
 }
 
 fn del_session(ctx: &CellServerCtx, s: &Session) {
     let event = MEvent::from_item(s, MEventType::DEL, &uuid::Uuid::new_v4().to_string());
-    ctx.apply_event_batch(vec![event]).expect("apply Session DEL");
+    ctx.apply_event_batch(vec![event])
+        .expect("apply Session DEL");
 }
 
 /// Snapshot session-id → nickname for every Session row in the registry.
@@ -130,7 +137,11 @@ fn two_sessions_with_same_nickname_get_disambiguated() {
         by_nick.contains_key("marshal-2"),
         "the other session should be deduped to 'marshal-2'; got {by_nick:?}",
     );
-    assert_eq!(by_nick.len(), 2, "exactly two sessions, both with unique names");
+    assert_eq!(
+        by_nick.len(),
+        2,
+        "exactly two sessions, both with unique names"
+    );
 }
 
 #[test]

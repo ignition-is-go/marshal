@@ -218,34 +218,31 @@ async fn main() -> Result<()> {
             };
 
             if pushed_activity_at != last_activity_at {
-                let _ = client_for_publish
-                    .send_command::<entities::SetSessionLastActivityAt, ()>(
-                        &entities::SetSessionLastActivityAt {
-                            id: session_id_for_publish.clone(),
-                            last_activity_at,
-                        },
-                    );
+                let _ = client_for_publish.send_command::<entities::SetSessionLastActivityAt, ()>(
+                    &entities::SetSessionLastActivityAt {
+                        id: session_id_for_publish.clone(),
+                        last_activity_at,
+                    },
+                );
                 pushed_activity_at = last_activity_at;
             }
             if pushed_tool != last_tool {
                 let arc_tool = last_tool.as_deref().map(Arc::<str>::from);
-                let _ = client_for_publish
-                    .send_command::<entities::SetSessionLastTool, ()>(
-                        &entities::SetSessionLastTool {
-                            id: session_id_for_publish.clone(),
-                            last_tool: arc_tool,
-                        },
-                    );
+                let _ = client_for_publish.send_command::<entities::SetSessionLastTool, ()>(
+                    &entities::SetSessionLastTool {
+                        id: session_id_for_publish.clone(),
+                        last_tool: arc_tool,
+                    },
+                );
                 pushed_tool = last_tool.clone();
             }
             if pushed_tool_at != last_tool_at {
-                let _ = client_for_publish
-                    .send_command::<entities::SetSessionLastToolAt, ()>(
-                        &entities::SetSessionLastToolAt {
-                            id: session_id_for_publish.clone(),
-                            last_tool_at,
-                        },
-                    );
+                let _ = client_for_publish.send_command::<entities::SetSessionLastToolAt, ()>(
+                    &entities::SetSessionLastToolAt {
+                        id: session_id_for_publish.clone(),
+                        last_tool_at,
+                    },
+                );
                 pushed_tool_at = last_tool_at;
             }
 

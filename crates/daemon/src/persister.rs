@@ -204,19 +204,19 @@ impl DiskPersister {
         ctx: CellServerCtx,
     ) -> notify_debouncer_mini::notify::Result<DiskWatcher> {
         let me = Arc::clone(self);
-        let mut debouncer: Debouncer<RecommendedWatcher> =
-            new_debouncer(Duration::from_millis(150), move |result: DebounceEventResult| {
-                match result {
-                    Ok(_events) => {
-                        if let Err(e) = me.tail_apply(&ctx) {
-                            log::warn!("[watcher] tail apply failed: {e}");
-                        }
-                    }
-                    Err(errors) => {
-                        log::warn!("[watcher] notify error: {errors:?}");
+        let mut debouncer: Debouncer<RecommendedWatcher> = new_debouncer(
+            Duration::from_millis(150),
+            move |result: DebounceEventResult| match result {
+                Ok(_events) => {
+                    if let Err(e) = me.tail_apply(&ctx) {
+                        log::warn!("[watcher] tail apply failed: {e}");
                     }
                 }
-            })?;
+                Err(errors) => {
+                    log::warn!("[watcher] notify error: {errors:?}");
+                }
+            },
+        )?;
         debouncer
             .watcher()
             .watch(&self.path, RecursiveMode::NonRecursive)?;
@@ -361,10 +361,7 @@ pub struct DiskWatcher {
 /// MEvent, then return the surviving SETs marked replay-only
 /// (`prevent_persist` + `prevent_relationship_updates`). Used by both
 /// startup `replay()` and the watcher's full-reload path.
-fn read_and_dedupe_from_top(
-    file: &mut File,
-    path: &Path,
-) -> std::io::Result<Vec<MEvent>> {
+fn read_and_dedupe_from_top(file: &mut File, path: &Path) -> std::io::Result<Vec<MEvent>> {
     file.seek(SeekFrom::Start(0))?;
     let mut latest: HashMap<(String, String), MEvent> = HashMap::new();
     let mut total = 0usize;
@@ -393,7 +390,10 @@ fn read_and_dedupe_from_top(
             }
             Err(e) => {
                 malformed += 1;
-                log::warn!("[disk-persister] skipping malformed line in {}: {e}", path.display());
+                log::warn!(
+                    "[disk-persister] skipping malformed line in {}: {e}",
+                    path.display()
+                );
             }
         }
     }
@@ -427,9 +427,9 @@ fn apply_or_log(ctx: &CellServerCtx, events: Vec<MEvent>, label: &str) {
     }
     let count = events.len();
     match ctx.apply_event_batch(events) {
-        Ok(applied) => log::info!(
-            "[watcher] {label}: applied {applied}/{count} hot-reloaded event(s)"
-        ),
+        Ok(applied) => {
+            log::info!("[watcher] {label}: applied {applied}/{count} hot-reloaded event(s)")
+        }
         Err(e) => log::warn!("[watcher] {label}: apply_event_batch failed: {e}"),
     }
 }

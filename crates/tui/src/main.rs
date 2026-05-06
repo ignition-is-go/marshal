@@ -13,7 +13,7 @@ use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use entities::{GetAllMessages, GetAllSessions, Message, Session};
 use hyphae::{Signal, Watchable};
@@ -21,7 +21,6 @@ use myko::{
     client::{ConnectionStatus, MykoClient},
     entities::client::{Client, GetAllClients},
 };
-use std::collections::HashSet;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -30,6 +29,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell as RowCell, Paragraph, Row, Table},
 };
+use std::collections::HashSet;
 use std::{
     io,
     sync::{Arc, Mutex},
@@ -212,10 +212,7 @@ fn time_str() -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-fn render_loop(
-    state: State,
-    key_activity: Arc<self_update::KeyActivity>,
-) -> Result<()> {
+fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Result<()> {
     enable_raw_mode().context("enable_raw_mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("enter alt screen")?;
@@ -232,9 +229,7 @@ fn render_loop(
                         key_activity.bump();
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Char('c')
-                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break;
                             }
                             _ => {}
@@ -294,10 +289,7 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            format!("({live} live)"),
-            Style::default().fg(Color::Green),
-        ),
+        Span::styled(format!("({live} live)"), Style::default().fg(Color::Green)),
         Span::raw("  "),
         Span::styled(
             format!("{} recent msgs", snap.messages.len()),
@@ -400,7 +392,9 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                 Span::styled(" → ", Style::default().fg(Color::Cyan)),
                 Span::styled(
                     format!("{:<14}  ", m.to_nick),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(m.body.replace('\n', " ⏎ ")),
             ])
