@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use entities::{Message, SendMessage, Session, SessionId};
+use marshal_entities::{Message, SendMessage, Session, SessionId};
 use hyphae::Gettable;
 use myko::{
     command::{CommandContext, CommandHandler},
@@ -30,7 +30,7 @@ use myko_server::{BlackholePersister, CellServer};
 use uuid::Uuid;
 
 fn setup() -> CellServerCtx {
-    entities::link();
+    marshal_entities::link();
     daemon::link();
 
     let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);

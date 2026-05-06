@@ -15,7 +15,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use daemon::{dedupe_nicknames::run_until_converged, persister::DiskPersister};
-use entities::{Session, SessionId};
+use marshal_entities::{Session, SessionId};
 use hyphae::Gettable;
 use myko::{
     core::item::Eventable,
@@ -36,7 +36,7 @@ fn setup() -> (
     CellServerCtx,
     tempfile::TempDir,
 ) {
-    entities::link();
+    marshal_entities::link();
     daemon::link();
 
     let dir = tempfile::tempdir().expect("tempdir");

@@ -31,7 +31,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use entities::{GetAllSessions, Session};
+use marshal_entities::{GetAllSessions, Session};
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
     core::item::Eventable,

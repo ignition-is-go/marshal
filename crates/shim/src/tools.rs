@@ -1,7 +1,7 @@
 //! MCP tool dispatch — translates each tool call into MykoClient operations.
 
 use crate::mcp::{METHOD_NOT_FOUND, Notifier, ToolError, ToolFuture, ToolHandler, ToolOutcome};
-use entities::{SendMessage, SendMessageResult, Session, SessionId, SetSessionCurrentTask};
+use marshal_entities::{SendMessage, SendMessageResult, Session, SessionId, SetSessionCurrentTask};
 use hyphae::{Cell, CellImmutable, Gettable, Signal, Watchable};
 use myko::client::MykoClient;
 use serde_json::{Value, json};

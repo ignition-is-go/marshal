@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use entities::Session;
+use marshal_entities::Session;
 use hyphae::Gettable;
 use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 

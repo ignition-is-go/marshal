@@ -16,7 +16,7 @@ use std::{
 };
 
 use daemon::persister::DiskPersister;
-use entities::Session;
+use marshal_entities::Session;
 use hyphae::Gettable;
 use myko::{
     core::item::Eventable,
@@ -35,7 +35,7 @@ fn setup() -> (
     CellServerCtx,
     tempfile::TempDir,
 ) {
-    entities::link();
+    marshal_entities::link();
     daemon::link();
 
     let dir = tempfile::tempdir().expect("tempdir");

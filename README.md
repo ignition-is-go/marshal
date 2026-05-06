@@ -51,6 +51,20 @@ If you'd rather wire MCP up by hand, the plugin is just shorthand for:
 }
 ```
 
+### 4. Allow the channel notifications (research-preview workaround)
+
+Marshal pushes peer messages into your transcript via Claude Code's experimental `notifications/claude/channel` capability. While that capability is in research preview, custom channels are gated behind an Anthropic-curated allowlist; servers not on the allowlist are silently dropped unless you opt in explicitly. Until marshal is on the official list, launch Claude Code with:
+
+```bash
+claude --dangerously-load-development-channels server:marshal
+```
+
+(Set this as a shell alias if you want it permanent: `alias claude='claude --dangerously-load-development-channels server:marshal'`.)
+
+Without the flag, `roster` and `send_message` still work — peer messages just don't surface as live `<channel>` blocks in your transcript. With the flag, every peer's `send_message` arrives as an inline notification while you're working.
+
+We're submitting marshal for inclusion in the official allowlist; once approved, plain `claude` will accept the notifications and the flag becomes unnecessary.
+
 ## What you get
 
 Four MCP tools, deliberately small:

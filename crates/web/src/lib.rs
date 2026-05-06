@@ -5,7 +5,7 @@
 //! No `Session` entity is created — like the TUI, the web UI is a watcher,
 //! not a participant.
 
-use entities::{GetAllMessages, GetAllSessions};
+use marshal_entities::{GetAllMessages, GetAllSessions};
 use leptos::prelude::*;
 use leptos_meta::{Title, provide_meta_context};
 
@@ -51,7 +51,7 @@ fn Header(connected: Signal<bool>, address: &'static str) -> impl IntoView {
 }
 
 #[component]
-fn SessionsCard(sessions: ReadSignal<Vec<std::sync::Arc<entities::Session>>>) -> impl IntoView {
+fn SessionsCard(sessions: ReadSignal<Vec<std::sync::Arc<marshal_entities::Session>>>) -> impl IntoView {
     view! {
         <section class="card">
             <h2>"Sessions " <span class="text-muted">"(" {move || sessions.get().len()} ")"</span></h2>
@@ -90,7 +90,7 @@ fn SessionsCard(sessions: ReadSignal<Vec<std::sync::Arc<entities::Session>>>) ->
 /// every ~5s, so an operator can spot a stuck peer vs an active one
 /// at a glance.
 #[component]
-fn SessionRow(session: std::sync::Arc<entities::Session>) -> impl IntoView {
+fn SessionRow(session: std::sync::Arc<marshal_entities::Session>) -> impl IntoView {
     let last_activity_at = session.last_activity_at;
     let last_tool = session.last_tool.clone();
     let last_tool_at = session.last_tool_at;
@@ -190,7 +190,7 @@ fn format_age(ms: i64) -> String {
 }
 
 #[component]
-fn MessagesCard(messages: ReadSignal<Vec<std::sync::Arc<entities::Message>>>) -> impl IntoView {
+fn MessagesCard(messages: ReadSignal<Vec<std::sync::Arc<marshal_entities::Message>>>) -> impl IntoView {
     let sorted = Memo::new(move |_| {
         let mut v = messages.get();
         v.sort_by_key(|m| std::cmp::Reverse(m.sent_at));

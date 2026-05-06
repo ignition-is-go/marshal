@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
 
     // Force-link entities + sagas so their `inventory` registrations aren't
     // dead-code-eliminated.
-    entities::link();
+    marshal_entities::link();
     daemon::link();
 
     let state_dir = default_state_dir();

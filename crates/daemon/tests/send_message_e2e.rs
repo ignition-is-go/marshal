@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use entities::{
+use marshal_entities::{
     GetAllSessions, Message, NotifyChannel, SendMessage, SendMessageResult, Session, SessionId,
 };
 use hyphae::Gettable;
@@ -139,7 +139,7 @@ fn message_count(ctx: &CellServerCtx) -> usize {
 #[test]
 fn send_message_delivers_then_persists_when_recipient_is_live() {
     let _ = env_logger::builder().is_test(true).try_init();
-    entities::link();
+    marshal_entities::link();
     daemon::link();
 
     let port = pick_free_port();

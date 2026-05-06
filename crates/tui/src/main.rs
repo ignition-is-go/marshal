@@ -15,7 +15,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use entities::{GetAllMessages, GetAllSessions, Message, Session};
+use marshal_entities::{GetAllMessages, GetAllSessions, Message, Session};
 use hyphae::{Signal, Watchable};
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         .or_else(|| std::env::var(ADDRESS_ENV_LEGACY).ok())
         .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string());
 
-    entities::link();
+    marshal_entities::link();
 
     let state = State::new();
     let client = Arc::new(MykoClient::new());
