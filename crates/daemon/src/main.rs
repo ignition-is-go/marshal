@@ -13,9 +13,13 @@ use daemon::persister::{DiskPersister, default_state_dir, migrate_from_claude_co
 use myko_server::{BlackholePersister, CellServer};
 use std::{net::SocketAddr, sync::Arc};
 
-/// Default bind address. Port 6155 is deliberately distinct from myko's
-/// default 5155 — marshal may run on the same host as a myko server.
-const DEFAULT_BIND: &str = "127.0.0.1:6155";
+/// Default bind address. Binds all interfaces by default so peers on
+/// other hosts can reach the daemon without the user remembering to
+/// override `MARSHAL_BIND`. Port 6155 is deliberately distinct from
+/// myko's default 5155 — marshal may run on the same host as a myko
+/// server. Restrict by setting `MARSHAL_BIND=127.0.0.1:6155` (or any
+/// other interface) explicitly.
+const DEFAULT_BIND: &str = "0.0.0.0:6155";
 
 #[tokio::main]
 async fn main() -> Result<()> {
