@@ -16,8 +16,8 @@ use std::{
 };
 
 use daemon::persister::DiskPersister;
-use marshal_entities::Session;
 use hyphae::Gettable;
+use marshal_entities::Session;
 use myko::{
     core::item::Eventable,
     server::{CellServerCtx, Persister},

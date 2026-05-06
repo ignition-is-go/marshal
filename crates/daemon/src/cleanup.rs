@@ -19,8 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use marshal_entities::Session;
 use hyphae::Gettable;
+use marshal_entities::Session;
 use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 
 /// How long a session must be without a live client before it is DEL'd.

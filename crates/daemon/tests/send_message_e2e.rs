@@ -19,10 +19,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use hyphae::Gettable;
 use marshal_entities::{
     GetAllSessions, Message, NotifyChannel, SendMessage, SendMessageResult, Session, SessionId,
 };
-use hyphae::Gettable;
 use myko::{
     client::{ConnectionStatus, MykoClient, MykoProtocol},
     core::item::Eventable,

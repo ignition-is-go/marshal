@@ -16,8 +16,8 @@
 
 use std::sync::Arc;
 
-use marshal_entities::{Message, SendMessage, Session, SessionId};
 use hyphae::Gettable;
+use marshal_entities::{Message, SendMessage, Session, SessionId};
 use myko::{
     command::{CommandContext, CommandHandler},
     core::item::Eventable,

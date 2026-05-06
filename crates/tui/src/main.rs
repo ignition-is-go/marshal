@@ -15,8 +15,8 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use marshal_entities::{GetAllMessages, GetAllSessions, Message, Session};
 use hyphae::{Signal, Watchable};
+use marshal_entities::{GetAllMessages, GetAllSessions, Message, Session};
 use myko::{
     client::{ConnectionStatus, MykoClient},
     entities::client::{Client, GetAllClients},

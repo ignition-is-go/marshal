@@ -15,8 +15,8 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use daemon::{dedupe_nicknames::run_until_converged, persister::DiskPersister};
-use marshal_entities::{Session, SessionId};
 use hyphae::Gettable;
+use marshal_entities::{Session, SessionId};
 use myko::{
     core::item::Eventable,
     server::{CellServerCtx, Persister},

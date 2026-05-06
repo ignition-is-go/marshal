@@ -16,8 +16,8 @@ mod tools;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use marshal_entities::{GetAllSessions, NotifyChannel, Session, SessionId};
 use hyphae::Watchable;
+use marshal_entities::{GetAllSessions, NotifyChannel, Session, SessionId};
 use mcp::{ServerConfig, ToolDef};
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -218,31 +218,34 @@ async fn main() -> Result<()> {
             };
 
             if pushed_activity_at != last_activity_at {
-                let _ = client_for_publish.send_command::<marshal_entities::SetSessionLastActivityAt, ()>(
-                    &marshal_entities::SetSessionLastActivityAt {
-                        id: session_id_for_publish.clone(),
-                        last_activity_at,
-                    },
-                );
+                let _ = client_for_publish
+                    .send_command::<marshal_entities::SetSessionLastActivityAt, ()>(
+                        &marshal_entities::SetSessionLastActivityAt {
+                            id: session_id_for_publish.clone(),
+                            last_activity_at,
+                        },
+                    );
                 pushed_activity_at = last_activity_at;
             }
             if pushed_tool != last_tool {
                 let arc_tool = last_tool.as_deref().map(Arc::<str>::from);
-                let _ = client_for_publish.send_command::<marshal_entities::SetSessionLastTool, ()>(
-                    &marshal_entities::SetSessionLastTool {
-                        id: session_id_for_publish.clone(),
-                        last_tool: arc_tool,
-                    },
-                );
+                let _ = client_for_publish
+                    .send_command::<marshal_entities::SetSessionLastTool, ()>(
+                        &marshal_entities::SetSessionLastTool {
+                            id: session_id_for_publish.clone(),
+                            last_tool: arc_tool,
+                        },
+                    );
                 pushed_tool = last_tool.clone();
             }
             if pushed_tool_at != last_tool_at {
-                let _ = client_for_publish.send_command::<marshal_entities::SetSessionLastToolAt, ()>(
-                    &marshal_entities::SetSessionLastToolAt {
-                        id: session_id_for_publish.clone(),
-                        last_tool_at,
-                    },
-                );
+                let _ = client_for_publish
+                    .send_command::<marshal_entities::SetSessionLastToolAt, ()>(
+                        &marshal_entities::SetSessionLastToolAt {
+                            id: session_id_for_publish.clone(),
+                            last_tool_at,
+                        },
+                    );
                 pushed_tool_at = last_tool_at;
             }
 
