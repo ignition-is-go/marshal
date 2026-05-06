@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -219,8 +219,7 @@ enum OutboundMessage {
 // Tool handler trait, with explicit boxed future for object-safety
 // =============================================================================
 
-pub type ToolFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>>;
+pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>>;
 
 pub trait ToolHandler: Send + Sync + 'static {
     fn call_tool<'a>(
@@ -339,8 +338,7 @@ where
                 // we can correlate the drain → notifier → writer chain
                 // end-to-end. Missing log here = bytes never reached the
                 // OS pipe (writer task gone, stdout closed, etc.).
-                let is_notification =
-                    matches!(&msg, OutboundMessage::Notification { .. });
+                let is_notification = matches!(&msg, OutboundMessage::Notification { .. });
                 let notification_kind = match &msg {
                     OutboundMessage::Notification { method, params } => {
                         let kind = params
@@ -363,9 +361,7 @@ where
                 if w.flush().await.is_err() {
                     break;
                 }
-                if is_notification
-                    && let Some((method, kind)) = notification_kind
-                {
+                if is_notification && let Some((method, kind)) = notification_kind {
                     log::info!(
                         "[trace-pushpipe] site=writer_task wrote method={method} kind={kind} bytes={line_bytes}",
                     );
@@ -461,9 +457,7 @@ fn dispatch_request<H>(
                 },
                 "instructions": config.instructions,
             });
-            let _ = notifier
-                .out_tx
-                .send(OutboundMessage::Reply { id, result });
+            let _ = notifier.out_tx.send(OutboundMessage::Reply { id, result });
         }
         "ping" => {
             let _ = notifier.out_tx.send(OutboundMessage::Reply {
@@ -473,9 +467,7 @@ fn dispatch_request<H>(
         }
         "tools/list" => {
             let result = serde_json::json!({ "tools": &config.tools });
-            let _ = notifier
-                .out_tx
-                .send(OutboundMessage::Reply { id, result });
+            let _ = notifier.out_tx.send(OutboundMessage::Reply { id, result });
         }
         "tools/call" => {
             // Track the tools/call as in-flight so the self-update watcher
@@ -529,9 +521,7 @@ fn dispatch_request<H>(
 fn tool_outcome_to_result(outcome: ToolOutcome) -> Value {
     let text = match outcome {
         ToolOutcome::Text(s) => s,
-        ToolOutcome::Json(v) => {
-            serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
-        }
+        ToolOutcome::Json(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()),
     };
     serde_json::json!({
         "content": [

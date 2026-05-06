@@ -243,8 +243,14 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         "channel content should carry the message body, got: {}",
         push.content,
     );
-    assert_eq!(push.meta.get("kind"), Some(&serde_json::json!("new_message")));
-    assert_eq!(push.meta.get("from_nick"), Some(&serde_json::json!("alpha")));
+    assert_eq!(
+        push.meta.get("kind"),
+        Some(&serde_json::json!("new_message"))
+    );
+    assert_eq!(
+        push.meta.get("from_nick"),
+        Some(&serde_json::json!("alpha"))
+    );
 
     // And the server persisted exactly one Message — only after the push
     // succeeded.

@@ -61,7 +61,8 @@ fn session(id: &str, nickname: &str, client_id: Option<&str>) -> Session {
 
 fn set_session(ctx: &CellServerCtx, s: &Session) {
     let event = MEvent::from_item(s, MEventType::SET, &Uuid::new_v4().to_string());
-    ctx.apply_event_batch(vec![event]).expect("apply Session SET");
+    ctx.apply_event_batch(vec![event])
+        .expect("apply Session SET");
 }
 
 /// Build a CommandContext as if the WS server had just dispatched a
@@ -169,7 +170,10 @@ fn fails_loudly_when_recipient_is_offline() {
 #[test]
 fn fails_loudly_when_caller_has_no_session_on_the_roster() {
     let ctx = setup();
-    set_session(&ctx, &session("recipient", "recipient", Some("c-recipient")));
+    set_session(
+        &ctx,
+        &session("recipient", "recipient", Some("c-recipient")),
+    );
 
     // Caller's client_id has no Session bound to it on the roster.
     let cmd = SendMessage {

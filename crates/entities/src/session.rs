@@ -1,7 +1,4 @@
-use myko::{
-    entities::client::ClientId,
-    myko_item,
-};
+use myko::{entities::client::ClientId, myko_item};
 
 #[cfg(test)]
 mod tests {

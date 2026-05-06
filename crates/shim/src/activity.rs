@@ -6,8 +6,8 @@
 //! has a periodic 5s flusher that reads these atomics + the last-tool
 //! mutex and pushes them upstream via the auto-generated setters.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 pub struct Activity {

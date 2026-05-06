@@ -34,7 +34,7 @@ use std::time::{Duration, SystemTime};
 use crossterm::{
     cursor::Show,
     execute,
-    terminal::{disable_raw_mode, LeaveAlternateScreen},
+    terminal::{LeaveAlternateScreen, disable_raw_mode},
 };
 
 #[cfg(unix)]
@@ -89,9 +89,7 @@ pub fn spawn(activity: Arc<KeyActivity>) {
     let exe_path = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            log::warn!(
-                "[marshal-tui] cannot resolve current_exe ({e}); auto-restart disabled"
-            );
+            log::warn!("[marshal-tui] cannot resolve current_exe ({e}); auto-restart disabled");
             return;
         }
     };

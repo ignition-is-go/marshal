@@ -29,7 +29,12 @@ use myko_server::CellServer;
 /// for filesystem-event delivery + apply.
 const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 
-fn setup() -> (PathBuf, Arc<DiskPersister>, CellServerCtx, tempfile::TempDir) {
+fn setup() -> (
+    PathBuf,
+    Arc<DiskPersister>,
+    CellServerCtx,
+    tempfile::TempDir,
+) {
     entities::link();
     daemon::link();
 
@@ -98,23 +103,22 @@ fn wait_for_sessions(ctx: &CellServerCtx, expected: usize) -> usize {
 #[test]
 fn external_append_is_picked_up() {
     let (log_path, persister, ctx, _dir) = setup();
-    let _watcher = persister
-        .start_watcher(ctx.clone())
-        .expect("start watcher");
+    let _watcher = persister.start_watcher(ctx.clone()).expect("start watcher");
 
     assert_eq!(session_count(&ctx), 0, "registry starts empty");
 
     append_external(&log_path, &session_set_line("s-ext-1", "external"));
     let n = wait_for_sessions(&ctx, 1);
-    assert_eq!(n, 1, "external append should be applied within {POLL_TIMEOUT:?}");
+    assert_eq!(
+        n, 1,
+        "external append should be applied within {POLL_TIMEOUT:?}"
+    );
 }
 
 #[test]
 fn truncation_triggers_reload() {
     let (log_path, persister, ctx, _dir) = setup();
-    let _watcher = persister
-        .start_watcher(ctx.clone())
-        .expect("start watcher");
+    let _watcher = persister.start_watcher(ctx.clone()).expect("start watcher");
 
     for i in 0..3 {
         append_external(
@@ -159,9 +163,7 @@ fn truncation_triggers_reload() {
 #[test]
 fn rename_replacement_triggers_reload() {
     let (log_path, persister, ctx, dir) = setup();
-    let _watcher = persister
-        .start_watcher(ctx.clone())
-        .expect("start watcher");
+    let _watcher = persister.start_watcher(ctx.clone()).expect("start watcher");
 
     append_external(&log_path, &session_set_line("s-orig-1", "original"));
     assert_eq!(wait_for_sessions(&ctx, 1), 1);
@@ -204,15 +206,11 @@ fn rename_replacement_triggers_reload() {
 #[test]
 fn own_writes_do_not_double_apply() {
     let (log_path, persister, ctx, _dir) = setup();
-    let _watcher = persister
-        .start_watcher(ctx.clone())
-        .expect("start watcher");
+    let _watcher = persister.start_watcher(ctx.clone()).expect("start watcher");
 
     let line = session_set_line("s-own-1", "via apply_event_batch");
     let event: MEvent = serde_json::from_str(&line).unwrap();
-    let applied = ctx
-        .apply_event_batch(vec![event])
-        .expect("apply own event");
+    let applied = ctx.apply_event_batch(vec![event]).expect("apply own event");
     assert_eq!(applied, 1);
     assert_eq!(session_count(&ctx), 1, "registry has the one session");
 
@@ -220,13 +218,19 @@ fn own_writes_do_not_double_apply() {
 
     let on_disk = std::fs::read_to_string(&log_path).unwrap();
     let line_count = on_disk.lines().filter(|l| !l.trim().is_empty()).count();
-    assert_eq!(line_count, 1, "exactly one event line on disk; got:\n{on_disk}");
+    assert_eq!(
+        line_count, 1,
+        "exactly one event line on disk; got:\n{on_disk}"
+    );
     assert_eq!(
         session_count(&ctx),
         1,
         "registry still has exactly one session after watcher ticks",
     );
 
-    append_external(&log_path, &session_set_line("s-own-2", "external after own"));
+    append_external(
+        &log_path,
+        &session_set_line("s-own-2", "external after own"),
+    );
     assert_eq!(wait_for_sessions(&ctx, 2), 2);
 }

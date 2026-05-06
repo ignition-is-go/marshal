@@ -329,7 +329,10 @@ fn dropped_cell_handle_still_pumps_updates_after_reconnect() {
 
     let m1 = mirror.clone();
     wait_for("pre-restart session in mirror sink", move || {
-        m1.lock().unwrap().iter().any(|s| s.id.0.as_ref() == "s-pre")
+        m1.lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.id.0.as_ref() == "s-pre")
     });
 
     server_v1.shutdown();
@@ -364,7 +367,10 @@ fn dropped_cell_handle_still_pumps_updates_after_reconnect() {
 
     let m2 = mirror.clone();
     wait_for("post-restart session in mirror sink", move || {
-        m2.lock().unwrap().iter().any(|s| s.id.0.as_ref() == "s-post")
+        m2.lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.id.0.as_ref() == "s-post")
     });
 
     server_v2.shutdown();

@@ -1,11 +1,7 @@
 //! MCP tool dispatch — translates each tool call into MykoClient operations.
 
-use crate::mcp::{
-    METHOD_NOT_FOUND, Notifier, ToolError, ToolFuture, ToolHandler, ToolOutcome,
-};
-use entities::{
-    SendMessage, SendMessageResult, Session, SessionId, SetSessionCurrentTask,
-};
+use crate::mcp::{METHOD_NOT_FOUND, Notifier, ToolError, ToolFuture, ToolHandler, ToolOutcome};
+use entities::{SendMessage, SendMessageResult, Session, SessionId, SetSessionCurrentTask};
 use hyphae::{Cell, CellImmutable, Gettable, Signal, Watchable};
 use myko::client::MykoClient;
 use serde_json::{Value, json};
@@ -99,7 +95,11 @@ impl ToolHandler for CoordHandler {
                     let to = args
                         .get("to")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| ToolError::invalid_params("send_message: missing `to` (session id from `roster`)"))?
+                        .ok_or_else(|| {
+                            ToolError::invalid_params(
+                                "send_message: missing `to` (session id from `roster`)",
+                            )
+                        })?
                         .to_string();
                     let body = args
                         .get("body")
