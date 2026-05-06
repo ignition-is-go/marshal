@@ -1,13 +1,55 @@
 # marshal
 
-A coordination service that lets multiple Claude Code sessions on one machine see each other and pass messages.
+A coordination service that lets multiple Claude Code sessions on one machine see each other and pass messages. After install, `roster` shows every other live session, `send_message` reaches them, and inbound peer messages surface in your transcript as `<channel>` blocks.
 
-```
-$ /plugin marketplace add ignition-is-go/marshal
-$ /plugin install marshal-shim@marshal
+## Install
+
+Three steps — install the binaries, run the daemon, register the plugin.
+
+### 1. Install the binaries
+
+```bash
+cargo install marshal-shim marshal-daemon
+# optional but recommended for visibility into the live roster
+cargo install marshal-tui
 ```
 
-Now `roster` shows every other live session, `send_message` reaches them, and inbound peer messages surface in your transcript as `<channel>` blocks.
+This puts `marshal-shim` and `marshal-daemon` on your `PATH` (typically `~/.cargo/bin`).
+
+### 2. Start the daemon
+
+The daemon runs out-of-band — one per machine, lifetime independent of any Claude Code session. Pick whichever fits:
+
+```bash
+# foreground in its own terminal
+marshal-daemon
+
+# or backgrounded under your shell job control
+marshal-daemon &
+
+# or under your favorite supervisor (systemd user unit, launchd, tmux pane, ...)
+```
+
+The daemon binds `127.0.0.1:6155` by default and writes its event log to `~/.local/state/marshal/events.jsonl`. Override with `MARSHAL_BIND=0.0.0.0:6155` to listen on all interfaces.
+
+### 3. Add the plugin in Claude Code
+
+```text
+/plugin marketplace add ignition-is-go/marshal
+/plugin install marshal-shim@marshal
+```
+
+Restart the session. From here on, every Claude Code instance on the machine sees the marshal MCP server and can talk to its peers.
+
+If you'd rather wire MCP up by hand, the plugin is just shorthand for:
+
+```json
+{
+  "mcpServers": {
+    "marshal": { "command": "marshal-shim" }
+  }
+}
+```
 
 ## What you get
 
@@ -36,32 +78,6 @@ Claude Code ─┤                            │                              (
 - **`marshal-daemon`** owns the live roster and the event log under `~/.local/state/marshal/events.jsonl`. One daemon per machine. Run it under your favorite supervisor (or just `marshal-daemon &` in a terminal).
 - **`marshal-shim`** is the per-session stdio MCP server Claude Code spawns. It announces the session to the daemon on connect, watches for inbound messages, and forwards them onto stdout as channel notifications.
 - **`marshal-tui`** (optional) is a live ratatui dashboard of the roster + recent messages.
-
-## Install (manual)
-
-The plugin assumes the binaries are on `PATH`. Install once:
-
-```bash
-cargo install marshal-shim marshal-daemon
-# optional
-cargo install marshal-tui
-```
-
-Start the daemon out-of-band:
-
-```bash
-marshal-daemon
-```
-
-Then add the plugin to Claude Code (commands above), or wire the MCP server up by hand:
-
-```json
-{
-  "mcpServers": {
-    "marshal": { "command": "marshal-shim" }
-  }
-}
-```
 
 ## Configuring the daemon address
 
