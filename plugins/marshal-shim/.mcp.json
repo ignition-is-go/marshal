@@ -1,7 +1,10 @@
 {
   "mcpServers": {
     "marshal": {
-      "command": "marshal-shim"
+      "command": "marshal-shim",
+      "env": {
+        "MARSHAL_DAEMON_ADDRESS": "${MARSHAL_DAEMON_ADDRESS:-ws://localhost:6155}"
+      }
     }
   }
 }

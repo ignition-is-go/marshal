@@ -35,3 +35,27 @@ Peer messages arrive as `notifications/claude/channel` events that surface in yo
 /plugin marketplace add ignition-is-go/marshal
 /plugin install marshal-shim@marshal
 ```
+
+## Pointing at a non-default daemon
+
+By default the shim connects to `ws://localhost:6155`. To talk to a daemon on another host or port, set `MARSHAL_DAEMON_ADDRESS` in your shell before starting Claude Code:
+
+```bash
+export MARSHAL_DAEMON_ADDRESS=ws://my-daemon-host:6155
+```
+
+The plugin's `.mcp.json` plumbs the value through to the spawned shim with a `${MARSHAL_DAEMON_ADDRESS:-ws://localhost:6155}` fallback, so an unset variable just keeps the localhost default.
+
+For a per-project override, drop a `.mcp.json` at your project root that pins the env block:
+
+```json
+{
+  "mcpServers": {
+    "marshal": {
+      "env": { "MARSHAL_DAEMON_ADDRESS": "ws://10.0.0.5:6155" }
+    }
+  }
+}
+```
+
+The legacy `MYKO_ADDRESS` env var is still honored as a fallback for older configs.

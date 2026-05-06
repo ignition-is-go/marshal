@@ -1,7 +1,8 @@
 //! marshal-shim — stdio MCP server backed by a MykoClient.
 //!
 //! On startup the shim:
-//! 1. connects MykoClient to MYKO_ADDRESS (default ws://localhost:6155),
+//! 1. connects MykoClient to MARSHAL_DAEMON_ADDRESS (default
+//!    ws://localhost:6155),
 //! 2. SETs a `Session` entity describing this Claude session,
 //! 3. registers `on_command::<NotifyChannel>` so daemon-pushed notifications
 //!    (currently: peer messages via `MessageNotifySaga`) are forwarded as
@@ -27,7 +28,17 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-const DEFAULT_MYKO_ADDRESS: &str = "ws://localhost:6155";
+const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
+
+/// Env var that overrides the daemon WebSocket URL. Set this to point
+/// the shim at a daemon other than the default `ws://localhost:6155` —
+/// e.g. a daemon on another host or a non-default port. The plugin's
+/// `.mcp.json` plumbs this through with `${MARSHAL_DAEMON_ADDRESS}`
+/// substitution, so a user-shell `export` is enough to reach Claude
+/// Code's spawned shim. The legacy `MYKO_ADDRESS` name is honored as
+/// a fallback so existing setups don't break on upgrade.
+const ADDRESS_ENV: &str = "MARSHAL_DAEMON_ADDRESS";
+const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,10 +56,11 @@ async fn main() -> Result<()> {
     init_logging();
     entities::link();
 
-    let myko_address =
-        std::env::var("MYKO_ADDRESS").unwrap_or_else(|_| DEFAULT_MYKO_ADDRESS.to_string());
+    let daemon_address = std::env::var(ADDRESS_ENV)
+        .or_else(|_| std::env::var(ADDRESS_ENV_LEGACY))
+        .unwrap_or_else(|_| DEFAULT_DAEMON_ADDRESS.to_string());
 
-    log::info!("[marshal-shim] connecting to {myko_address}");
+    log::info!("[marshal-shim] connecting to {daemon_address}");
 
     let client = Arc::new(MykoClient::new());
 
@@ -128,7 +140,7 @@ async fn main() -> Result<()> {
 
     // All queries / handlers / connection subscribers are registered.
     // Now it's safe to start the WS handshake.
-    client.set_address(Some(myko_address));
+    client.set_address(Some(daemon_address));
 
     let host = Arc::new(tools::ToolHost {
         client: Arc::clone(&client),

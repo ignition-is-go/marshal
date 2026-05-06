@@ -38,13 +38,19 @@ use std::{
 
 const FRAME_POLL: Duration = Duration::from_millis(150);
 const RECENT_LIMIT: usize = 50;
-const DEFAULT_MYKO_ADDRESS: &str = "ws://localhost:6155";
+const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
+/// Env var that overrides the daemon WebSocket URL. Same name the shim
+/// uses, so a single `export MARSHAL_DAEMON_ADDRESS=...` configures
+/// every marshal client. `MYKO_ADDRESS` is honored as a legacy fallback.
+const ADDRESS_ENV: &str = "MARSHAL_DAEMON_ADDRESS";
+const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
 
 #[derive(Parser, Debug)]
 #[command(name = "marshal-tui")]
 struct Args {
-    /// Override the daemon WebSocket URL. Defaults to MYKO_ADDRESS env var,
-    /// then to ws://localhost:6155.
+    /// Override the daemon WebSocket URL. Defaults to
+    /// MARSHAL_DAEMON_ADDRESS env var (then MYKO_ADDRESS for back-compat),
+    /// then ws://localhost:6155.
     #[arg(long)]
     address: Option<String>,
 
@@ -106,8 +112,9 @@ async fn main() -> Result<()> {
 
     let address = args
         .address
-        .or_else(|| std::env::var("MYKO_ADDRESS").ok())
-        .unwrap_or_else(|| DEFAULT_MYKO_ADDRESS.to_string());
+        .or_else(|| std::env::var(ADDRESS_ENV).ok())
+        .or_else(|| std::env::var(ADDRESS_ENV_LEGACY).ok())
+        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string());
 
     entities::link();
 
