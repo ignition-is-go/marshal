@@ -30,7 +30,7 @@ marshal-daemon &
 # or under your favorite supervisor (systemd user unit, launchd, tmux pane, ...)
 ```
 
-The daemon binds `127.0.0.1:6155` by default and writes its event log to `~/.local/state/marshal/events.jsonl`. Override with `MARSHAL_BIND=0.0.0.0:6155` to listen on all interfaces.
+The daemon binds `0.0.0.0:6155` by default (so peers on other hosts can reach it without remembering to flip a flag) and writes its event log to `~/.local/state/marshal/events.jsonl`. Restrict to localhost only with `MARSHAL_BIND=127.0.0.1:6155`.
 
 ### 3. Add the plugin in Claude Code
 
@@ -107,7 +107,7 @@ The shim defaults to `ws://localhost:6155`. To point it elsewhere, set `MARSHAL_
 }
 ```
 
-The daemon's bind address is set with `MARSHAL_BIND` (default `127.0.0.1:6155`).
+The daemon's bind address is set with `MARSHAL_BIND` (default `0.0.0.0:6155` — set `MARSHAL_BIND=127.0.0.1:6155` to restrict to localhost).
 
 ## Workspace layout
 
