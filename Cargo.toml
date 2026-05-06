@@ -18,7 +18,7 @@ env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 notify-debouncer-mini = "0.7"
 
-# Myko stack (path-patched below for hot-reload against the local checkout).
+# Myko stack — pulled from crates.io.
 myko = "^4.10.0"
 myko-macros = "^4.10.0"
 myko-server = "^4.10.0"
@@ -27,11 +27,3 @@ hyphae = "^1.0.0"
 
 # Local crates
 entities = { path = "crates/entities" }
-
-[patch.crates-io]
-myko = { git = "https://github.com/ignition-is-go/myko" }
-myko-macros = { git = "https://github.com/ignition-is-go/myko" }
-myko-server = { git = "https://github.com/ignition-is-go/myko" }
-myko-leptos = { git = "https://github.com/ignition-is-go/myko" }
-autosocket = { git = "https://github.com/ignition-is-go/myko" }
-hyphae = { git = "https://github.com/ignition-is-go/hyphae" }

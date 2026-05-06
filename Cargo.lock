@@ -191,7 +191,8 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "autosocket"
 version = "4.10.0"
-source = "git+https://github.com/ignition-is-go/myko#d65f849f76d7d4530a35ab4e03ac6621d50b0604"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "154a853f47abefa8a06662ab41c36b53c3b67d2acdb87e6abd6287a1090e0553"
 dependencies = [
  "dashmap",
  "flume",
@@ -1370,7 +1371,8 @@ dependencies = [
 [[package]]
 name = "hyphae"
 version = "1.0.3"
-source = "git+https://github.com/ignition-is-go/hyphae#5da7550a1d2c26365a30dd386253c6ccb462220d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f907d4d165074d3fcd274506df1cbd5e39fea6a3c9d6554cb282e35a28f0bf88"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2035,7 +2037,8 @@ checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
 [[package]]
 name = "myko"
 version = "4.10.0"
-source = "git+https://github.com/ignition-is-go/myko#d65f849f76d7d4530a35ab4e03ac6621d50b0604"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5da3e806e60e76dc835c04395ce262cd32fe4b973213dd690d25d6a107d5c284"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2069,7 +2072,8 @@ dependencies = [
 [[package]]
 name = "myko-leptos"
 version = "4.10.0"
-source = "git+https://github.com/ignition-is-go/myko#d65f849f76d7d4530a35ab4e03ac6621d50b0604"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366893c28dc437db8d381a47478ae7e46b1b5aecc3e6fb949087aa108ab673e6"
 dependencies = [
  "leptos",
  "myko",
@@ -2079,7 +2083,8 @@ dependencies = [
 [[package]]
 name = "myko-macros"
 version = "4.10.0"
-source = "git+https://github.com/ignition-is-go/myko#d65f849f76d7d4530a35ab4e03ac6621d50b0604"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63049dfdcecbb54d705df5bfd0d39b8e349f30908287f6b58b1473f23af7338c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2089,7 +2094,8 @@ dependencies = [
 [[package]]
 name = "myko-server"
 version = "4.10.0"
-source = "git+https://github.com/ignition-is-go/myko#d65f849f76d7d4530a35ab4e03ac6621d50b0604"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84174826b0e7973f57912c1bd0f6a6bdcd616a0fabc10ce3f3f44a4f452d539d"
 dependencies = [
  "chrono",
  "ciborium",
