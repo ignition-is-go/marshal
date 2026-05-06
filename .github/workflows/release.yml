@@ -1,10 +1,12 @@
 name: Release
 
-# Triggered on every push to main / dev. cargo-flux computes the next
-# version from conventional commits since the last tag, stamps every
-# Cargo.toml, commits the bump, tags it, pushes, and creates a GitHub
-# Release. Publishing happens in publish.yml in response to that
-# release event.
+# Single workflow that stamps the next version, tags it, creates a
+# GitHub Release, and publishes the marshal-* crates to crates.io —
+# all in one job. Combined because GITHUB_TOKEN-created `release:
+# published` events don't trigger downstream workflows; chaining a
+# separate publish.yml would silently never fire. (Switching to a
+# GitHub App or PAT would unlock that path; for now the single-job
+# flow is simpler and reliable.)
 
 on:
   push:
@@ -15,14 +17,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+    env:
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
-          # `persist-credentials: true` (the default) leaves the auth
-          # header in place so the later `git push` with GITHUB_TOKEN
-          # can write back to the protected refs.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -46,10 +48,11 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-      - name: Stamp, commit, tag, and create GitHub Release
+      - name: Stamp, commit, tag, push, release, and publish
         if: steps.check.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           VERSION=$(cargo flux version)
           cargo flux stamp "$VERSION"
@@ -65,3 +68,5 @@ jobs:
           else
             gh release create "v$VERSION" --title "v$VERSION" --generate-notes --prerelease
           fi
+          # Publish marshal-* crates to crates.io in workspace dep order.
+          cargo flux run publish
