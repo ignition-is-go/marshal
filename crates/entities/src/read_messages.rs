@@ -12,7 +12,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
     myko_command,
@@ -21,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     message::{GetAllMessages, Message, MessageId},
-    message_read::{GetAllMessageReads, MessageRead, MessageReadId},
+    message_read::{GetAllMessageReads, MessageRead},
     room::RoomId,
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId},
@@ -64,11 +63,6 @@ pub struct ReadMessages {
     /// Cap on returned messages (default 50, max 500).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
-
-    /// If `true`, write `MessageRead` rows for the fetched set so a
-    /// subsequent `unread:true` call doesn't return them again.
-    #[serde(default)]
-    pub mark_read: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,22 +205,6 @@ impl CommandHandler for ReadMessages {
                 read_by_me: my_reads.contains(&m.id),
             })
             .collect();
-
-        if self.mark_read {
-            let now = Utc::now().timestamp_millis();
-            for m in &sorted {
-                if my_reads.contains(&m.id) {
-                    continue;
-                }
-                let read_id = MessageRead::make_id(m.id.0.as_ref(), me.id.0.as_ref());
-                ctx.emit_set(&MessageRead {
-                    id: MessageReadId(Arc::from(read_id.as_str())),
-                    message_id: m.id.clone(),
-                    session_id: me.id.clone(),
-                    read_at: now,
-                })?;
-            }
-        }
 
         Ok(ReadMessagesResult {
             messages: views,

@@ -16,6 +16,7 @@
 //! framework traits at the parent scope; multiple items in the same
 //! module would collide.
 
+mod ack_messages;
 mod broadcast_message;
 mod message;
 mod message_read;
@@ -27,6 +28,7 @@ mod room_tools;
 mod send_message;
 mod session;
 
+pub use ack_messages::*;
 pub use broadcast_message::*;
 pub use message::*;
 pub use message_read::*;

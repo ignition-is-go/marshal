@@ -18,12 +18,11 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use hyphae::Watchable;
 use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session, SessionId};
-use mcp::{ServerConfig, ToolDef};
+use mcp::ServerConfig;
 use myko::{
     client::{ConnectionStatus, MykoClient},
     wire::{MEvent, MEventType},
 };
-use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -110,11 +109,17 @@ async fn main() -> Result<()> {
     };
     let session = Arc::new(Mutex::new(session));
 
-    // Open the long-lived `GetAllSessions` subscription BEFORE we connect
-    // so it's primed by the time the WS handshake completes — tools that
-    // snapshot it (roster, send_message recipient resolution) don't race
-    // the server's first response.
+    // Open the long-lived `GetAll*` subscriptions BEFORE we connect so
+    // they're primed by the time the WS handshake completes — tools and
+    // resources that snapshot them (roster, rooms, send_message
+    // recipient resolution) don't race the server's first response.
     let sessions_cell = client.watch_query::<GetAllSessions>(GetAllSessions {});
+    let rooms_cell = client.watch_query::<marshal_entities::GetAllRooms>(
+        marshal_entities::GetAllRooms {},
+    );
+    let members_cell = client.watch_query::<marshal_entities::GetAllRoomMembers>(
+        marshal_entities::GetAllRoomMembers {},
+    );
 
     // Re-SET our Session on every connect. The daemon holds session state
     // in-memory, so a daemon restart drops every roster entry; we have to
@@ -154,6 +159,8 @@ async fn main() -> Result<()> {
         cwd: cwd.clone(),
         session: Arc::clone(&session),
         sessions_cell,
+        rooms_cell,
+        members_cell,
     });
 
     let handler = Arc::new(tools::CoordHandler { host });
@@ -163,13 +170,31 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION").into(),
         instructions: format!(
             "You are session '{nickname}' (id {}) in {cwd}. Coordinate with \
-             sibling Claude sessions via the marshal daemon. Tools: whoami, \
-             roster, send_message, set_status. Inbound messages from peers \
-             arrive as `notifications/claude/channel` events; reply with \
-             `send_message`.",
+             sibling Claude sessions via the marshal daemon.\n\
+             \n\
+             READ paths are resources (use `resources/read`):\n\
+             - marshal://whoami       — your session id, nickname, pid, cwd, operator, host\n\
+             - marshal://roster       — every live session and what room(s) it's in\n\
+             - marshal://rooms        — every room and who its members are\n\
+             - marshal://messages     — message history; supports query params:\n\
+                                       inbox=true, sent=true, unread=true,\n\
+                                       room=ID, from=SID, to_session=SID,\n\
+                                       since=MILLIS, limit=N\n\
+             \n\
+             WRITE paths are tools (use `tools/call`):\n\
+             - send_message       — direct send to a peer's session_id\n\
+             - broadcast          — fan-out to all members of a room\n\
+             - join_room          — create or join an ad-hoc room\n\
+             - leave_room         — leave an ad-hoc room\n\
+             - set_status         — set this session's free-form status text\n\
+             - ack_messages       — mark message ids as read for this session\n\
+             \n\
+             Inbound peer messages arrive as `notifications/claude/channel` \
+             events; reply with `send_message` or `broadcast`.",
             session_id.0
         ),
-        tools: tools_def(),
+        tools: tools::tools_def(),
+        resources: tools::resources_def(),
     };
 
     // Activity tracker: bumped by the MCP dispatcher on each request and
@@ -316,64 +341,6 @@ fn detect_git_branch(cwd: &str) -> Option<String> {
     } else {
         Some(s.to_string())
     }
-}
-
-fn schema_object(properties: Value, required: &[&str]) -> Value {
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })
-}
-
-fn tools_def() -> Vec<ToolDef> {
-    let empty = schema_object(json!({}), &[]);
-    vec![
-        ToolDef {
-            name: "whoami".into(),
-            description: "Return this session's id, nickname, pid, and cwd.".into(),
-            input_schema: empty.clone(),
-        },
-        ToolDef {
-            name: "roster".into(),
-            description: "List all live coord sessions (snapshot of the daemon's session entities).".into(),
-            input_schema: empty,
-        },
-        ToolDef {
-            name: "set_status".into(),
-            description: "Set this session's free-form status text (the `current_task` field on the roster).".into(),
-            input_schema: schema_object(
-                json!({
-                    "text": {
-                        "type": "string",
-                        "description": "Free-form status text. Empty string clears."
-                    }
-                }),
-                &["text"],
-            ),
-        },
-        ToolDef {
-            name: "send_message".into(),
-            description: "Send a message to another session by session_id. Look up the id with `roster` first; \
-                          nicknames are display-only and are not accepted as recipients. \
-                          The daemon validates the recipient and returns an error if the session is unknown or offline."
-                .into(),
-            input_schema: schema_object(
-                json!({
-                    "to": {
-                        "type": "string",
-                        "description": "Recipient `session_id` (uuid) from `roster()`. Not a nickname."
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Message body."
-                    }
-                }),
-                &["to", "body"],
-            ),
-        },
-    ]
 }
 
 /// Resolve which human this session belongs to. `MARSHAL_OPERATOR`

@@ -34,13 +34,42 @@ pub struct ToolDef {
     pub input_schema: Value,
 }
 
+/// A read-only MCP resource. Per the MCP spec, resources are addressable
+/// state the model can fetch (vs tools which are actions). Marshal uses
+/// resources for everything that doesn't mutate: `marshal://whoami`,
+/// `marshal://roster`, `marshal://rooms`, `marshal://messages?...`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResourceDef {
+    pub uri: String,
+    pub name: String,
+    pub description: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub name: String,
     pub version: String,
     pub instructions: String,
     pub tools: Vec<ToolDef>,
+    pub resources: Vec<ResourceDef>,
 }
+
+/// Result of a resource read.
+#[derive(Debug)]
+pub struct ResourceContent {
+    /// URI the content was fetched from (echoed back; may include
+    /// the user's query string).
+    pub uri: String,
+    /// Typically `application/json` for our structured payloads.
+    pub mime_type: String,
+    /// Body — for JSON resources, a serialized JSON value.
+    pub text: String,
+}
+
+/// Error from a resource read.
+pub type ResourceError = ToolError;
 
 /// Result of a tool call.
 #[derive(Debug)]
@@ -220,15 +249,38 @@ enum OutboundMessage {
 // =============================================================================
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolOutcome, ToolError>> + Send + 'a>>;
+pub type ResourceFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ResourceContent, ResourceError>> + Send + 'a>>;
 
-pub trait ToolHandler: Send + Sync + 'static {
+/// Single trait covering both the write surface (`call_tool`) and the
+/// read surface (`read_resource`). The dispatcher routes by method:
+/// `tools/call` → `call_tool`, `resources/read` → `read_resource`.
+pub trait Handler: Send + Sync + 'static {
     fn call_tool<'a>(
         &'a self,
         name: &'a str,
         args: &'a Value,
         notifier: &'a Notifier,
     ) -> ToolFuture<'a>;
+
+    /// Fetch a resource by full URI (including any query string).
+    /// Default implementation rejects every URI with `METHOD_NOT_FOUND`,
+    /// so a tools-only server can stay tools-only.
+    fn read_resource<'a>(&'a self, uri: &'a str) -> ResourceFuture<'a> {
+        let uri = uri.to_string();
+        Box::pin(async move {
+            Err(ResourceError {
+                code: METHOD_NOT_FOUND,
+                message: format!("no resource at '{uri}'"),
+                data: None,
+            })
+        })
+    }
 }
+
+// Backwards-compatible alias — older code refers to `ToolHandler`. New code
+// should use `Handler` directly.
+pub use Handler as ToolHandler;
 
 // =============================================================================
 // Server
@@ -446,6 +498,7 @@ fn dispatch_request<H>(
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {
                     "tools": {},
+                    "resources": { "subscribe": false, "listChanged": false },
                     "logging": {},
                     "experimental": {
                         "claude/channel": {}
@@ -468,6 +521,48 @@ fn dispatch_request<H>(
         "tools/list" => {
             let result = serde_json::json!({ "tools": &config.tools });
             let _ = notifier.out_tx.send(OutboundMessage::Reply { id, result });
+        }
+        "resources/list" => {
+            let result = serde_json::json!({ "resources": &config.resources });
+            let _ = notifier.out_tx.send(OutboundMessage::Reply { id, result });
+        }
+        "resources/read" => {
+            // Track resource reads as in-flight too; the visible-tool
+            // bookkeeping (record_tool) does not apply since these
+            // aren't tool calls. The whole call still bumps `activity`
+            // for self-update gating purposes.
+            activity.start();
+            tokio::spawn(async move {
+                let uri = params
+                    .get("uri")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let result = handler.read_resource(&uri).await;
+                let msg = match result {
+                    Ok(content) => OutboundMessage::Reply {
+                        id,
+                        result: serde_json::json!({
+                            "contents": [{
+                                "uri": content.uri,
+                                "mimeType": content.mime_type,
+                                "text": content.text,
+                            }]
+                        }),
+                    },
+                    Err(e) => OutboundMessage::Error {
+                        id,
+                        body: JsonRpcErrorBody {
+                            code: e.code,
+                            message: e.message,
+                            data: e.data,
+                        },
+                    },
+                };
+                let _ = notifier.out_tx.send(msg);
+                activity.end();
+            });
         }
         "tools/call" => {
             // Track the tools/call as in-flight so the self-update watcher
@@ -563,6 +658,7 @@ mod tests {
                 description: "echo".into(),
                 input_schema: serde_json::json!({"type": "object"}),
             }],
+            resources: vec![],
         }
     }
 
