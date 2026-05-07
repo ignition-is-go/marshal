@@ -74,8 +74,15 @@ pub struct Room {
 }
 
 pub enum RoomKind {
-    Auto { source: AutoSource },  // Host | Operator | Project { cwd }
+    Auto { source: AutoSource },  // Everyone | Host | Operator | Project { cwd }
     Adhoc,
+}
+
+pub enum AutoSource {
+    Everyone,            // singleton, every live session
+    Host,                // every session whose Session.host.name matches
+    Operator,            // every session whose Session.operator matches
+    Project { cwd: String },
 }
 
 #[myko_item]
@@ -96,24 +103,35 @@ membership rows; a room being deleted DELs all its memberships.
 
 When a session SETs/re-SETs, the daemon's `AutoRoomSaga`:
 
-- Ensures `host:<name>` exists; auto-joins this session.
-- Ensures `op:<operator>` exists; auto-joins this session.
+- Ensures `everyone` exists (singleton, never DEL'd); auto-joins this session.
+- Ensures `host:<name>` exists; auto-joins.
+- Ensures `op:<operator>` exists; auto-joins.
 - If `cwd` is inside a git repo, ensures `project:<repo-basename>` exists;
   auto-joins.
 
+`everyone`, `host:`, `op:`, `project:` are first-class routes — you can
+`broadcast("everyone", "...")`, `broadcast("op:trevor", "...")`,
+`broadcast("project:marshal", "...")` exactly like ad-hoc rooms. The
+identity fields drive membership; the rooms are just the addressable
+view of "all sessions sharing this identity attribute".
+
 These auto-rooms are tagged `RoomKind::Auto { source }` so the roster /
 TUI can surface them differently from ad-hoc rooms (icon, dim color),
-and so cleanup can sweep an auto-room when the last member leaves.
+and so cleanup can sweep them when the last member leaves — except
+`everyone`, which is always present.
 
 ### Naming and id rules
 
-- Auto-room ids are `host:<name>`, `op:<operator>`, `project:<basename>`.
-  Stable, recomputable from a session's identity.
+- Singleton: `everyone`. Always exists, every live session is a member,
+  the cleanup sweeper never DELs it.
+- Other auto-room ids are `host:<name>`, `op:<operator>`,
+  `project:<basename>`. Stable, recomputable from a session's identity.
 - Ad-hoc room ids are slugified from the user-supplied name (lowercase,
-  `[a-z0-9-]+`), with `-{N}` suffix on collision (same dedup trick we use
-  for nicknames).
-- Reserved prefixes: `host:`, `op:`, `project:`. `join_room("host:foo")`
-  errors loudly so users can't shadow auto-rooms.
+  `[a-z0-9-]+`), with `-{N}` suffix on collision (same dedup trick we
+  use for nicknames).
+- Reserved names + prefixes: `everyone`, `host:`, `op:`, `project:`.
+  `join_room("host:foo")` and `join_room("everyone")` error loudly so
+  users can't shadow auto-rooms.
 
 ### Tool surface
 
@@ -167,35 +185,32 @@ session in the room block all communication, which we don't want.
 
 ## 4. Open questions
 
-These are the calls I've made tentatively in the proposal above; tell me
-if you want any of them flipped:
+### Resolved
 
-1. **Reserved prefixes (`host:`, `op:`, `project:`)** — block users from
-   creating rooms with those prefixes, or just discourage in docs?
-   I picked block.
-2. **Auto-rooms opt-out** — should there be a per-shim flag /
-   `MARSHAL_AUTO_ROOMS=off` that suppresses auto-joining? Privacy on
-   shared boxes. I left them on always; easy to add later.
-3. **Broadcast to "everyone"** — implicit `*` room or just require people
-   to broadcast in `host:<theirs>`? I'd skip `*` to avoid noise.
+1. **Reserved prefixes (`everyone`, `host:`, `op:`, `project:`)** —
+   blocked. `join_room("host:foo")` errors loudly.
+2. **Auto-rooms opt-out** — none. Auto-rooms are always on. (We can
+   revisit if real privacy concerns surface; out of scope for v1.)
+3. **`everyone` room** — yes. Singleton auto-room every session
+   joins. `broadcast("everyone", "...")` reaches every live peer in
+   one server call.
+5. **Operator + project as routes** — yes. Auto-rooms `op:<operator>`
+   and `project:<basename>` are first-class addressable rooms; the
+   identity attribute drives membership.
+
+### Still open
+
 4. **Read state per-broadcast-recipient** — current `Message.read_at` is
    a single bool. For broadcasts that becomes ambiguous (read by whom?).
    Options: (a) one `Message` per recipient (current default in proposal),
    each with its own `read_at`; (b) one `Message` with a separate
    `MessageRead { message_id, session_id, read_at }` join table.
-   (a) is simpler, (b) saves bytes for huge broadcasts. I picked (a).
-5. **Cross-host rooms** — auto-room `host:laptop` only contains sessions
-   on `laptop`. Once we add a remote daemon that federates, we'd want
-   rooms that span hosts (e.g. `op:trevor` follows trevor across machines).
-   Out of scope for this proposal, but worth knowing the model
-   accommodates it: `op:` is computed from the operator field, which is
-   identity-not-host, so a federated daemon wouldn't need a different
-   primitive.
+   (a) is simpler, (b) saves bytes for huge broadcasts. Tentative: (a).
 6. **Subscribe-to-room** — should listing or watching a room produce a
-   live stream of new messages, or do we keep delivery purely push-on-send?
-   I'd keep it push-on-send: rooms are routing scope, not topics you
-   subscribe to. If you want a live event stream, the existing
-   `notifications/claude/channel` push is already that.
+   live stream of new messages, or do we keep delivery purely
+   push-on-send? Tentative: push-on-send only — rooms are routing
+   scope, not topics. Existing `notifications/claude/channel` already
+   covers live streams.
 
 ## 5. Migration / back-compat
 
