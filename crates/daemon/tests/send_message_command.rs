@@ -58,6 +58,7 @@ fn session(id: &str, nickname: &str, client_id: Option<&str>) -> Session {
         last_tool_at: None,
         operator: None,
         host: None,
+        project: None,
     }
 }
 

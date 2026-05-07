@@ -110,6 +110,7 @@ fn session_set_event(id: &str, nickname: &str) -> MEvent {
         last_tool_at: None,
         operator: None,
         host: None,
+        project: None,
     };
     MEvent::from_item(&session, MEventType::SET, &uuid::Uuid::new_v4().to_string())
 }

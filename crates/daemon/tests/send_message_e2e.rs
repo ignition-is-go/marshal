@@ -123,6 +123,7 @@ fn make_session(id: &str, nickname: &str) -> Session {
         last_tool_at: None,
         operator: None,
         host: None,
+        project: None,
     }
 }
 

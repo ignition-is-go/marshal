@@ -30,6 +30,7 @@ hyphae = { workspace = true }
 marshal-entities = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
+chrono = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1"

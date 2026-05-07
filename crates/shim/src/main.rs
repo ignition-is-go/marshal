@@ -88,6 +88,7 @@ async fn main() -> Result<()> {
         .unwrap_or("session")
         .to_string();
     let git_branch = detect_git_branch(&cwd);
+    let project = detect_project_basename(&cwd);
     let operator = detect_operator();
     let host = detect_host();
     let session_id = SessionId(Arc::from(Uuid::new_v4().to_string()));
@@ -106,6 +107,7 @@ async fn main() -> Result<()> {
         last_tool_at: None,
         operator: Some(operator.clone()),
         host: Some(host.clone()),
+        project: project.clone(),
     };
     let session = Arc::new(Mutex::new(session));
 
@@ -341,6 +343,27 @@ fn detect_git_branch(cwd: &str) -> Option<String> {
     } else {
         Some(s.to_string())
     }
+}
+
+/// Resolve the project name for this session — the basename of the
+/// git repo root containing `cwd`. `None` when `cwd` isn't inside a
+/// git repo. Anchors the daemon's `project:<basename>` auto-room.
+fn detect_project_basename(cwd: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let toplevel = String::from_utf8(out.stdout).ok()?;
+    let toplevel = toplevel.trim();
+    std::path::Path::new(toplevel)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// Resolve which human this session belongs to. `MARSHAL_OPERATOR`

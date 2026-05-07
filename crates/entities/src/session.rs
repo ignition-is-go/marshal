@@ -58,6 +58,7 @@ mod tests {
             last_tool_at: Some(1_700_000_004_500_i64),
             operator: None,
             host: None,
+            project: None,
         };
         let json = serde_json::to_value(&s).unwrap();
         // camelCase on the wire (matches the rest of the codebase).
@@ -84,6 +85,7 @@ mod tests {
             last_tool: None,
             last_tool_at: None,
             operator: Some("trevor".into()),
+            project: None,
             host: Some(HostInfo {
                 name: "laptop".into(),
                 os: "linux".into(),
@@ -184,4 +186,12 @@ pub struct Session {
     /// Anchors the auto-room `host:<name>`. See `HostInfo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostInfo>,
+
+    /// Project basename — the basename of the git repo root containing
+    /// this session's `cwd`. Resolved by the shim at startup (the
+    /// daemon can't run `git` against a remote shim's filesystem).
+    /// Anchors the auto-room `project:<basename>`. `None` when `cwd`
+    /// isn't inside a git repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
