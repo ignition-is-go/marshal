@@ -158,9 +158,7 @@ impl CommandHandler for LeaveRoom {
         let room = rooms
             .iter()
             .find(|r| r.id.0.as_ref() == self.room || r.name == self.room)
-            .ok_or_else(|| {
-                err(&ctx, &format!("no room matching '{}'", self.room))
-            })?
+            .ok_or_else(|| err(&ctx, &format!("no room matching '{}'", self.room)))?
             .clone();
 
         // Auto-rooms aren't user-leavable — their membership is

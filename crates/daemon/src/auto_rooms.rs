@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use marshal_entities::{
-    AutoSource, GetAllRooms, GetAllRoomMembers, Room, RoomId, RoomKind, RoomMember,
-    RoomMemberId, Session,
+    AutoSource, GetAllRoomMembers, GetAllRooms, Room, RoomId, RoomKind, RoomMember, RoomMemberId,
+    Session,
 };
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
@@ -47,11 +47,7 @@ impl SagaHandler for AutoRoomSaga {
     type Command = DispatchAutoRooms;
     const EVENT_TYPE: MEventType = MEventType::SET;
 
-    fn handle(
-        session: Session,
-        _event: MEvent,
-        _ctx: Arc<SagaContext>,
-    ) -> Option<Self::Command> {
+    fn handle(session: Session, _event: MEvent, _ctx: Arc<SagaContext>) -> Option<Self::Command> {
         Some(DispatchAutoRooms {
             session_id: session.id.0.as_ref().to_string(),
         })
@@ -143,7 +139,9 @@ impl CommandHandler for DispatchAutoRooms {
 
             // Ensure the membership row exists.
             let member_id = RoomMember::make_id(room_id.0.as_ref(), session.id.0.as_ref());
-            let already_member = memberships.iter().any(|m| m.id.0.as_ref() == member_id.as_str());
+            let already_member = memberships
+                .iter()
+                .any(|m| m.id.0.as_ref() == member_id.as_str());
             if !already_member {
                 ctx.emit_set(&RoomMember {
                     id: RoomMemberId(Arc::from(member_id.as_str())),

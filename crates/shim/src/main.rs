@@ -116,12 +116,10 @@ async fn main() -> Result<()> {
     // resources that snapshot them (roster, rooms, send_message
     // recipient resolution) don't race the server's first response.
     let sessions_cell = client.watch_query::<GetAllSessions>(GetAllSessions {});
-    let rooms_cell = client.watch_query::<marshal_entities::GetAllRooms>(
-        marshal_entities::GetAllRooms {},
-    );
-    let members_cell = client.watch_query::<marshal_entities::GetAllRoomMembers>(
-        marshal_entities::GetAllRoomMembers {},
-    );
+    let rooms_cell =
+        client.watch_query::<marshal_entities::GetAllRooms>(marshal_entities::GetAllRooms {});
+    let members_cell = client
+        .watch_query::<marshal_entities::GetAllRoomMembers>(marshal_entities::GetAllRoomMembers {});
 
     // Re-SET our Session on every connect. The daemon holds session state
     // in-memory, so a daemon restart drops every roster entry; we have to

@@ -102,9 +102,9 @@ impl CommandHandler for ReadMessages {
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-        let caller_client_id = ctx.client_id().ok_or_else(|| {
-            err(&ctx, "read_messages must be called over a connected client")
-        })?;
+        let caller_client_id = ctx
+            .client_id()
+            .ok_or_else(|| err(&ctx, "read_messages must be called over a connected client"))?;
         let me = sessions
             .iter()
             .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
@@ -153,8 +153,7 @@ impl CommandHandler for ReadMessages {
                 // I'm a current member of the room and joined before
                 // it was sent.
                 let is_sender = m.from_session_id == me.id;
-                let is_direct_recipient =
-                    m.to_session_id.as_ref() == Some(&me.id);
+                let is_direct_recipient = m.to_session_id.as_ref() == Some(&me.id);
                 let is_room_member = m
                     .to_room_id
                     .as_ref()

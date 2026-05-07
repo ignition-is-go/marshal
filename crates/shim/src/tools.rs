@@ -18,9 +18,8 @@ use crate::mcp::{
 use hyphae::{Cell, CellImmutable, Gettable, Signal, Watchable};
 use marshal_entities::{
     AckMessages, AckMessagesResult, BroadcastMessage, BroadcastMessageResult, JoinRoom,
-    JoinRoomResult, LeaveRoom, LeaveRoomResult, MessageId, ReadMessages, ReadMessagesResult,
-    Room, RoomId, RoomMember, SendMessage, SendMessageResult, Session, SessionId,
-    SetSessionCurrentTask,
+    JoinRoomResult, LeaveRoom, LeaveRoomResult, MessageId, ReadMessages, ReadMessagesResult, Room,
+    RoomId, RoomMember, SendMessage, SendMessageResult, Session, SessionId, SetSessionCurrentTask,
 };
 use myko::client::MykoClient;
 use serde_json::{Value, json};
@@ -188,7 +187,10 @@ async fn read_messages(
     query: &std::collections::HashMap<String, String>,
 ) -> Result<ResourceContent, ResourceError> {
     let cmd = ReadMessages {
-        room: query.get("room").cloned().map(|s| RoomId(Arc::from(s.as_str()))),
+        room: query
+            .get("room")
+            .cloned()
+            .map(|s| RoomId(Arc::from(s.as_str()))),
         from: query
             .get("from")
             .cloned()
@@ -467,13 +469,15 @@ struct ParsedUri {
 
 impl ParsedUri {
     fn parse(uri: &str) -> Result<Self, ResourceError> {
-        let rest = uri.strip_prefix("marshal://").ok_or_else(|| ResourceError {
-            code: 0,
-            message: format!(
-                "unsupported resource scheme in '{uri}'; marshal serves marshal:// URIs only",
-            ),
-            data: None,
-        })?;
+        let rest = uri
+            .strip_prefix("marshal://")
+            .ok_or_else(|| ResourceError {
+                code: 0,
+                message: format!(
+                    "unsupported resource scheme in '{uri}'; marshal serves marshal:// URIs only",
+                ),
+                data: None,
+            })?;
         let (path, query_str) = match rest.split_once('?') {
             Some((p, q)) => (p, q),
             None => (rest, ""),
@@ -512,10 +516,8 @@ fn url_decode(s: &str) -> std::borrow::Cow<'_, str> {
                 let h1 = bytes.next();
                 let h2 = bytes.next();
                 if let (Some(h1), Some(h2)) = (h1, h2)
-                    && let (Some(d1), Some(d2)) = (
-                        (h1 as char).to_digit(16),
-                        (h2 as char).to_digit(16),
-                    )
+                    && let (Some(d1), Some(d2)) =
+                        ((h1 as char).to_digit(16), (h2 as char).to_digit(16))
                 {
                     out.push(((d1 * 16 + d2) as u8) as char);
                 } else {
