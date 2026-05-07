@@ -104,11 +104,11 @@ impl CommandHandler for SendMessage {
             id: MessageId(Arc::from(Uuid::new_v4().to_string())),
             from_session_id: sender.id.clone(),
             from_nick: sender.nickname.clone(),
-            to_session_id: recipient.id.clone(),
+            to_session_id: Some(recipient.id.clone()),
+            to_room_id: None,
             to_nick: recipient.nickname.clone(),
             body: self.body.clone(),
             sent_at: now,
-            read_at: None,
         };
 
         let dispatched = push_to_client(
