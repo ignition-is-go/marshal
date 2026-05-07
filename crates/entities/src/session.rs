@@ -1,4 +1,20 @@
 use myko::{entities::client::ClientId, myko_item};
+use serde::{Deserialize, Serialize};
+
+/// Per-session host environment summary the shim auto-populates at startup
+/// so the roster can show "which machine is this session on" without
+/// every consumer running its own probe. Optional — some shims (older
+/// builds, the TUI in pure-observer mode) may leave it `None`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostInfo {
+    /// `gethostname()` result. Anchors the auto-room `host:<name>`.
+    pub name: String,
+    /// `std::env::consts::OS` — `"linux"`, `"macos"`, `"windows"`, etc.
+    pub os: String,
+    /// `std::env::consts::ARCH` — `"x86_64"`, `"aarch64"`, etc.
+    pub arch: String,
+}
 
 #[cfg(test)]
 mod tests {
@@ -22,6 +38,8 @@ mod tests {
         assert_eq!(s.last_activity_at, None);
         assert_eq!(s.last_tool, None);
         assert_eq!(s.last_tool_at, None);
+        assert_eq!(s.operator, None);
+        assert_eq!(s.host, None);
     }
 
     #[test]
@@ -38,6 +56,8 @@ mod tests {
             last_activity_at: Some(1_700_000_005_000_i64),
             last_tool: Some("send_message".into()),
             last_tool_at: Some(1_700_000_004_500_i64),
+            operator: None,
+            host: None,
         };
         let json = serde_json::to_value(&s).unwrap();
         // camelCase on the wire (matches the rest of the codebase).
@@ -47,6 +67,37 @@ mod tests {
         assert_eq!(back.last_activity_at, Some(1_700_000_005_000_i64));
         assert_eq!(back.last_tool.as_deref(), Some("send_message"));
         assert_eq!(back.last_tool_at, Some(1_700_000_004_500_i64));
+    }
+
+    #[test]
+    fn session_with_identity_round_trips() {
+        let s = Session {
+            id: SessionId(Arc::from("sess-003")),
+            client_id: None,
+            nickname: "operator-test".into(),
+            pid: 1,
+            cwd: "/repo".into(),
+            git_branch: None,
+            current_task: None,
+            connected_at: 1_700_000_000_000_i64,
+            last_activity_at: None,
+            last_tool: None,
+            last_tool_at: None,
+            operator: Some("trevor".into()),
+            host: Some(HostInfo {
+                name: "laptop".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+            }),
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["operator"], "trevor");
+        assert_eq!(json["host"]["name"], "laptop");
+        assert_eq!(json["host"]["os"], "linux");
+        assert_eq!(json["host"]["arch"], "x86_64");
+        let back: Session = serde_json::from_value(json).unwrap();
+        assert_eq!(back.operator.as_deref(), Some("trevor"));
+        assert_eq!(back.host.as_ref().map(|h| h.name.as_str()), Some("laptop"));
     }
 }
 
@@ -120,4 +171,17 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[myko_setter]
     pub last_tool_at: Option<i64>,
+
+    /// Which human this session belongs to. Resolved by the shim:
+    /// `$MARSHAL_OPERATOR` → `$USER` → `"anonymous"`. Anchors the
+    /// auto-room `op:<operator>`, so peers can see "all of trevor's
+    /// sessions" regardless of cwd. `None` for legacy / observer
+    /// shims that don't set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+
+    /// Host environment summary the shim populates at startup.
+    /// Anchors the auto-room `host:<name>`. See `HostInfo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostInfo>,
 }

@@ -17,7 +17,7 @@ mod tools;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use hyphae::Watchable;
-use marshal_entities::{GetAllSessions, NotifyChannel, Session, SessionId};
+use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session, SessionId};
 use mcp::{ServerConfig, ToolDef};
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -89,6 +89,8 @@ async fn main() -> Result<()> {
         .unwrap_or("session")
         .to_string();
     let git_branch = detect_git_branch(&cwd);
+    let operator = detect_operator();
+    let host = detect_host();
     let session_id = SessionId(Arc::from(Uuid::new_v4().to_string()));
 
     let session = Session {
@@ -103,6 +105,8 @@ async fn main() -> Result<()> {
         last_activity_at: None,
         last_tool: None,
         last_tool_at: None,
+        operator: Some(operator.clone()),
+        host: Some(host.clone()),
     };
     let session = Arc::new(Mutex::new(session));
 
@@ -370,4 +374,30 @@ fn tools_def() -> Vec<ToolDef> {
             ),
         },
     ]
+}
+
+/// Resolve which human this session belongs to. `MARSHAL_OPERATOR`
+/// wins (the explicit override for service users / shared boxes),
+/// then `$USER` (cross-platform unix), then `$USERNAME` (Windows
+/// fallback), then `"anonymous"` so we never fail to set an operator
+/// at all.
+fn detect_operator() -> String {
+    std::env::var("MARSHAL_OPERATOR")
+        .or_else(|_| std::env::var("USER"))
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "anonymous".to_string())
+}
+
+/// Build a `HostInfo` from `gethostname` + `std::env::consts`. Hostname
+/// falls back to `"unknown"` when the OS lookup fails (rare — usually
+/// only inside heavily restricted sandboxes).
+fn detect_host() -> HostInfo {
+    let name = gethostname::gethostname()
+        .into_string()
+        .unwrap_or_else(|_| "unknown".to_string());
+    HostInfo {
+        name,
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+    }
 }

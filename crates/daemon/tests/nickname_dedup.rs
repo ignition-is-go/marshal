@@ -70,6 +70,8 @@ fn session(id: &str, nickname: &str, connected_at: i64) -> Session {
         last_activity_at: None,
         last_tool: None,
         last_tool_at: None,
+        operator: None,
+        host: None,
     }
 }
 
