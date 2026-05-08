@@ -389,14 +389,14 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             Constraint::Length(7),  // conn
             Constraint::Length(16), // nick
             Constraint::Length(22), // identity (operator@host)
-            // cwd is variable but capped — long paths truncate rather
-            // than push the rooms column off-screen. ~/Code/marshal
-            // shortening from short_cwd() keeps the common case tight.
-            Constraint::Length(28),
+            // cwd and rooms both grow into spare width — ratatui's
+            // layout solver gives each its `Min` minimum first, then
+            // splits the leftover space proportionally. Long paths
+            // and long room lists each get a fair share instead of
+            // one column running away with the residual.
+            Constraint::Min(20), // cwd
             Constraint::Length(14), // branch
-            // rooms absorbs the residual width so adding more rooms
-            // doesn't push activity / uptime off the right edge.
-            Constraint::Min(20),
+            Constraint::Min(20), // rooms
             Constraint::Length(20), // activity
             Constraint::Length(8),  // uptime
         ],
