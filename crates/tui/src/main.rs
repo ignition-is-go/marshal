@@ -435,13 +435,18 @@ fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         .map(|r| {
             let count = snap.members.iter().filter(|m| m.room_id == r.id).count();
             let kind_label = match &r.kind {
-                RoomKind::Auto { .. } => RowCell::from("auto").style(Style::default().fg(Color::Cyan)),
+                RoomKind::Auto { .. } => {
+                    RowCell::from("auto").style(Style::default().fg(Color::Cyan))
+                }
                 RoomKind::Adhoc => RowCell::from("adhoc").style(Style::default().fg(Color::Yellow)),
             };
             Row::new(vec![
                 kind_label,
-                RowCell::from(r.id.0.as_ref().to_string())
-                    .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Magenta)),
+                RowCell::from(r.id.0.as_ref().to_string()).style(
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(Color::Magenta),
+                ),
                 RowCell::from(r.name.clone()).style(Style::default().fg(Color::Gray)),
                 RowCell::from(format!("{count}")).style(Style::default().fg(Color::DarkGray)),
             ])
@@ -472,11 +477,7 @@ fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
 /// doesn't go blank.
 fn format_identity(s: &Session) -> String {
     let op = s.operator.as_deref().unwrap_or("?");
-    let host = s
-        .host
-        .as_ref()
-        .map(|h| h.name.as_str())
-        .unwrap_or("?");
+    let host = s.host.as_ref().map(|h| h.name.as_str()).unwrap_or("?");
     format!("{op}@{host}")
 }
 
