@@ -394,9 +394,9 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             // splits the leftover space proportionally. Long paths
             // and long room lists each get a fair share instead of
             // one column running away with the residual.
-            Constraint::Min(20), // cwd
+            Constraint::Min(20),    // cwd
             Constraint::Length(14), // branch
-            Constraint::Min(20), // rooms
+            Constraint::Min(20),    // rooms
             Constraint::Length(20), // activity
             Constraint::Length(8),  // uptime
         ],
