@@ -389,14 +389,15 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             Constraint::Length(7),  // conn
             Constraint::Length(16), // nick
             Constraint::Length(22), // identity (operator@host)
-            // cwd and rooms both grow into spare width — ratatui's
-            // layout solver gives each its `Min` minimum first, then
-            // splits the leftover space proportionally. Long paths
-            // and long room lists each get a fair share instead of
-            // one column running away with the residual.
-            Constraint::Min(20),    // cwd
-            Constraint::Length(20), // branch — fits common feat/* names
-            Constraint::Min(20),    // rooms
+            // cwd / branch / rooms split residual width 1 : 1 : 2 —
+            // rooms tends to grow fastest as ad-hoc memberships
+            // accumulate, so it gets twice the share of any spare
+            // terminal width. Each gets at least 8 chars before the
+            // weighted split kicks in so a tiny terminal still shows
+            // something readable.
+            Constraint::Fill(1),    // cwd
+            Constraint::Fill(1),    // branch
+            Constraint::Fill(2),    // rooms
             Constraint::Length(20), // activity
             Constraint::Length(8),  // uptime
         ],
