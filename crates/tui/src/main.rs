@@ -16,7 +16,10 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use hyphae::{Signal, Watchable};
-use marshal_entities::{GetAllMessages, GetAllSessions, Message, Session};
+use marshal_entities::{
+    GetAllMessages, GetAllRoomMembers, GetAllRooms, GetAllSessions, Message, Room, RoomKind,
+    RoomMember, Session,
+};
 use myko::{
     client::{ConnectionStatus, MykoClient},
     entities::client::{Client, GetAllClients},
@@ -66,6 +69,8 @@ struct Args {
 struct StateInner {
     sessions: Vec<Arc<Session>>,
     messages: Vec<Arc<Message>>,
+    rooms: Vec<Arc<Room>>,
+    members: Vec<Arc<RoomMember>>,
     /// Live `Client` entity ids, used to render per-session connected /
     /// disconnected status. A session whose `client_id` is not in this
     /// set has lost its WS connection (or the daemon was just restarted
@@ -181,6 +186,26 @@ async fn main() -> Result<()> {
     messages_cell.own(messages_guard);
     Box::leak(Box::new(messages_cell));
 
+    let rooms_cell = client.watch_query::<GetAllRooms>(GetAllRooms {});
+    let rooms_state = state.clone();
+    let rooms_guard = rooms_cell.subscribe(move |signal| {
+        if let Signal::Value(value) = signal {
+            rooms_state.update(|s| s.rooms = (**value).clone());
+        }
+    });
+    rooms_cell.own(rooms_guard);
+    Box::leak(Box::new(rooms_cell));
+
+    let members_cell = client.watch_query::<GetAllRoomMembers>(GetAllRoomMembers {});
+    let members_state = state.clone();
+    let members_guard = members_cell.subscribe(move |signal| {
+        if let Signal::Value(value) = signal {
+            members_state.update(|s| s.members = (**value).clone());
+        }
+    });
+    members_cell.own(members_guard);
+    Box::leak(Box::new(members_cell));
+
     Box::leak(Box::new(client));
 
     let render_state = state.clone();
@@ -253,6 +278,7 @@ fn draw(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         .constraints([
             Constraint::Length(2),  // header
             Constraint::Min(6),     // agents
+            Constraint::Length(8),  // rooms
             Constraint::Length(12), // recent messages
             Constraint::Length(1),  // status bar
         ])
@@ -260,8 +286,9 @@ fn draw(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
 
     draw_header(snap, chunks[0], frame);
     draw_agents(snap, chunks[1], frame);
-    draw_messages(snap, chunks[2], frame);
-    draw_status(snap, chunks[3], frame);
+    draw_rooms(snap, chunks[2], frame);
+    draw_messages(snap, chunks[3], frame);
+    draw_status(snap, chunks[4], frame);
 }
 
 fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
@@ -292,6 +319,11 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         Span::styled(format!("({live} live)"), Style::default().fg(Color::Green)),
         Span::raw("  "),
         Span::styled(
+            format!("{} rooms", snap.rooms.len()),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw("  "),
+        Span::styled(
             format!("{} recent msgs", snap.messages.len()),
             Style::default().fg(Color::DarkGray),
         ),
@@ -306,10 +338,10 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let header = Row::new(vec![
         RowCell::from("conn"),
         RowCell::from("nick"),
-        RowCell::from("session"),
+        RowCell::from("identity"),
         RowCell::from("cwd"),
         RowCell::from("branch"),
-        RowCell::from("status"),
+        RowCell::from("rooms"),
         RowCell::from("activity"),
         RowCell::from("uptime"),
     ])
@@ -334,14 +366,16 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                 RowCell::from("○ off ").style(Style::default().fg(Color::DarkGray))
             };
             let activity_cell = build_activity_cell(s, now);
+            let identity = format_identity(s);
+            let rooms_summary = format_member_rooms(s, &snap.members);
             Row::new(vec![
                 conn_cell,
                 RowCell::from(s.nickname.clone())
                     .style(Style::default().add_modifier(Modifier::BOLD)),
-                RowCell::from(s.id.to_string()).style(Style::default().fg(Color::Cyan)),
+                RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
                 RowCell::from(s.cwd.clone()).style(Style::default().fg(Color::Gray)),
                 RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
-                RowCell::from(s.current_task.clone().unwrap_or_else(|| "—".into())),
+                RowCell::from(rooms_summary).style(Style::default().fg(Color::Magenta)),
                 activity_cell,
                 RowCell::from(format_duration(now - s.connected_at))
                     .style(Style::default().fg(Color::DarkGray)),
@@ -354,10 +388,10 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         [
             Constraint::Length(7),
             Constraint::Length(16),
-            Constraint::Length(14),
+            Constraint::Length(22),
             Constraint::Min(20),
             Constraint::Length(14),
-            Constraint::Length(20),
+            Constraint::Length(28),
             Constraint::Length(20),
             Constraint::Length(8),
         ],
@@ -371,6 +405,100 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     frame.render_widget(table, area);
 }
 
+fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+    let header = Row::new(vec![
+        RowCell::from("kind"),
+        RowCell::from("room"),
+        RowCell::from("name"),
+        RowCell::from("members"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    // Auto-rooms first (everyone always at the very top so it's
+    // easy to spot in any roster size), then ad-hoc.
+    let mut sorted: Vec<&Arc<Room>> = snap.rooms.iter().collect();
+    sorted.sort_by_key(|r| {
+        let auto_rank = match &r.kind {
+            RoomKind::Auto { .. } => 0,
+            RoomKind::Adhoc => 1,
+        };
+        let everyone_first = if r.id.0.as_ref() == "everyone" { 0 } else { 1 };
+        (auto_rank, everyone_first, r.id.0.as_ref().to_string())
+    });
+
+    let rows: Vec<Row> = sorted
+        .iter()
+        .map(|r| {
+            let count = snap.members.iter().filter(|m| m.room_id == r.id).count();
+            let kind_label = match &r.kind {
+                RoomKind::Auto { .. } => RowCell::from("auto").style(Style::default().fg(Color::Cyan)),
+                RoomKind::Adhoc => RowCell::from("adhoc").style(Style::default().fg(Color::Yellow)),
+            };
+            Row::new(vec![
+                kind_label,
+                RowCell::from(r.id.0.as_ref().to_string())
+                    .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Magenta)),
+                RowCell::from(r.name.clone()).style(Style::default().fg(Color::Gray)),
+                RowCell::from(format!("{count}")).style(Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),
+            Constraint::Length(28),
+            Constraint::Min(20),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Rooms ({}) ", snap.rooms.len())),
+    );
+    frame.render_widget(table, area);
+}
+
+/// Format a session's identity column as `operator@host` — the two
+/// fields the AutoRoomSaga keys auto-rooms on. Falls back to `?` for
+/// missing pieces (older shims, observer-only TUIs) so the column
+/// doesn't go blank.
+fn format_identity(s: &Session) -> String {
+    let op = s.operator.as_deref().unwrap_or("?");
+    let host = s
+        .host
+        .as_ref()
+        .map(|h| h.name.as_str())
+        .unwrap_or("?");
+    format!("{op}@{host}")
+}
+
+/// Build a session's room-membership summary. Auto-rooms keep their
+/// `host:` / `op:` / `project:` prefix so the operator can tell at a
+/// glance which auto-anchors apply; ad-hoc rooms just show their id.
+/// `everyone` is omitted (every session is in it; showing it on every
+/// row is noise).
+fn format_member_rooms(s: &Session, members: &[Arc<RoomMember>]) -> String {
+    let mut ids: Vec<&str> = members
+        .iter()
+        .filter(|m| m.session_id == s.id)
+        .map(|m| m.room_id.0.as_ref())
+        .filter(|id| *id != "everyone")
+        .collect();
+    if ids.is_empty() {
+        return "—".into();
+    }
+    ids.sort();
+    ids.join(", ")
+}
+
 fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let now = now_ms();
 
@@ -378,6 +506,26 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         .messages
         .iter()
         .map(|m| {
+            // Broadcasts (to_room_id set) render with a `#` prefix on the
+            // recipient and a brighter arrow so the eye picks them out
+            // of the direct-send stream. Direct sends keep the `→ nick`
+            // shape we had before.
+            let is_broadcast = m.to_room_id.is_some();
+            let arrow = if is_broadcast { " ⇒ " } else { " → " };
+            let recipient_label = if is_broadcast {
+                format!("#{}", m.to_nick)
+            } else {
+                m.to_nick.clone()
+            };
+            let recipient_style = if is_broadcast {
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            };
             Line::from(vec![
                 Span::styled(
                     format!("{:>5}  ", format_duration(now - m.sent_at)),
@@ -389,13 +537,15 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" → ", Style::default().fg(Color::Cyan)),
                 Span::styled(
-                    format!("{:<14}  ", m.to_nick),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    arrow,
+                    if is_broadcast {
+                        Style::default().fg(Color::Magenta)
+                    } else {
+                        Style::default().fg(Color::Cyan)
+                    },
                 ),
+                Span::styled(format!("{:<14}  ", recipient_label), recipient_style),
                 Span::raw(m.body.replace('\n', " ⏎ ")),
             ])
         })
