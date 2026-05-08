@@ -373,7 +373,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                 RowCell::from(s.nickname.clone())
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
-                RowCell::from(s.cwd.clone()).style(Style::default().fg(Color::Gray)),
+                RowCell::from(short_cwd(&s.cwd)).style(Style::default().fg(Color::Gray)),
                 RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
                 RowCell::from(rooms_summary).style(Style::default().fg(Color::Magenta)),
                 activity_cell,
@@ -386,14 +386,19 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(7),
-            Constraint::Length(16),
-            Constraint::Length(22),
-            Constraint::Min(20),
-            Constraint::Length(14),
+            Constraint::Length(7),  // conn
+            Constraint::Length(16), // nick
+            Constraint::Length(22), // identity (operator@host)
+            // cwd is variable but capped — long paths truncate rather
+            // than push the rooms column off-screen. ~/Code/marshal
+            // shortening from short_cwd() keeps the common case tight.
             Constraint::Length(28),
-            Constraint::Length(20),
-            Constraint::Length(8),
+            Constraint::Length(14), // branch
+            // rooms absorbs the residual width so adding more rooms
+            // doesn't push activity / uptime off the right edge.
+            Constraint::Min(20),
+            Constraint::Length(20), // activity
+            Constraint::Length(8),  // uptime
         ],
     )
     .header(header)
@@ -403,6 +408,20 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             .title(format!(" Agents ({}) ", snap.sessions.len())),
     );
     frame.render_widget(table, area);
+}
+
+/// Replace the user's home directory in `cwd` with `~` so the column
+/// stays tight in the common "I'm working in ~/Code/foo" case. Falls
+/// back to the original path when `$HOME` isn't a prefix or isn't
+/// resolvable.
+fn short_cwd(cwd: &str) -> String {
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+        && cwd.starts_with(&home)
+    {
+        return format!("~{}", &cwd[home.len()..]);
+    }
+    cwd.to_string()
 }
 
 fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
