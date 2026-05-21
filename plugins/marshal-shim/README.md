@@ -31,7 +31,17 @@ Peer messages arrive as `notifications/claude/channel` events that surface in yo
 
 ## Optional: show the nickname in your status line
 
-The shim writes its current nickname to a small state file keyed by its parent PID (`bin/statusline.sh` on macOS/Linux, `bin/statusline.ps1` on Windows reads the same file). Wire one into your Claude Code `statusLine.command` so you can tell sessions apart at a glance:
+The shim writes its current nickname to a small state file keyed by its parent PID. A bundled helper script reads that file and renders `[user@host dir] nickname` in your Claude Code footer so you can tell sessions apart at a glance.
+
+The fastest way to wire it up:
+
+```text
+/marshal-statusline
+```
+
+The command resolves the plugin's `bin/` directory, picks the right launcher for your OS (bash on macOS/Linux, PowerShell on Windows), shows you the JSON it intends to merge into your `settings.json`, and writes it on confirmation. Restart Claude Code afterwards for the change to take effect.
+
+If you'd rather configure it by hand:
 
 **macOS / Linux** — in `~/.claude/settings.json`:
 
