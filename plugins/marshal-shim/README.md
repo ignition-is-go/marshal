@@ -31,48 +31,54 @@ Peer messages arrive as `notifications/claude/channel` events that surface in yo
 
 ## Optional: show the nickname in your status line
 
-The shim writes its current nickname to a small state file keyed by its parent PID. A bundled helper script reads that file and renders `[user@host dir] nickname` in your Claude Code footer so you can tell sessions apart at a glance.
+The shim writes its current nickname to a small state file keyed by its parent PID. The `marshal-shim statusline` subcommand reads that file and renders `[user@host dir] nickname` in your Claude Code footer so you can tell sessions apart at a glance.
 
-The fastest way to wire it up:
-
-```text
-/marshal-statusline
-```
-
-The command resolves the plugin's `bin/` directory, picks the right launcher for your OS (bash on macOS/Linux, PowerShell on Windows), shows you the JSON it intends to merge into your `settings.json`, and writes it on confirmation. Restart Claude Code afterwards for the change to take effect.
-
-If you'd rather configure it by hand:
-
-**macOS / Linux** — in `~/.claude/settings.json`:
+Add this block to any `settings.json` Claude Code reads — user-global (`~/.claude/settings.json` or `%USERPROFILE%\.claude\settings.json`) or project-level (`<project>/.claude/settings.json`):
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "bash <plugin-root>/bin/statusline.sh"
+    "command": "marshal-shim statusline"
   }
 }
 ```
 
-**Windows** — in `%USERPROFILE%\.claude\settings.json`:
+No paths, no per-OS launcher — the same block works everywhere `marshal-shim` is on `PATH`. Restart Claude Code afterwards for the change to take effect.
 
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File <plugin-root>\\bin\\statusline.ps1"
-  }
-}
-```
+Or run `/marshal-statusline` to have the plugin merge the block into your user settings interactively.
 
-Replace `<plugin-root>` with the absolute path of this installed plugin directory.
-
-## Install
+## Install — plugin
 
 ```text
 /plugin marketplace add ignition-is-go/marshal
 /plugin install marshal-shim@marshal
 ```
+
+## Install — no plugin, declarative project config
+
+The plugin is optional. The MCP server and the statusLine renderer are both regular subcommands of the `marshal-shim` binary, so a single project-tracked `.claude/settings.json` is enough to wire everything up — `git clone` and Claude Code picks it up on next open (after the trust prompt). No marketplace, no `/plugin install`, no per-machine config edits.
+
+Drop this at `<project>/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "marshal": {
+      "command": "marshal-shim",
+      "env": {
+        "MARSHAL_DAEMON_ADDRESS": "${MARSHAL_DAEMON_ADDRESS:-ws://localhost:6155}"
+      }
+    }
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "marshal-shim statusline"
+  }
+}
+```
+
+Prereq is the same as the plugin path — `cargo install marshal-shim marshal-daemon` once per machine so the binaries are on `PATH`.
 
 ## Pointing at a non-default daemon
 

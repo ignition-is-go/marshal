@@ -13,6 +13,7 @@ mod activity;
 mod mcp;
 mod self_update;
 mod state_file;
+mod statusline;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -42,15 +43,24 @@ const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // `--check` is a smoke-test mode used by the self-update watcher to
-    // verify a newly-installed binary spawns cleanly before re-execing.
-    // Handle it before any setup so the check is fast and side-effect-free.
+    // Subcommand dispatch. Bare invocation falls through to the MCP
+    // server (the default and dominant mode). `--check` is the self-
+    // update smoke test. `statusline` is the Claude Code statusLine
+    // renderer — folded into this binary so users get one declarative
+    // command on every platform.
     let mut argv = std::env::args().skip(1);
-    if let Some(arg) = argv.next() {
-        if arg == "--check" && argv.next().is_none() {
+    match argv.next().as_deref() {
+        Some("--check") if argv.next().is_none() => {
             println!("ok");
             return Ok(());
         }
+        Some("statusline") if argv.next().is_none() => {
+            return statusline::run();
+        }
+        Some(other) => {
+            anyhow::bail!("unknown argument: {other}");
+        }
+        None => {}
     }
 
     init_logging();
