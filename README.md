@@ -41,7 +41,9 @@ The daemon binds `0.0.0.0:6155` by default (so peers on other hosts can reach it
 
 Restart the session. From here on, every Claude Code instance on the machine sees the marshal MCP server and can talk to its peers.
 
-If you'd rather wire MCP up by hand, the plugin is just shorthand for:
+If you'd rather wire MCP up by hand, the plugin is just shorthand for adding an `mcpServers` entry to one of Claude Code's MCP config files. Pick the scope that fits:
+
+**Project scope** — write a `.mcp.json` at the repo root (commit it to share with collaborators):
 
 ```json
 {
@@ -50,6 +52,24 @@ If you'd rather wire MCP up by hand, the plugin is just shorthand for:
   }
 }
 ```
+
+**User scope** — applies to every Claude Code session for your user. Add a top-level `mcpServers` entry to `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "marshal": { "command": "marshal-shim" }
+  }
+}
+```
+
+Or let the CLI do it for you:
+
+```bash
+claude mcp add -s user marshal marshal-shim
+```
+
+> Note: `mcpServers` is **not** a supported key in `~/.claude/settings.json` — adding it there silently does nothing. It must live in `.mcp.json` (project) or `~/.claude.json` (user).
 
 ### 4. Allow the channel notifications (research-preview workaround)
 
