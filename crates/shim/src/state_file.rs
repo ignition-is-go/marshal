@@ -67,7 +67,9 @@ mod imp {
             "git_branch": session.git_branch,
             "updated_at": Utc::now().timestamp_millis(),
         });
-        let Ok(bytes) = serde_json::to_vec_pretty(&body) else { return };
+        let Ok(bytes) = serde_json::to_vec_pretty(&body) else {
+            return;
+        };
         let tmp = path.with_extension("json.tmp");
         if let Err(e) = std::fs::write(&tmp, &bytes) {
             log::debug!("[marshal-shim] state file write {tmp:?} failed: {e}");
@@ -77,7 +79,6 @@ mod imp {
             log::debug!("[marshal-shim] state file rename {path:?} failed: {e}");
         }
     }
-
 }
 
 #[cfg(not(unix))]
