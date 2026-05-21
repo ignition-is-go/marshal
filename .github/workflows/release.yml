@@ -56,6 +56,11 @@ jobs:
         run: |
           VERSION=$(cargo flux version)
           cargo flux stamp "$VERSION"
+          # Keep Claude Code plugin manifests in lockstep with the workspace
+          # version so `/plugin update` actually detects new releases.
+          for f in plugins/*/.claude-plugin/plugin.json; do
+            jq --arg v "$VERSION" '.version = $v' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          done
           cargo update --workspace
           cargo fmt --all
           git add -A
