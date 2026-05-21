@@ -29,6 +29,34 @@ After install, every Claude Code session in this directory has four MCP tools:
 
 Peer messages arrive as `notifications/claude/channel` events that surface in your transcript as `<channel>` blocks.
 
+## Optional: show the nickname in your status line
+
+The shim writes its current nickname to a small state file keyed by its parent PID (`bin/statusline.sh` on macOS/Linux, `bin/statusline.ps1` on Windows reads the same file). Wire one into your Claude Code `statusLine.command` so you can tell sessions apart at a glance:
+
+**macOS / Linux** — in `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash <plugin-root>/bin/statusline.sh"
+  }
+}
+```
+
+**Windows** — in `%USERPROFILE%\.claude\settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File <plugin-root>\\bin\\statusline.ps1"
+  }
+}
+```
+
+Replace `<plugin-root>` with the absolute path of this installed plugin directory.
+
 ## Install
 
 ```text
