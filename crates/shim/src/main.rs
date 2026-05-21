@@ -12,6 +12,7 @@
 mod activity;
 mod mcp;
 mod self_update;
+mod state_file;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -110,6 +111,13 @@ async fn main() -> Result<()> {
         project: project.clone(),
     };
     let session = Arc::new(Mutex::new(session));
+
+    // Write the initial PPID-keyed state file so consumers (e.g. a
+    // statusLine script) can resolve the nickname immediately, before
+    // the WS handshake completes and the periodic publisher first
+    // ticks. The periodic loop below refreshes this file with the
+    // dedup'd nickname once the daemon corrects any collisions.
+    state_file::write(&session.lock().unwrap(), &session_id);
 
     // Open the long-lived `GetAll*` subscriptions BEFORE we connect so
     // they're primed by the time the WS handshake completes — tools and
@@ -220,6 +228,7 @@ async fn main() -> Result<()> {
     let client_for_publish = Arc::clone(&client);
     let session_for_publish = Arc::clone(&session);
     let session_id_for_publish = session_id.clone();
+    let sessions_cell_for_publish = handler.host.sessions_cell.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -229,6 +238,7 @@ async fn main() -> Result<()> {
         let mut pushed_activity_at: Option<i64> = None;
         let mut pushed_tool: Option<String> = None;
         let mut pushed_tool_at: Option<i64> = None;
+        let mut last_state_nickname: Option<String> = None;
         loop {
             interval.tick().await;
 
@@ -284,6 +294,19 @@ async fn main() -> Result<()> {
                 sess.last_activity_at = last_activity_at;
                 sess.last_tool = last_tool.clone();
                 sess.last_tool_at = last_tool_at;
+            }
+
+            // Refresh the PPID-keyed state file with the *daemon-side*
+            // nickname (post-dedupe). Look ourselves up in the live
+            // roster rather than trusting the local mirror, which only
+            // ever holds the un-dedup'd basename we sent at startup.
+            let snapshot: Vec<Arc<marshal_entities::Session>> =
+                hyphae::Gettable::get(&sessions_cell_for_publish);
+            if let Some(me) = snapshot.iter().find(|s| s.id == session_id_for_publish) {
+                if last_state_nickname.as_deref() != Some(me.nickname.as_str()) {
+                    state_file::write(me, &session_id_for_publish);
+                    last_state_nickname = Some(me.nickname.clone());
+                }
             }
         }
     });

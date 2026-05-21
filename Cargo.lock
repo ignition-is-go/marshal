@@ -1994,6 +1994,7 @@ dependencies = [
  "env_logger",
  "gethostname",
  "hyphae",
+ "libc",
  "log",
  "marshal-entities",
  "myko",

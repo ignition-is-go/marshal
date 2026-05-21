@@ -28,3 +28,6 @@ myko = { workspace = true }
 hyphae = { workspace = true }
 marshal-entities = { workspace = true }
 gethostname = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
