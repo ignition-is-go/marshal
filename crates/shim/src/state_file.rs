@@ -45,7 +45,9 @@ pub fn write(session: &Session, session_id: &SessionId) {
         "git_branch": session.git_branch,
         "updated_at": Utc::now().timestamp_millis(),
     });
-    let Ok(bytes) = serde_json::to_vec_pretty(&body) else { return };
+    let Ok(bytes) = serde_json::to_vec_pretty(&body) else {
+        return;
+    };
     let tmp = path.with_extension("json.tmp");
     if let Err(e) = std::fs::write(&tmp, &bytes) {
         log::debug!("[marshal-shim] state file write {tmp:?} failed: {e}");
@@ -71,8 +73,7 @@ fn current_ppid() -> Option<u32> {
     // snapshot, find our PID, return its parent.
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next,
-        TH32CS_SNAPPROCESS,
+        CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
