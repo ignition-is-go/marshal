@@ -14,11 +14,15 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use daemon::{dedupe_nicknames::run_until_converged, persister::DiskPersister};
+use daemon::{
+    dedupe_nicknames::{DedupeNicknameDelSaga, run_until_converged},
+    persister::DiskPersister,
+};
 use hyphae::Gettable;
 use marshal_entities::{Session, SessionId};
 use myko::{
     core::item::Eventable,
+    saga::{SagaContext, SagaHandler},
     server::{CellServerCtx, Persister},
     utils::downcast_item,
     wire::{MEvent, MEventType},
@@ -165,7 +169,7 @@ fn three_collisions_walk_to_marshal_3() {
 }
 
 #[test]
-fn deleting_a_deduped_row_frees_its_slot_for_the_next_collision() {
+fn deleting_a_deduped_row_promotes_the_survivor_and_demotes_the_newcomer() {
     let (_log, _p, ctx, _dir) = setup();
     // Three colliders converge to marshal / -2 / -3.
     set_session(&ctx, &session("a", "marshal", 100));
@@ -179,8 +183,6 @@ fn deleting_a_deduped_row_frees_its_slot_for_the_next_collision() {
         .get("marshal-2")
         .expect("marshal-2 should be held after initial dedup")
         .clone();
-    // Build a Session with that id + that name to DEL — apply_event_batch
-    // for DELs only needs the id to match an existing row.
     let to_del = session(&marshal_2_owner, "marshal-2", 0);
     del_session(&ctx, &to_del);
     assert!(
@@ -188,13 +190,27 @@ fn deleting_a_deduped_row_frees_its_slot_for_the_next_collision() {
         "DEL should free the marshal-2 slot",
     );
 
-    // A fresh colliding session arrives. Its dedupe pass walks N=2,
-    // finds the freed slot, and assigns it. (No active shift-down of
-    // marshal-3 → marshal-2; the helper just claims the smallest
-    // currently-free suffix.)
+    // The DEL fires `DedupeNicknameDelSaga`, which promotes the
+    // suffixed survivor (c, "marshal-3") into the now-vacant
+    // "marshal-2" slot — canonical seniority order says the next-
+    // oldest in the group gets the next-smallest suffix.
+    run_until_converged(&ctx, MAX_PASSES).expect("rebalance after DEL");
+    let post_del = unique_nicknames(&ctx);
+    assert_eq!(
+        post_del.get("marshal-2").map(String::as_str),
+        Some("c"),
+        "c should be promoted from marshal-3 into the freed marshal-2 slot",
+    );
+    assert!(
+        !post_del.contains_key("marshal-3"),
+        "marshal-3 should now be free; got {post_del:?}",
+    );
+
+    // A fresh colliding session arrives. Its expected rank is the new
+    // tail of the group (3rd, since a and c hold ranks 0 and 1), so it
+    // converges to "marshal-3".
     set_session(&ctx, &session("d", "marshal", 400));
-    let applied = run_until_converged(&ctx, MAX_PASSES).expect("converged after re-add");
-    assert_eq!(applied, 1, "one collision → one corrective SET");
+    run_until_converged(&ctx, MAX_PASSES).expect("converged after re-add");
 
     let after = unique_nicknames(&ctx);
     assert!(after.contains_key("marshal"));
@@ -202,9 +218,9 @@ fn deleting_a_deduped_row_frees_its_slot_for_the_next_collision() {
     assert!(after.contains_key("marshal-3"));
     assert_eq!(after.len(), 3);
     assert_eq!(
-        after.get("marshal-2").map(String::as_str),
+        after.get("marshal-3").map(String::as_str),
         Some("d"),
-        "the new arrival should fill the freed marshal-2 slot",
+        "the new arrival is the youngest in the group → takes marshal-3",
     );
 }
 
@@ -243,4 +259,31 @@ fn convergence_terminates_under_the_pass_cap() {
     set_session(&ctx, &session("c", "charlie", 300));
     let applied = run_until_converged(&ctx, MAX_PASSES).expect("converged");
     assert_eq!(applied, 0, "no collisions → no work");
+}
+
+#[test]
+fn del_saga_handler_unconditionally_dispatches_dedupe() {
+    // The DEL saga is no-state-peek by design: every Session DEL fires
+    // a DedupeNicknames pass, and the command itself short-circuits when
+    // no correction is needed. Pin that the handler returns Some on a
+    // DEL event so a future refactor can't silently introduce a peek
+    // that would skip rebalances after a vacancy.
+    //
+    // The macro-driven saga *registration* (firing on the right
+    // MEventType) is exercised by the existing SET-saga path in
+    // production usage; this test pins only the handler behaviour.
+    let (_log, _p, ctx, _dir) = setup();
+
+    let s = session("any", "marshal", 100);
+    let event = MEvent::from_item(&s, MEventType::DEL, "tx-id");
+    let saga_ctx = Arc::new(SagaContext::new(
+        uuid::Uuid::new_v4(),
+        ctx.registry.clone(),
+    ));
+
+    let result = DedupeNicknameDelSaga::handle(s, event, saga_ctx);
+    assert!(
+        result.is_some(),
+        "DEL saga must dispatch DedupeNicknames on every Session DEL",
+    );
 }

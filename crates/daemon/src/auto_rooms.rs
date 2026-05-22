@@ -16,7 +16,7 @@
 //! every Session SET without producing churn in the event log.
 //!
 //! The saga runs as a `DispatchAutoRooms` server-internal command (the
-//! pattern mirrors `DedupeNicknameSaga` → `DedupeNicknames`).
+//! pattern mirrors `DedupeNicknameSetSaga` → `DedupeNicknames`).
 
 use std::sync::Arc;
 

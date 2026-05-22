@@ -2,20 +2,36 @@
 //!
 //! Two live sessions must never share a `Session.nickname`. Shims send
 //! their cwd basename verbatim (e.g. two clones of `marshal` both
-//! announce `nickname = "marshal"`); the daemon corrects collisions by
-//! appending the smallest integer suffix `>= 2` (`marshal` → `marshal-2`,
-//! `marshal-3`, ...).
+//! announce `nickname = "marshal"`); the daemon converges every live
+//! session to its **seniority rank** within the cwd-basename root —
+//! the oldest holds the bare root, the next gets `{root}-2`, then
+//! `{root}-3`, and so on.
+//!
+//! Seniority is `connected_at` (with `session_id` as a deterministic
+//! tiebreaker). A session's seniority stays fixed for its whole life,
+//! even across daemon restarts (because `connected_at` is persisted),
+//! so a long-running session keeps its name when transient peers come
+//! and go.
 //!
 //! Wiring:
-//! - `DedupeNicknameSaga` — fires on every `Session` SET. If the post-SET
-//!   row's nickname collides with another live session's nickname,
-//!   returns a `DedupeNicknames` command. Returns `None` otherwise (the
-//!   common steady-state case — this is what makes the loop terminate).
+//! - `DedupeNicknameSetSaga` — fires on every `Session` SET. Cheap peek:
+//!   only dispatches `DedupeNicknames` when the newly-set row's nickname
+//!   collides with another live session's. The steady-state no-op
+//!   answer is what makes the saga loop terminate.
+//! - `DedupeNicknameDelSaga` — fires on every `Session` DEL. Always
+//!   dispatches `DedupeNicknames` because a departed session may have
+//!   freed the bare root, letting a suffixed sibling get promoted.
+//!   The command itself is the source of truth: it inspects current
+//!   live state and emits a correction only if the seniority ordering
+//!   is out of canonical form.
 //! - `DedupeNicknames` — server-internal command that snapshots all
-//!   sessions, finds the first one whose nickname duplicates another's,
-//!   and emits a single corrective `Session` SET with a deduped name.
-//!   The corrective SET re-fires the saga, which observes the now-unique
-//!   name and no-ops. Convergence in one extra round trip per dedupe.
+//!   sessions, groups them by cwd-basename root, and emits a single
+//!   corrective `Session` SET against the first member whose actual
+//!   nickname doesn't match its seniority-derived expected form.
+//!   The corrective SET re-fires the SET saga, which dispatches
+//!   another `DedupeNicknames` if more work remains. Convergence in
+//!   one extra round trip per correction; demote + promote each cost
+//!   one round trip.
 //!
 //! The pure name-finder `dedupe_nickname` is exposed for unit-testing
 //! and for any future caller that wants to predict its post-dedupe name
@@ -24,12 +40,16 @@
 //! `marshal-3` whose true root is `marshal` still re-converges from the
 //! root rather than getting compounded into `marshal-3-2`.
 //!
-//! Free-name reuse on DEL is not handled here — when a session DELs its
-//! nickname disappears from the live set, and the next colliding SET
-//! that runs the saga will find the freed slot. There is intentionally
-//! no active "shift `-3` down to `-2`" pass.
+//! Transient duplicates: during a promote+demote rebalance, the saga
+//! issues two corrective SETs serially (no atomic batch API). For ~ms
+//! between them, two sessions may share the same nickname. This window
+//! is acceptable per the same "single SET per pass" discipline that
+//! existed before rebalancing was added.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use marshal_entities::{GetAllSessions, Session};
 use myko::{
@@ -103,9 +123,9 @@ fn strip_dash_digits(s: &str) -> &str {
 /// a corrective SET. Idempotent — the no-collision case returns `None`,
 /// which is what stops the corrective SET from re-firing forever.
 #[myko_saga]
-pub struct DedupeNicknameSaga;
+pub struct DedupeNicknameSetSaga;
 
-impl SagaHandler for DedupeNicknameSaga {
+impl SagaHandler for DedupeNicknameSetSaga {
     type EventItem = Session;
     type Command = DedupeNicknames;
     const EVENT_TYPE: MEventType = MEventType::SET;
@@ -137,17 +157,35 @@ impl SagaHandler for DedupeNicknameSaga {
     }
 }
 
+/// Fires on every `Session` DEL. Unconditionally dispatches
+/// `DedupeNicknames` because a departed session may have freed the bare
+/// root, letting a suffixed sibling get promoted. The command itself
+/// returns early when no correction is needed, so the steady-state cost
+/// is one `GetAllSessions` query per DEL.
+#[myko_saga]
+pub struct DedupeNicknameDelSaga;
+
+impl SagaHandler for DedupeNicknameDelSaga {
+    type EventItem = Session;
+    type Command = DedupeNicknames;
+    const EVENT_TYPE: MEventType = MEventType::DEL;
+
+    fn handle(_session: Session, _event: MEvent, _ctx: Arc<SagaContext>) -> Option<Self::Command> {
+        Some(DedupeNicknames {})
+    }
+}
+
 // ─── Command ────────────────────────────────────────────────────────────────
 
 /// Snapshot every live session, find the first one whose nickname
-/// duplicates another's, and emit a single corrective `Session` SET
-/// with the deduped name.
+/// disagrees with its seniority-derived canonical form, and emit a
+/// single corrective `Session` SET to fix it.
 ///
 /// "Single SET per pass" is intentional: the corrective SET re-fires
-/// `DedupeNicknameSaga`, which dispatches another `DedupeNicknames` if
-/// any collision remains. This walks the dedupe one fix at a time so
-/// every intermediate state is well-formed (no batch with two sessions
-/// claiming the same suffix simultaneously).
+/// `DedupeNicknameSetSaga`, which dispatches another `DedupeNicknames`
+/// if more work remains. This walks the rebalance one fix at a time;
+/// see the module docstring for the transient-duplicate window during
+/// a promote+demote pair.
 #[myko_command]
 pub struct DedupeNicknames {}
 
@@ -172,45 +210,55 @@ impl CommandHandler for DedupeNicknames {
     }
 }
 
-/// Pick at most one session whose nickname collides with another's, and
-/// the deduped name to assign it. Returns `None` when every nickname is
-/// already unique.
+/// Pick at most one session whose actual nickname disagrees with its
+/// seniority-derived expected form. Returns `None` when every live
+/// session is already in canonical order.
 ///
-/// Ordering: walk sessions in **seniority order** — oldest `connected_at`
-/// first, with `session_id` as the deterministic tiebreaker — and pick
-/// the first collider observed. Older sessions get priority on the bare
-/// root name; younger ones get bumped to suffixed forms.
+/// Canonical form: group live sessions by their cwd-basename root
+/// (recovered by stripping any trailing `-{digits}` suffix from the
+/// post-dedupe nickname). Within each group sort by seniority
+/// (`connected_at`, then `session_id` as a deterministic tiebreaker).
+/// The 0th member should hold the bare root, the 1st should hold
+/// `{root}-2`, the 2nd `{root}-3`, and so on.
 ///
-/// Without this ordering the dedup walk inherits whatever non-
-/// deterministic ordering `GetAllSessions` returns (HashMap iteration
-/// in practice), which would produce different "first collider"
-/// pickings across runs and make integration tests flaky.
+/// This handles both directions of correction in one pass:
+/// - **Demote** — a newly-arrived session whose nickname duplicates
+///   an older sibling's gets bumped to the next suffix.
+/// - **Promote** — when a session DELs, every surviving sibling
+///   shifts one rank towards the bare root; the next saga iteration
+///   emits the corresponding SET.
+///
+/// Returning only one correction per call keeps every emitted SET
+/// individually well-formed (one nickname assignment at a time, in a
+/// known direction). The caller drives convergence by re-firing.
+///
+/// Group iteration is in BTreeMap (lexicographic root) order so the
+/// pick is deterministic when multiple groups need fixing, mirroring
+/// the pre-existing collision-only behaviour.
 fn pick_one_correction(sessions: &[Arc<Session>]) -> Option<(&Arc<Session>, String)> {
-    // Index into `sessions` sorted by seniority (oldest first), with
-    // session_id as the tiebreaker.
-    let mut ordered: Vec<usize> = (0..sessions.len()).collect();
-    ordered.sort_by(|&a, &b| {
-        sessions[a]
-            .connected_at
-            .cmp(&sessions[b].connected_at)
-            .then_with(|| sessions[a].id.0.as_ref().cmp(sessions[b].id.0.as_ref()))
-    });
+    let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, s) in sessions.iter().enumerate() {
+        let root = strip_dash_digits(s.nickname.as_str());
+        groups.entry(root).or_default().push(i);
+    }
 
-    let mut seen: HashSet<&str> = HashSet::new();
-    for &i in &ordered {
-        let s = &sessions[i];
-        if seen.contains(s.nickname.as_str()) {
-            // Build the "taken" set from every OTHER session's
-            // nickname — same exclusion rule the saga uses.
-            let taken: HashSet<&str> = sessions
-                .iter()
-                .filter(|other| other.id != s.id)
-                .map(|other| other.nickname.as_str())
-                .collect();
-            let new_name = dedupe_nickname(&s.nickname, &taken);
-            return Some((s, new_name));
+    for (root, mut indices) in groups {
+        indices.sort_by(|&a, &b| {
+            sessions[a]
+                .connected_at
+                .cmp(&sessions[b].connected_at)
+                .then_with(|| sessions[a].id.0.as_ref().cmp(sessions[b].id.0.as_ref()))
+        });
+        for (rank, &i) in indices.iter().enumerate() {
+            let expected = if rank == 0 {
+                root.to_string()
+            } else {
+                format!("{root}-{}", rank + 1)
+            };
+            if sessions[i].nickname != expected {
+                return Some((&sessions[i], expected));
+            }
         }
-        seen.insert(s.nickname.as_str());
     }
     None
 }
@@ -329,5 +377,155 @@ mod tests {
         assert_eq!(strip_dash_digits("foo-bar-7"), "foo-bar");
         // Empty.
         assert_eq!(strip_dash_digits(""), "");
+    }
+
+    // ─── pick_one_correction (rebalance) tests ─────────────────────────────
+
+    use marshal_entities::SessionId;
+
+    /// Minimal Session builder for correction-pass tests. Only the
+    /// fields `pick_one_correction` reads are meaningful; the rest get
+    /// stable defaults.
+    fn s(id: &'static str, nick: &str, connected_at: i64) -> Arc<Session> {
+        Arc::new(Session {
+            id: SessionId(Arc::from(id)),
+            client_id: None,
+            nickname: nick.to_string(),
+            pid: 0,
+            cwd: String::new(),
+            git_branch: None,
+            current_task: None,
+            connected_at,
+            last_activity_at: None,
+            last_tool: None,
+            last_tool_at: None,
+            operator: None,
+            host: None,
+            project: None,
+        })
+    }
+
+    fn correction(result: Option<(&Arc<Session>, String)>) -> Option<(&str, String)> {
+        result.map(|(s, n)| (s.id.0.as_ref(), n))
+    }
+
+    #[test]
+    fn canonical_state_needs_no_correction() {
+        let sessions = vec![
+            s("a", "marshal", 100),
+            s("b", "marshal-2", 200),
+            s("c", "marshal-3", 300),
+            s("d", "other", 150),
+        ];
+        assert_eq!(pick_one_correction(&sessions), None);
+    }
+
+    #[test]
+    fn collision_demotes_younger() {
+        // Both sessions arrive with `marshal`. Older keeps it, younger
+        // bumps to `marshal-2`.
+        let sessions = vec![s("old", "marshal", 100), s("new", "marshal", 200)];
+        assert_eq!(
+            correction(pick_one_correction(&sessions)),
+            Some(("new", "marshal-2".to_string())),
+        );
+    }
+
+    #[test]
+    fn lone_suffixed_session_gets_promoted() {
+        // After the original holder DEL'd, the surviving suffixed
+        // session should be promoted to the bare root.
+        let sessions = vec![s("a", "marshal-2", 100)];
+        assert_eq!(
+            correction(pick_one_correction(&sessions)),
+            Some(("a", "marshal".to_string())),
+        );
+    }
+
+    #[test]
+    fn oldest_suffixed_promotes_first_when_root_vacant() {
+        // `marshal` is free; the two suffixed survivors should
+        // converge to {marshal, marshal-2}, with the older taking the
+        // bare root.
+        let sessions = vec![s("y", "marshal-3", 200), s("x", "marshal-2", 100)];
+        assert_eq!(
+            correction(pick_one_correction(&sessions)),
+            Some(("x", "marshal".to_string())),
+        );
+    }
+
+    #[test]
+    fn observed_pulse_deploy_case_corrects_older_session() {
+        // Real-world scenario from the marshal-01 event log: an older
+        // session got demoted to `pulse-deploy-2` when a peer briefly
+        // held `pulse-deploy`, then that peer DEL'd, and a newer
+        // session claimed the bare name. The older session was left
+        // stranded at `-2`. Rebalance must promote it back.
+        let sessions = vec![
+            s("older", "pulse-deploy-2", 1779397537134),
+            s("newer", "pulse-deploy", 1779404776725),
+        ];
+        // First pass: older session is the rank-0 member of the group,
+        // so its expected name is the bare root.
+        assert_eq!(
+            correction(pick_one_correction(&sessions)),
+            Some(("older", "pulse-deploy".to_string())),
+        );
+    }
+
+    #[test]
+    fn rebalance_converges_in_finite_passes() {
+        // Drive the correction pass to a fixed point manually so we
+        // exercise the full demote→promote sequence in test isolation.
+        let initial = vec![
+            s("older", "pulse-deploy-2", 100),
+            s("newer", "pulse-deploy", 200),
+        ];
+        let mut sessions = initial;
+        for _ in 0..8 {
+            let Some((victim, new_name)) = pick_one_correction(&sessions) else {
+                break;
+            };
+            let victim_id = victim.id.0.clone();
+            let new_name = new_name.clone();
+            sessions = sessions
+                .into_iter()
+                .map(|s| {
+                    if s.id.0 == victim_id {
+                        Arc::new(Session {
+                            nickname: new_name.clone(),
+                            ..(*s).clone()
+                        })
+                    } else {
+                        s
+                    }
+                })
+                .collect();
+        }
+        assert_eq!(pick_one_correction(&sessions), None);
+        let by_id: std::collections::HashMap<&str, &str> = sessions
+            .iter()
+            .map(|s| (s.id.0.as_ref(), s.nickname.as_str()))
+            .collect();
+        assert_eq!(by_id["older"], "pulse-deploy");
+        assert_eq!(by_id["newer"], "pulse-deploy-2");
+    }
+
+    #[test]
+    fn deterministic_pick_across_groups() {
+        // Two groups, each needing one correction. The pick must be
+        // stable run-to-run — BTreeMap (lexicographic) walk guarantees
+        // we always see `alpha` before `beta`.
+        let sessions = vec![
+            s("a1", "alpha", 100),
+            s("a2", "alpha", 200),
+            s("b1", "beta", 100),
+            s("b2", "beta", 200),
+        ];
+        // `alpha` group goes first; younger (`a2`) gets demoted.
+        assert_eq!(
+            correction(pick_one_correction(&sessions)),
+            Some(("a2", "alpha-2".to_string())),
+        );
     }
 }

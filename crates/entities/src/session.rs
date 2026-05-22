@@ -118,7 +118,7 @@ pub struct Session {
 
     /// Free-form display name. Defaults to the cwd basename for shims;
     /// the TUI sets it to "tui" so it isn't confused with a Claude session.
-    /// The daemon's `DedupeNicknameSaga` rewrites colliding names by
+    /// The daemon's `DedupeNicknameSetSaga` rewrites colliding names by
     /// appending `-{N}` so peers always have a unique addressable handle.
     #[myko_setter]
     pub nickname: String,
