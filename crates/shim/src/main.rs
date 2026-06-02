@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
         .display()
         .to_string();
     let pid = std::process::id();
-    let nickname = std::path::Path::new(&cwd)
+    let basename = std::path::Path::new(&cwd)
         .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
@@ -102,7 +102,14 @@ async fn main() -> Result<()> {
     let project = detect_project_basename(&cwd);
     let operator = detect_operator();
     let host = detect_host();
-    let session_id = SessionId(Arc::from(Uuid::new_v4().to_string()));
+
+    // Identity derivation — see `derive_identity` for the rules.
+    let (raw_session_id, nickname) = derive_identity(
+        |k| std::env::var(k).ok(),
+        &basename,
+        || Uuid::new_v4().to_string(),
+    );
+    let session_id = SessionId(Arc::from(raw_session_id));
 
     let session = Session {
         id: session_id.clone(),
@@ -124,9 +131,9 @@ async fn main() -> Result<()> {
 
     // Write the initial PPID-keyed state file so consumers (e.g. a
     // statusLine script) can resolve the nickname immediately, before
-    // the WS handshake completes and the periodic publisher first
-    // ticks. The periodic loop below refreshes this file with the
-    // dedup'd nickname once the daemon corrects any collisions.
+    // the WS handshake completes. The periodic loop below still
+    // refreshes this file if a daemon-side rename ever changes our
+    // nickname (e.g. an operator using set_nickname).
     state_file::write(&session.lock().unwrap(), &session_id);
 
     // Open the long-lived `GetAll*` subscriptions BEFORE we connect so
@@ -420,5 +427,110 @@ fn detect_host() -> HostInfo {
         name,
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
+    }
+}
+
+/// Build the marshal `Session.id` + display nickname from process state.
+///
+/// `CLAUDE_CODE_SESSION_ID` (Claude Code's conversation UUID, set on
+/// every MCP subprocess) is preferred when present so identity survives
+/// `claude --resume`: the same Session.id binds the persisted Session
+/// entity across shim restarts within one conversation. The eight-char
+/// prefix gets stitched onto the nickname (`pulse-deploy@a1836feb`) so
+/// two concurrent claude instances in the same cwd produce structurally
+/// distinct names — no daemon-side dedupe pass needed in the common
+/// case.
+///
+/// Fallback: a fresh UUID for non-Claude-Code drivers (the TUI in
+/// observer mode, future MCP clients, ad-hoc shells). The dedupe saga
+/// still exists as a safety net for that path.
+///
+/// `env` and `uuid` are injected as closures so the function is unit-
+/// testable without poking at process env.
+fn derive_identity(
+    env: impl Fn(&str) -> Option<String>,
+    basename: &str,
+    uuid: impl Fn() -> String,
+) -> (String, String) {
+    let raw = env("CLAUDE_CODE_SESSION_ID")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(uuid);
+    let short: String = raw.chars().take(8).collect();
+    let nickname = format!("{basename}@{short}");
+    (raw, nickname)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::derive_identity;
+
+    #[test]
+    fn uses_claude_code_session_id_when_set() {
+        let (id, nick) = derive_identity(
+            |k| {
+                (k == "CLAUDE_CODE_SESSION_ID")
+                    .then(|| "a1836feb-6e6b-43f1-949e-d2fb10d1bfa5".to_string())
+            },
+            "pulse-deploy",
+            || panic!("uuid generator should not be called when env var is set"),
+        );
+        assert_eq!(id, "a1836feb-6e6b-43f1-949e-d2fb10d1bfa5");
+        assert_eq!(nick, "pulse-deploy@a1836feb");
+    }
+
+    #[test]
+    fn falls_back_to_uuid_when_env_unset() {
+        let (id, nick) = derive_identity(
+            |_| None,
+            "marshal",
+            || "deadbeef-0000-0000-0000-000000000000".to_string(),
+        );
+        assert_eq!(id, "deadbeef-0000-0000-0000-000000000000");
+        assert_eq!(nick, "marshal@deadbeef");
+    }
+
+    #[test]
+    fn empty_env_value_treated_as_unset() {
+        // CLAUDE_CODE_SESSION_ID="" is "set but empty"; treat the same
+        // as unset so we don't end up with a nickname like `foo@`.
+        let (id, nick) = derive_identity(
+            |k| (k == "CLAUDE_CODE_SESSION_ID").then(String::new),
+            "foo",
+            || "11111111-2222-3333-4444-555555555555".to_string(),
+        );
+        assert_eq!(id, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(nick, "foo@11111111");
+    }
+
+    #[test]
+    fn two_claude_instances_same_cwd_get_distinct_nicknames() {
+        // The structural-uniqueness claim: same basename, different
+        // session UUIDs from two concurrent claude processes → distinct
+        // nicknames without any dedupe machinery.
+        let (_, nick_a) = derive_identity(
+            |_| Some("aaaaaaaa-1111-1111-1111-111111111111".to_string()),
+            "pulse-deploy",
+            || unreachable!(),
+        );
+        let (_, nick_b) = derive_identity(
+            |_| Some("bbbbbbbb-2222-2222-2222-222222222222".to_string()),
+            "pulse-deploy",
+            || unreachable!(),
+        );
+        assert_ne!(nick_a, nick_b);
+        assert_eq!(nick_a, "pulse-deploy@aaaaaaaa");
+        assert_eq!(nick_b, "pulse-deploy@bbbbbbbb");
+    }
+
+    #[test]
+    fn shorter_than_eight_char_id_does_not_panic() {
+        // Hedge against a future Claude Code identity format change.
+        let (id, nick) = derive_identity(
+            |_| Some("abcd".to_string()),
+            "foo",
+            || unreachable!(),
+        );
+        assert_eq!(id, "abcd");
+        assert_eq!(nick, "foo@abcd");
     }
 }
