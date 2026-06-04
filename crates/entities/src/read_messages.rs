@@ -102,22 +102,7 @@ impl CommandHandler for ReadMessages {
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-        let caller_client_id = ctx
-            .client_id()
-            .ok_or_else(|| err(&ctx, "read_messages must be called over a connected client"))?;
-        let me = sessions
-            .iter()
-            .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-            .cloned()
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                        caller_client_id.0.as_ref(),
-                    ),
-                )
-            })?;
+        let me = crate::caller::caller_session(&ctx, &sessions, "read_messages")?.clone();
 
         let messages: Vec<Arc<Message>> = ctx.exec_query(GetAllMessages {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;

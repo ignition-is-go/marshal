@@ -18,6 +18,7 @@
 
 mod ack_messages;
 mod broadcast_message;
+mod caller;
 mod message;
 mod message_read;
 mod notify;
@@ -30,6 +31,7 @@ mod session;
 
 pub use ack_messages::*;
 pub use broadcast_message::*;
+pub use caller::*;
 pub use message::*;
 pub use message_read::*;
 pub use notify::*;

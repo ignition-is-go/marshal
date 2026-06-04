@@ -16,19 +16,11 @@
 //! When server-side reactive subscriptions land in myko, this loop can
 //! be replaced with an event-driven watcher.
 
-use std::{
-    collections::HashSet,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
-use marshal_entities::Message;
-use myko::{
-    core::item::Eventable,
-    server::CellServerCtx,
-    utils::downcast_item,
-};
-use serde_json::json;
+use marshal_entities::{Message, RoomMember};
+use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
+use serde_json::{Value, json};
 
 use crate::mcp_observer::SseChannels;
 
@@ -66,6 +58,25 @@ fn tick_once(
         return;
     };
 
+    // Snapshot room membership once per tick so a broadcast doesn't pay
+    // a per-recipient registry lookup. Cheap — RoomMember rows are
+    // O(sessions × rooms) which is small in practice.
+    let members_by_room: std::collections::HashMap<Arc<str>, Vec<Arc<str>>> = ctx
+        .registry
+        .get(RoomMember::ENTITY_NAME_STATIC)
+        .map(|store| {
+            let mut acc: std::collections::HashMap<Arc<str>, Vec<Arc<str>>> = Default::default();
+            for (_id, item) in store.snapshot() {
+                if let Some(rm) = downcast_item::<RoomMember>(&item) {
+                    acc.entry(rm.room_id.0.clone())
+                        .or_default()
+                        .push(rm.session_id.0.clone());
+                }
+            }
+            acc
+        })
+        .unwrap_or_default();
+
     for (id, item) in store.snapshot() {
         if seen.contains(&id) {
             continue;
@@ -76,41 +87,58 @@ fn tick_once(
             continue;
         };
 
-        // Direct send only for now. Broadcasts require resolving the
-        // room's members at push time; deferred.
-        let Some(to_sid) = &msg.to_session_id else {
-            continue;
-        };
+        // Build the params once — same shape regardless of routing
+        // path. Mirrors the shim's `notifications/claude/channel`
+        // emission so agents can't tell the difference between
+        // shim-delivered and SSE-delivered peer messages.
+        let params = channel_params(&msg);
 
-        let Some(channel) = sse_channels.get(to_sid.0.as_ref()) else {
-            // Recipient is shim-connected (no SSE channel registered on
-            // this daemon) — they get the message via the existing
-            // shim NotifyChannel path. Skip.
-            continue;
-        };
-
-        // Frame the message as a Claude Code channel notification. The
-        // exact shape mirrors what the shim emits today, so an agent
-        // can't tell the difference between shim-delivered and
-        // SSE-delivered peer messages.
-        let params = json!({
-            "channel": "marshal",
-            "data": {
-                "from_session_id": msg.from_session_id.0.as_ref(),
-                "from_nick": msg.from_nick,
-                "body": msg.body,
-                "sent_at": msg.sent_at,
-            },
-        });
-        if !channel.send_notification("notifications/claude/channel", params) {
-            // SSE channel is gone (recipient disconnected) — drop the
-            // entry so we don't keep retrying.
-            sse_channels.get(to_sid.0.as_ref()); // no-op; observer's
-            // `Ended` event will eventually remove it.
-            log::debug!(
-                "[push] SSE channel for {} closed before push could send",
-                to_sid.0.as_ref()
-            );
+        // Route by addressing:
+        // - to_session_id set → direct send to that session's SSE if open
+        // - to_room_id set → fan out to every member with an open SSE,
+        //   skipping the sender themselves so a broadcast doesn't echo
+        //   back into the sender's transcript
+        if let Some(to_sid) = &msg.to_session_id {
+            push_to_session(sse_channels, to_sid.0.as_ref(), &params);
+        } else if let Some(to_room) = &msg.to_room_id {
+            if let Some(members) = members_by_room.get(to_room.0.as_ref()) {
+                for member_sid in members {
+                    if member_sid.as_ref() == msg.from_session_id.0.as_ref() {
+                        continue;
+                    }
+                    push_to_session(sse_channels, member_sid.as_ref(), &params);
+                }
+            }
         }
+    }
+}
+
+fn channel_params(msg: &Message) -> Value {
+    json!({
+        "channel": "marshal",
+        "data": {
+            "from_session_id": msg.from_session_id.0.as_ref(),
+            "from_nick": msg.from_nick,
+            "body": msg.body,
+            "sent_at": msg.sent_at,
+            "to_session_id": msg.to_session_id.as_ref().map(|s| s.0.as_ref()),
+            "to_room_id": msg.to_room_id.as_ref().map(|r| r.0.as_ref()),
+        },
+    })
+}
+
+fn push_to_session(sse_channels: &SseChannels, session_id: &str, params: &Value) {
+    let Some(channel) = sse_channels.get(session_id) else {
+        // Recipient is shim-connected (no SSE channel registered on
+        // this daemon) or just not subscribed — they get the message
+        // via shim NotifyChannel path or by querying
+        // `query_GetAllMessages`. Skip.
+        return;
+    };
+    if !channel.send_notification("notifications/claude/channel", params.clone()) {
+        log::debug!(
+            "[push] SSE channel for {} closed before push could send",
+            session_id
+        );
     }
 }

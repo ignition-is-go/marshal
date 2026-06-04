@@ -59,43 +59,7 @@ impl CommandHandler for SendMessage {
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
 
-        // Resolve the caller: WS-backed shims arrive with `client_id`
-        // set (lookup via Session.client_id binding); HTTP-MCP agents
-        // arrive with `mcp_session_id` set and no `client_id` (the
-        // Session.id IS the Mcp-Session-Id — see daemon::mcp_observer).
-        let sender = if let Some(caller_client_id) = ctx.client_id() {
-            sessions
-                .iter()
-                .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-                .ok_or_else(|| {
-                    err(
-                        &ctx,
-                        &format!(
-                            "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                            caller_client_id.0.as_ref(),
-                        ),
-                    )
-                })?
-        } else if let Some(caller_sid) = ctx.req.mcp_session_id.as_ref() {
-            sessions
-                .iter()
-                .find(|s| s.id.0.as_ref() == caller_sid.as_ref())
-                .ok_or_else(|| {
-                    err(
-                        &ctx,
-                        &format!(
-                            "caller (mcp-session {}) has no session on the roster — \
-                             reconnect to /myko/mcp and retry",
-                            caller_sid.as_ref(),
-                        ),
-                    )
-                })?
-        } else {
-            return Err(err(
-                &ctx,
-                "send_message must be called from a connected client or HTTP-MCP session",
-            ));
-        };
+        let sender = crate::caller::caller_session(&ctx, &sessions, "send_message")?;
 
         let recipient = sessions
             .iter()

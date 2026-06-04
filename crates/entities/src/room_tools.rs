@@ -207,22 +207,7 @@ fn err(ctx: &CommandContext, message: &str) -> CommandError {
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve_caller_session(ctx: &CommandContext) -> Result<Arc<Session>, CommandError> {
     let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-    let caller_client_id = ctx
-        .client_id()
-        .ok_or_else(|| err(ctx, "must be called over a connected client"))?;
-    sessions
-        .iter()
-        .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-        .cloned()
-        .ok_or_else(|| {
-            err(
-                ctx,
-                &format!(
-                    "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                    caller_client_id.0.as_ref(),
-                ),
-            )
-        })
+    Ok(crate::caller::caller_session(ctx, &sessions, "room_tools")?.clone())
 }
 
 /// Reserved room names + prefixes that can't be created via JoinRoom.

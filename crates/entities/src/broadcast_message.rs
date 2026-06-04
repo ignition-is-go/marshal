@@ -78,22 +78,7 @@ impl CommandHandler for BroadcastMessage {
         // Resolve sender from the calling WS connection (same path as
         // SendMessage) — sender never has to enumerate themselves.
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-        let caller_client_id = ctx
-            .client_id()
-            .ok_or_else(|| err(&ctx, "broadcast must be called over a connected client"))?;
-        let sender = sessions
-            .iter()
-            .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                        caller_client_id.0.as_ref(),
-                    ),
-                )
-            })?
-            .clone();
+        let sender = crate::caller::caller_session(&ctx, &sessions, "broadcast")?.clone();
 
         // Resolve room.
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;

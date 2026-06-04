@@ -46,22 +46,7 @@ impl CommandHandler for AckMessages {
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-        let caller_client_id = ctx
-            .client_id()
-            .ok_or_else(|| err(&ctx, "ack_messages must be called over a connected client"))?;
-        let me = sessions
-            .iter()
-            .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                        caller_client_id.0.as_ref(),
-                    ),
-                )
-            })?
-            .clone();
+        let me = crate::caller::caller_session(&ctx, &sessions, "ack_messages")?.clone();
 
         let reads: Vec<Arc<MessageRead>> = ctx.exec_query(GetAllMessageReads {})?;
         let already: std::collections::HashSet<MessageId> = reads
