@@ -133,5 +133,9 @@ fn sweep_once(
             continue;
         }
         disconnected_since.remove(&id);
+        // Drop the HTTP-MCP activity entry too so the map doesn't
+        // grow unboundedly. Idempotent for WS sessions (they never
+        // populate `last_seen` so the remove is a no-op).
+        last_seen.forget(id.as_ref());
     }
 }

@@ -83,7 +83,7 @@ impl LastSeen {
             .insert(session_id, Instant::now());
     }
 
-    fn forget(&self, session_id: &str) {
+    pub fn forget(&self, session_id: &str) {
         self.inner
             .lock()
             .expect("LastSeen mutex poisoned")
@@ -161,33 +161,19 @@ impl McpSessionObserver for McpSessionMirror {
             }
 
             McpSessionEvent::Ended { session_id } => {
+                // `Ended` means "a single SSE channel for this session
+                // closed" — which fires on every POST→SSE response close
+                // too (Streamable HTTP: client reads response, closes
+                // stream, opens a fresh POST for the next request). It
+                // is NOT a "session over" signal — that's the sweeper's
+                // job based on activity + open-channel rules.
+                //
+                // We only tear down the per-channel state here. `LastSeen`
+                // is kept (Activity bumps from non-SSE POSTs are still
+                // valid liveness evidence) and the Session entity is NOT
+                // DEL'd. The sweeper DELs based on `client_id=None &&
+                // no_open_sse && !activity_recent`.
                 self.sse_channels.remove(&session_id);
-                self.last_seen.forget(&session_id);
-
-                let stub = Session {
-                    id: SessionId(Arc::from(session_id.as_str())),
-                    client_id: None,
-                    nickname: String::new(),
-                    pid: 0,
-                    cwd: String::new(),
-                    git_branch: None,
-                    current_task: None,
-                    connected_at: 0,
-                    last_activity_at: None,
-                    last_tool: None,
-                    last_tool_at: None,
-                    operator: None,
-                    host: None,
-                    project: None,
-                };
-                let ev = myko::wire::MEvent::from_item(
-                    &stub,
-                    MEventType::DEL,
-                    &uuid::Uuid::new_v4().to_string(),
-                );
-                if let Err(e) = self.ctx.apply_event_batch(vec![ev]) {
-                    log::warn!("[mcp-observer] failed to DEL Session on close: {e}");
-                }
             }
         }
     }
