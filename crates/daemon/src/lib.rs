@@ -9,6 +9,7 @@
 
 pub mod auto_rooms;
 pub mod cleanup;
+pub mod curated;
 pub mod dedupe_nicknames;
 pub mod mcp_observer;
 pub mod persister;

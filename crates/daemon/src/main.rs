@@ -99,6 +99,13 @@ async fn main() -> Result<()> {
         sse_channels.clone(),
     ));
 
+    // Register the curated MCP surface (set_status / send_message /
+    // broadcast / join_room / leave_room / ack_messages plus the four
+    // marshal:// read resources). This is what HTTP-MCP callers see
+    // before the auto-derived `command_*` / `query_*` tools — it
+    // replaces the marshal-shim's translation layer.
+    daemon::curated::register(server.custom_mcp_registry());
+
     // Push loop: forward new `Message` entities into the SSE streams of
     // HTTP-connected recipients. Shim-connected peers continue to get
     // their notifications via the existing on_command::<NotifyChannel>
