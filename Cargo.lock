@@ -204,8 +204,6 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "autosocket"
 version = "4.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26d1e7f421a1c0d11972fdffc342d816200b765dc4e6f0b03940a52f5ce6c34d"
 dependencies = [
  "dashmap",
  "flume",
@@ -1967,8 +1965,6 @@ dependencies = [
 [[package]]
 name = "myko"
 version = "4.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1986696a43126147cd0e94945a7e068d89eeaf48560cc6358156bd2b459a538"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2008,8 +2004,6 @@ dependencies = [
 [[package]]
 name = "myko-leptos"
 version = "4.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e489c04105fc873cd1f3befd1f4cdf50f687ef2f2ac71f9f0ad414ab6f4565c"
 dependencies = [
  "leptos",
  "myko",
@@ -2019,8 +2013,6 @@ dependencies = [
 [[package]]
 name = "myko-macros"
 version = "4.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbb9a7dd00adaf4b6931c507fcf24e232bb637357beb49aeb086748d27eff1b1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2030,8 +2022,6 @@ dependencies = [
 [[package]]
 name = "myko-server"
 version = "4.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11121e64d0eefad442578fb7119478eaa9d5f35299eed9b7ec82b7363be3eca5"
 dependencies = [
  "chrono",
  "ciborium",

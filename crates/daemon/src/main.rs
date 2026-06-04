@@ -81,6 +81,20 @@ async fn main() -> Result<()> {
     // has been gone for more than `cleanup::STALE_AFTER`.
     tokio::spawn(daemon::cleanup::run_sweeper(server.ctx()));
 
+    // Register the MCP-session observer so HTTP-connected agents
+    // (Claude Code via `"type": "http"` MCP) materialise a `Session`
+    // entity in the registry on `initialize`, mirroring what the
+    // marshal-shim does on WebSocket connect. The shared
+    // `SseChannels` map will be consumed by the NotifyChannel push
+    // saga (follow-up commit) to route peer-message frames into the
+    // right agent's SSE stream.
+    let sse_channels = daemon::mcp_observer::SseChannels::new();
+    server.set_mcp_session_observer(daemon::mcp_observer::McpSessionMirror::new(
+        Arc::new(server.ctx()),
+        sse_channels.clone(),
+    ));
+    let _sse_channels = sse_channels;
+
     log::info!("marshal-daemon listening on ws://{bind_addr}");
     server.run().await.map_err(|e| anyhow::anyhow!(e))?;
     Ok(())

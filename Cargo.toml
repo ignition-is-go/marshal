@@ -33,3 +33,11 @@ hyphae = "^1.0.0"
 # alias). Source code uses `use marshal_entities::...` — the auto
 # dash→underscore conversion Rust applies to crate names.
 marshal-entities = { path = "crates/entities", version = "0.8.1" }
+
+# Local patches for upstream work in /root/pulse-deploy/external/myko.
+# Will be removed once the myko changes land in crates.io.
+[patch.crates-io]
+myko = { path = "/root/pulse-deploy/external/myko/libs/myko/core" }
+myko-macros = { path = "/root/pulse-deploy/external/myko/libs/myko/macros" }
+myko-server = { path = "/root/pulse-deploy/external/myko/libs/myko/server" }
+myko-leptos = { path = "/root/pulse-deploy/external/myko/libs/myko/leptos" }
