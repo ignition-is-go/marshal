@@ -43,7 +43,7 @@ marshal-entities = { path = "crates/entities", version = "0.8.1" }
 # `[patch.crates-io] myko = { path = ... }` form when iterating) and
 # marshal-01 / Windows shim hosts (cargo clones the rev from github).
 [patch.crates-io]
-myko = { git = "https://github.com/ignition-is-go/myko.git", rev = "206d88284a75595aabd6874485da49c58537acc8" }
-myko-macros = { git = "https://github.com/ignition-is-go/myko.git", rev = "206d88284a75595aabd6874485da49c58537acc8" }
-myko-server = { git = "https://github.com/ignition-is-go/myko.git", rev = "206d88284a75595aabd6874485da49c58537acc8" }
-myko-leptos = { git = "https://github.com/ignition-is-go/myko.git", rev = "206d88284a75595aabd6874485da49c58537acc8" }
+myko = { git = "https://github.com/ignition-is-go/myko.git", rev = "004a468075388c345d6a50a5d85c81941fad90cb" }
+myko-macros = { git = "https://github.com/ignition-is-go/myko.git", rev = "004a468075388c345d6a50a5d85c81941fad90cb" }
+myko-server = { git = "https://github.com/ignition-is-go/myko.git", rev = "004a468075388c345d6a50a5d85c81941fad90cb" }
+myko-leptos = { git = "https://github.com/ignition-is-go/myko.git", rev = "004a468075388c345d6a50a5d85c81941fad90cb" }

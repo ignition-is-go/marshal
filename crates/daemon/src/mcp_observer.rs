@@ -13,6 +13,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use chrono::Utc;
@@ -52,27 +53,75 @@ impl SseChannels {
     }
 }
 
+/// In-memory liveness map for HTTP-MCP sessions, keyed by `Mcp-Session-Id`.
+/// The observer bumps `last_seen` on every non-initialize POST; the sweeper
+/// reads it to keep sessions alive when their client (e.g. Claude Code)
+/// doesn't keep an SSE channel open. Cheap to clone — wraps an
+/// `Arc<Mutex<HashMap>>`.
+#[derive(Clone, Default)]
+pub struct LastSeen {
+    inner: Arc<Mutex<HashMap<String, Instant>>>,
+}
+
+impl LastSeen {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, session_id: &str) -> Option<Instant> {
+        self.inner
+            .lock()
+            .expect("LastSeen mutex poisoned")
+            .get(session_id)
+            .copied()
+    }
+
+    fn touch(&self, session_id: String) {
+        self.inner
+            .lock()
+            .expect("LastSeen mutex poisoned")
+            .insert(session_id, Instant::now());
+    }
+
+    fn forget(&self, session_id: &str) {
+        self.inner
+            .lock()
+            .expect("LastSeen mutex poisoned")
+            .remove(session_id);
+    }
+}
+
 /// Materialises a marshal `Session` per HTTP-MCP client and tracks each
 /// client's SSE push channel for later notification routing.
 pub struct McpSessionMirror {
     ctx: Arc<CellServerCtx>,
     sse_channels: SseChannels,
+    last_seen: LastSeen,
 }
 
 impl McpSessionMirror {
-    pub fn new(ctx: Arc<CellServerCtx>, sse_channels: SseChannels) -> Self {
-        Self { ctx, sse_channels }
+    pub fn new(ctx: Arc<CellServerCtx>, sse_channels: SseChannels, last_seen: LastSeen) -> Self {
+        Self {
+            ctx,
+            sse_channels,
+            last_seen,
+        }
     }
 }
 
 impl McpSessionObserver for McpSessionMirror {
     fn on_session_event(&self, event: McpSessionEvent) {
         match event {
+            McpSessionEvent::Activity { session_id } => {
+                self.last_seen.touch(session_id);
+            }
+
             McpSessionEvent::Started {
                 session_id,
                 client_info,
                 user_agent: _,
             } => {
+                self.last_seen.touch(session_id.clone());
                 let short = session_id.chars().take(8).collect::<String>();
                 let client_name = client_info
                     .as_ref()
@@ -113,6 +162,7 @@ impl McpSessionObserver for McpSessionMirror {
 
             McpSessionEvent::Ended { session_id } => {
                 self.sse_channels.remove(&session_id);
+                self.last_seen.forget(&session_id);
 
                 let stub = Session {
                     id: SessionId(Arc::from(session_id.as_str())),

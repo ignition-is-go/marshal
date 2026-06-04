@@ -23,10 +23,17 @@ use hyphae::Gettable;
 use marshal_entities::Session;
 use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 
-use crate::mcp_observer::SseChannels;
+use crate::mcp_observer::{LastSeen, SseChannels};
 
 /// How long a session must be without a live client before it is DEL'd.
 pub const STALE_AFTER: Duration = Duration::from_secs(10);
+
+/// HTTP-MCP grace window: how long since the last POST a session can sit
+/// without a live SSE channel before we treat it as gone. Tuned for
+/// human-paced agent traffic — Claude Code may not call marshal for a
+/// few minutes during long edits, and we don't want the next call to
+/// fail because we reaped between calls.
+pub const HTTP_ACTIVITY_GRACE: Duration = Duration::from_secs(300);
 
 /// How often the sweeper wakes up to check for stale sessions. Anything
 /// roughly under `STALE_AFTER` is fine; the trade-off is reaction latency
@@ -34,20 +41,21 @@ pub const STALE_AFTER: Duration = Duration::from_secs(10);
 pub const TICK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Run the sweeper forever. Spawn this on a tokio task and forget it.
-pub async fn run_sweeper(ctx: CellServerCtx, sse_channels: SseChannels) {
+pub async fn run_sweeper(ctx: CellServerCtx, sse_channels: SseChannels, last_seen: LastSeen) {
     let mut disconnected_since: HashMap<Arc<str>, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(TICK_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         interval.tick().await;
-        sweep_once(&ctx, &sse_channels, &mut disconnected_since);
+        sweep_once(&ctx, &sse_channels, &last_seen, &mut disconnected_since);
     }
 }
 
 fn sweep_once(
     ctx: &CellServerCtx,
     sse_channels: &SseChannels,
+    last_seen: &LastSeen,
     disconnected_since: &mut HashMap<Arc<str>, Instant>,
 ) {
     let Some(session_store) = ctx.registry.get(Session::ENTITY_NAME_STATIC) else {
@@ -82,13 +90,20 @@ fn sweep_once(
             .unwrap_or(false);
 
         // HTTP-MCP sessions have `client_id = None` because they were
-        // never bound to a WebSocket `Client`. They're live as long as
-        // an SSE channel is open for them; the SSE-close path in the
-        // observer DELs them deterministically. Skip here so the
-        // `client_id == None` branch doesn't sweep them immediately.
+        // never bound to a WebSocket `Client`. Their liveness signal is
+        // either: (a) an open SSE push channel (the observer maintains
+        // `sse_channels` for this), or (b) recent POST traffic within
+        // `HTTP_ACTIVITY_GRACE` (the observer's `Activity` handler bumps
+        // `last_seen` on every non-initialize POST). Claude Code's
+        // HTTP-MCP transport doesn't keep SSE open by default, so
+        // (b) is the common case in practice.
         let has_open_sse = sse_channels.get(id.as_ref()).is_some();
+        let activity_recent = last_seen
+            .get(id.as_ref())
+            .map(|t| now.duration_since(t) < HTTP_ACTIVITY_GRACE)
+            .unwrap_or(false);
 
-        if bound_to_live_client || has_open_sse {
+        if bound_to_live_client || has_open_sse || activity_recent {
             disconnected_since.remove(&id);
             continue;
         }

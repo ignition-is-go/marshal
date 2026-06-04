@@ -82,12 +82,21 @@ async fn main() -> Result<()> {
     // loop reads it to route peer-message frames.
     let sse_channels = daemon::mcp_observer::SseChannels::new();
 
-    // Spawn the periodic sweeper that DELs sessions whose bound client
-    // has been gone for more than `cleanup::STALE_AFTER`. HTTP-MCP
-    // sessions are exempt while their SSE stream is open.
+    // Shared LastSeen map: observer bumps on every non-initialize POST,
+    // sweeper reads to keep HTTP-MCP sessions alive when their client
+    // doesn't keep an SSE channel open (Claude Code's HTTP-MCP transport
+    // is one such — it only opens SSE on demand).
+    let last_seen = daemon::mcp_observer::LastSeen::new();
+
+    // Spawn the periodic sweeper. Liveness rules: WS sessions with a
+    // live `Client` entity, HTTP-MCP sessions with an open SSE channel,
+    // and HTTP-MCP sessions with POST activity within
+    // `HTTP_ACTIVITY_GRACE` all survive each tick. Everything else
+    // becomes a candidate after `STALE_AFTER`.
     tokio::spawn(daemon::cleanup::run_sweeper(
         server.ctx(),
         sse_channels.clone(),
+        last_seen.clone(),
     ));
 
     // Register the MCP-session observer so HTTP-connected agents
@@ -97,6 +106,7 @@ async fn main() -> Result<()> {
     server.set_mcp_session_observer(daemon::mcp_observer::McpSessionMirror::new(
         Arc::new(server.ctx()),
         sse_channels.clone(),
+        last_seen,
     ));
 
     // Register the curated MCP surface (set_status / send_message /
