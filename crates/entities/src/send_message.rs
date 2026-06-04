@@ -88,16 +88,21 @@ impl CommandHandler for SendMessage {
                 )
             })?;
 
-        let recipient_client_id = recipient.client_id.as_ref().ok_or_else(|| {
-            err(
-                &ctx,
-                &format!(
-                    "session '{}' (nickname '{}') is offline — no live client to deliver to",
-                    recipient.id.0.as_ref(),
-                    recipient.nickname,
-                ),
-            )
-        })?;
+        // Recipients fall into two camps:
+        //
+        // - **Shim-connected** (WebSocket): `client_id` is Some pointing
+        //   at a live `Client` entity. Delivery is via the existing
+        //   `push_to_client` → NotifyChannel path, and the response is
+        //   gated on that push succeeding so the caller knows the live
+        //   binding is good.
+        //
+        // - **HTTP-MCP-connected** (`/myko/mcp` SSE): `client_id` is
+        //   `None`. We emit the Message anyway — the daemon's push loop
+        //   forwards new direct Messages into the recipient's SSE
+        //   channel if one is open, and the recipient can read it via
+        //   `query_GetAllMessages` regardless. Acceptance here means
+        //   "the Message is persisted and routable"; the per-transport
+        //   delivery guarantees are the transport's responsibility.
 
         let now = Utc::now().timestamp_millis();
         let msg = Message {
@@ -111,36 +116,40 @@ impl CommandHandler for SendMessage {
             sent_at: now,
         };
 
-        let dispatched = push_to_client(
-            recipient_client_id.0.as_ref(),
-            format!(
-                "marshal: new message from '{}': {}",
-                sender.nickname, self.body
-            ),
-            serde_json::json!({
-                "source": "marshal",
-                "kind": "new_message",
-                "from_nick": sender.nickname,
-                "from_session": sender.id.0.as_ref(),
-                "to_nick": recipient.nickname,
-                "body": self.body,
-                "sent_at": now,
-            }),
-        );
-        if !dispatched {
-            return Err(err(
-                &ctx,
-                &format!(
-                    "session '{}' (nickname '{}') has a stale client binding ({}); the recipient bounced \
-                     and hasn't re-SET its Session yet — retry shortly",
-                    recipient.id.0.as_ref(),
-                    recipient.nickname,
-                    recipient_client_id.0.as_ref(),
+        if let Some(recipient_client_id) = recipient.client_id.as_ref() {
+            let dispatched = push_to_client(
+                recipient_client_id.0.as_ref(),
+                format!(
+                    "marshal: new message from '{}': {}",
+                    sender.nickname, self.body
                 ),
-            ));
+                serde_json::json!({
+                    "source": "marshal",
+                    "kind": "new_message",
+                    "from_nick": sender.nickname,
+                    "from_session": sender.id.0.as_ref(),
+                    "to_nick": recipient.nickname,
+                    "body": self.body,
+                    "sent_at": now,
+                }),
+            );
+            if !dispatched {
+                return Err(err(
+                    &ctx,
+                    &format!(
+                        "session '{}' (nickname '{}') has a stale client binding ({}); the recipient bounced \
+                         and hasn't re-SET its Session yet — retry shortly",
+                        recipient.id.0.as_ref(),
+                        recipient.nickname,
+                        recipient_client_id.0.as_ref(),
+                    ),
+                ));
+            }
         }
 
-        // Persist only after the live push succeeds.
+        // Persist after (the optional) live push. HTTP-MCP recipients
+        // hit only this line; the daemon's push loop will see the
+        // newly-set Message on its next tick and forward it.
         ctx.emit_set(&msg)?;
 
         Ok(SendMessageResult {

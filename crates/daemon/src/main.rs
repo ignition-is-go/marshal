@@ -77,23 +77,33 @@ async fn main() -> Result<()> {
         .start_watcher(server.ctx())
         .with_context(|| format!("starting watcher on {}", log_path.display()))?;
 
+    // Shared SseChannels map: McpSessionMirror inserts per-SSE channel,
+    // run_sweeper consults it to keep HTTP-MCP sessions alive, push
+    // loop reads it to route peer-message frames.
+    let sse_channels = daemon::mcp_observer::SseChannels::new();
+
     // Spawn the periodic sweeper that DELs sessions whose bound client
-    // has been gone for more than `cleanup::STALE_AFTER`.
-    tokio::spawn(daemon::cleanup::run_sweeper(server.ctx()));
+    // has been gone for more than `cleanup::STALE_AFTER`. HTTP-MCP
+    // sessions are exempt while their SSE stream is open.
+    tokio::spawn(daemon::cleanup::run_sweeper(
+        server.ctx(),
+        sse_channels.clone(),
+    ));
 
     // Register the MCP-session observer so HTTP-connected agents
     // (Claude Code via `"type": "http"` MCP) materialise a `Session`
     // entity in the registry on `initialize`, mirroring what the
-    // marshal-shim does on WebSocket connect. The shared
-    // `SseChannels` map will be consumed by the NotifyChannel push
-    // saga (follow-up commit) to route peer-message frames into the
-    // right agent's SSE stream.
-    let sse_channels = daemon::mcp_observer::SseChannels::new();
+    // marshal-shim does on WebSocket connect.
     server.set_mcp_session_observer(daemon::mcp_observer::McpSessionMirror::new(
         Arc::new(server.ctx()),
         sse_channels.clone(),
     ));
-    let _sse_channels = sse_channels;
+
+    // Push loop: forward new `Message` entities into the SSE streams of
+    // HTTP-connected recipients. Shim-connected peers continue to get
+    // their notifications via the existing on_command::<NotifyChannel>
+    // path; this only touches sessions with an entry in `sse_channels`.
+    tokio::spawn(daemon::push::run_push_loop(server.ctx(), sse_channels));
 
     log::info!("marshal-daemon listening on ws://{bind_addr}");
     server.run().await.map_err(|e| anyhow::anyhow!(e))?;

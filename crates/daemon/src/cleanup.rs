@@ -23,6 +23,8 @@ use hyphae::Gettable;
 use marshal_entities::Session;
 use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 
+use crate::mcp_observer::SseChannels;
+
 /// How long a session must be without a live client before it is DEL'd.
 pub const STALE_AFTER: Duration = Duration::from_secs(10);
 
@@ -32,18 +34,22 @@ pub const STALE_AFTER: Duration = Duration::from_secs(10);
 pub const TICK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Run the sweeper forever. Spawn this on a tokio task and forget it.
-pub async fn run_sweeper(ctx: CellServerCtx) {
+pub async fn run_sweeper(ctx: CellServerCtx, sse_channels: SseChannels) {
     let mut disconnected_since: HashMap<Arc<str>, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(TICK_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         interval.tick().await;
-        sweep_once(&ctx, &mut disconnected_since);
+        sweep_once(&ctx, &sse_channels, &mut disconnected_since);
     }
 }
 
-fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, Instant>) {
+fn sweep_once(
+    ctx: &CellServerCtx,
+    sse_channels: &SseChannels,
+    disconnected_since: &mut HashMap<Arc<str>, Instant>,
+) {
     let Some(session_store) = ctx.registry.get(Session::ENTITY_NAME_STATIC) else {
         return;
     };
@@ -75,7 +81,14 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
             .map(|cid| live_client_ids.contains(&cid.0))
             .unwrap_or(false);
 
-        if bound_to_live_client {
+        // HTTP-MCP sessions have `client_id = None` because they were
+        // never bound to a WebSocket `Client`. They're live as long as
+        // an SSE channel is open for them; the SSE-close path in the
+        // observer DELs them deterministically. Skip here so the
+        // `client_id == None` branch doesn't sweep them immediately.
+        let has_open_sse = sse_channels.get(id.as_ref()).is_some();
+
+        if bound_to_live_client || has_open_sse {
             disconnected_since.remove(&id);
             continue;
         }

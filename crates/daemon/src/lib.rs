@@ -12,6 +12,7 @@ pub mod cleanup;
 pub mod dedupe_nicknames;
 pub mod mcp_observer;
 pub mod persister;
+pub mod push;
 
 pub fn link() {
     dedupe_nicknames::link();
