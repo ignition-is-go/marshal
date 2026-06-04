@@ -30,10 +30,13 @@ pub const STALE_AFTER: Duration = Duration::from_secs(10);
 
 /// HTTP-MCP grace window: how long since the last POST a session can sit
 /// without a live SSE channel before we treat it as gone. Tuned for
-/// human-paced agent traffic — Claude Code may not call marshal for a
-/// few minutes during long edits, and we don't want the next call to
-/// fail because we reaped between calls.
-pub const HTTP_ACTIVITY_GRACE: Duration = Duration::from_secs(300);
+/// human-paced agent traffic — an agent in the middle of a long
+/// conversation may not touch marshal for tens of minutes while the
+/// operator types or while the model is doing focused work. Empirical
+/// 5min was too tight (sessions got reaped between sends during normal
+/// pauses); 30min covers typical agent idle spans without holding
+/// truly-gone sessions forever.
+pub const HTTP_ACTIVITY_GRACE: Duration = Duration::from_secs(30 * 60);
 
 /// How often the sweeper wakes up to check for stale sessions. Anything
 /// roughly under `STALE_AFTER` is fine; the trade-off is reaction latency
