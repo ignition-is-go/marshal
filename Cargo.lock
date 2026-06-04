@@ -204,7 +204,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "autosocket"
 version = "4.17.0"
-source = "git+https://github.com/ignition-is-go/myko.git?rev=004a468075388c345d6a50a5d85c81941fad90cb#004a468075388c345d6a50a5d85c81941fad90cb"
+source = "git+https://github.com/ignition-is-go/myko.git?rev=e7992f810b936d89db2d998655969241bde141ed#e7992f810b936d89db2d998655969241bde141ed"
 dependencies = [
  "dashmap",
  "flume",
@@ -1966,7 +1966,7 @@ dependencies = [
 [[package]]
 name = "myko"
 version = "4.17.0"
-source = "git+https://github.com/ignition-is-go/myko.git?rev=004a468075388c345d6a50a5d85c81941fad90cb#004a468075388c345d6a50a5d85c81941fad90cb"
+source = "git+https://github.com/ignition-is-go/myko.git?rev=e7992f810b936d89db2d998655969241bde141ed#e7992f810b936d89db2d998655969241bde141ed"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2006,7 +2006,7 @@ dependencies = [
 [[package]]
 name = "myko-leptos"
 version = "4.17.0"
-source = "git+https://github.com/ignition-is-go/myko.git?rev=004a468075388c345d6a50a5d85c81941fad90cb#004a468075388c345d6a50a5d85c81941fad90cb"
+source = "git+https://github.com/ignition-is-go/myko.git?rev=e7992f810b936d89db2d998655969241bde141ed#e7992f810b936d89db2d998655969241bde141ed"
 dependencies = [
  "leptos",
  "myko",
@@ -2016,7 +2016,7 @@ dependencies = [
 [[package]]
 name = "myko-macros"
 version = "4.17.0"
-source = "git+https://github.com/ignition-is-go/myko.git?rev=004a468075388c345d6a50a5d85c81941fad90cb#004a468075388c345d6a50a5d85c81941fad90cb"
+source = "git+https://github.com/ignition-is-go/myko.git?rev=e7992f810b936d89db2d998655969241bde141ed#e7992f810b936d89db2d998655969241bde141ed"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2026,7 +2026,7 @@ dependencies = [
 [[package]]
 name = "myko-server"
 version = "4.17.0"
-source = "git+https://github.com/ignition-is-go/myko.git?rev=004a468075388c345d6a50a5d85c81941fad90cb#004a468075388c345d6a50a5d85c81941fad90cb"
+source = "git+https://github.com/ignition-is-go/myko.git?rev=e7992f810b936d89db2d998655969241bde141ed#e7992f810b936d89db2d998655969241bde141ed"
 dependencies = [
  "chrono",
  "ciborium",
