@@ -38,12 +38,9 @@ marshal-entities = { path = "crates/entities", version = "0.8.1" }
 # until the curated MCP registry + Mcp-Session-Id work lands on main and
 # a new myko release ships to crates.io. Pinned to a git rev (not a
 # branch name) so deploys are deterministic — bumping the rev is an
-# explicit commit, not a silent re-resolve at build time. Works on both
-# pulse-admin (no clone needed for local dev — replaced ad-hoc with the
-# `[patch.crates-io] myko = { path = ... }` form when iterating) and
-# marshal-01 / Windows shim hosts (cargo clones the rev from github).
+# explicit commit, not a silent re-resolve at build time.
 [patch.crates-io]
-myko = { git = "https://github.com/ignition-is-go/myko.git", rev = "e7992f810b936d89db2d998655969241bde141ed" }
-myko-macros = { git = "https://github.com/ignition-is-go/myko.git", rev = "e7992f810b936d89db2d998655969241bde141ed" }
-myko-server = { git = "https://github.com/ignition-is-go/myko.git", rev = "e7992f810b936d89db2d998655969241bde141ed" }
-myko-leptos = { git = "https://github.com/ignition-is-go/myko.git", rev = "e7992f810b936d89db2d998655969241bde141ed" }
+myko = { git = "https://github.com/ignition-is-go/myko.git", rev = "1d679246ea1115e0f4588560959d4c7d26a36e90" }
+myko-macros = { git = "https://github.com/ignition-is-go/myko.git", rev = "1d679246ea1115e0f4588560959d4c7d26a36e90" }
+myko-server = { git = "https://github.com/ignition-is-go/myko.git", rev = "1d679246ea1115e0f4588560959d4c7d26a36e90" }
+myko-leptos = { git = "https://github.com/ignition-is-go/myko.git", rev = "1d679246ea1115e0f4588560959d4c7d26a36e90" }

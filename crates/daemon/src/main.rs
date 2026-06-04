@@ -88,6 +88,13 @@ async fn main() -> Result<()> {
     // is one such — it only opens SSE on demand).
     let last_seen = daemon::mcp_observer::LastSeen::new();
 
+    // Shared PendingPush buffer: push loop appends frames here when
+    // the recipient has no currently-open SSE channel; the observer's
+    // `SseConnected` handler drains entries into the next POST→SSE
+    // response. This is the load-bearing path for push delivery to
+    // clients that don't keep an SSE channel open between requests.
+    let pending_push = daemon::mcp_observer::PendingPush::new();
+
     // Spawn the periodic sweeper. Liveness rules: WS sessions with a
     // live `Client` entity, HTTP-MCP sessions with an open SSE channel,
     // and HTTP-MCP sessions with POST activity within
@@ -97,6 +104,7 @@ async fn main() -> Result<()> {
         server.ctx(),
         sse_channels.clone(),
         last_seen.clone(),
+        pending_push.clone(),
     ));
 
     // Register the MCP-session observer so HTTP-connected agents
@@ -107,6 +115,7 @@ async fn main() -> Result<()> {
         Arc::new(server.ctx()),
         sse_channels.clone(),
         last_seen,
+        pending_push.clone(),
     ));
 
     // Register the curated MCP surface (set_status / send_message /
@@ -117,10 +126,15 @@ async fn main() -> Result<()> {
     daemon::curated::register(server.custom_mcp_registry());
 
     // Push loop: forward new `Message` entities into the SSE streams of
-    // HTTP-connected recipients. Shim-connected peers continue to get
-    // their notifications via the existing on_command::<NotifyChannel>
-    // path; this only touches sessions with an entry in `sse_channels`.
-    tokio::spawn(daemon::push::run_push_loop(server.ctx(), sse_channels));
+    // HTTP-connected recipients, or buffer them in `PendingPush` if no
+    // channel is open right now (Claude Code's typical case). Shim-
+    // connected peers continue to get their notifications via the
+    // existing on_command::<NotifyChannel> path.
+    tokio::spawn(daemon::push::run_push_loop(
+        server.ctx(),
+        sse_channels,
+        pending_push,
+    ));
 
     log::info!("marshal-daemon listening on ws://{bind_addr}");
     server.run().await.map_err(|e| anyhow::anyhow!(e))?;

@@ -23,7 +23,7 @@ use hyphae::Gettable;
 use marshal_entities::Session;
 use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 
-use crate::mcp_observer::{LastSeen, SseChannels};
+use crate::mcp_observer::{LastSeen, PendingPush, SseChannels};
 
 /// How long a session must be without a live client before it is DEL'd.
 pub const STALE_AFTER: Duration = Duration::from_secs(10);
@@ -44,14 +44,25 @@ pub const HTTP_ACTIVITY_GRACE: Duration = Duration::from_secs(30 * 60);
 pub const TICK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Run the sweeper forever. Spawn this on a tokio task and forget it.
-pub async fn run_sweeper(ctx: CellServerCtx, sse_channels: SseChannels, last_seen: LastSeen) {
+pub async fn run_sweeper(
+    ctx: CellServerCtx,
+    sse_channels: SseChannels,
+    last_seen: LastSeen,
+    pending: PendingPush,
+) {
     let mut disconnected_since: HashMap<Arc<str>, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(TICK_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         interval.tick().await;
-        sweep_once(&ctx, &sse_channels, &last_seen, &mut disconnected_since);
+        sweep_once(
+            &ctx,
+            &sse_channels,
+            &last_seen,
+            &pending,
+            &mut disconnected_since,
+        );
     }
 }
 
@@ -59,6 +70,7 @@ fn sweep_once(
     ctx: &CellServerCtx,
     sse_channels: &SseChannels,
     last_seen: &LastSeen,
+    pending: &PendingPush,
     disconnected_since: &mut HashMap<Arc<str>, Instant>,
 ) {
     let Some(session_store) = ctx.registry.get(Session::ENTITY_NAME_STATIC) else {
@@ -133,9 +145,10 @@ fn sweep_once(
             continue;
         }
         disconnected_since.remove(&id);
-        // Drop the HTTP-MCP activity entry too so the map doesn't
-        // grow unboundedly. Idempotent for WS sessions (they never
-        // populate `last_seen` so the remove is a no-op).
+        // Drop the HTTP-MCP activity entry AND any buffered pushes too
+        // so the maps don't grow unboundedly. Idempotent for WS
+        // sessions (they never populate either map so removes are no-ops).
         last_seen.forget(id.as_ref());
+        pending.forget(id.as_ref());
     }
 }

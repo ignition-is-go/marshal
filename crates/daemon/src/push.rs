@@ -22,7 +22,7 @@ use marshal_entities::{Message, RoomMember};
 use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 use serde_json::{Value, json};
 
-use crate::mcp_observer::SseChannels;
+use crate::mcp_observer::{PendingPush, SseChannels};
 
 /// How often to scan the Message store for new entries. Lower → snappier
 /// inline notifications, more wakeups per second. 200 ms is well below
@@ -30,7 +30,7 @@ use crate::mcp_observer::SseChannels;
 pub const TICK_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Run the push loop forever. Spawn this on a tokio task and forget it.
-pub async fn run_push_loop(ctx: CellServerCtx, sse_channels: SseChannels) {
+pub async fn run_push_loop(ctx: CellServerCtx, sse_channels: SseChannels, pending: PendingPush) {
     let mut seen: HashSet<Arc<str>> = HashSet::new();
     // Prime: anything already in the registry on startup is "history" —
     // don't replay it as a push. New peer messages get added later.
@@ -45,13 +45,14 @@ pub async fn run_push_loop(ctx: CellServerCtx, sse_channels: SseChannels) {
 
     loop {
         interval.tick().await;
-        tick_once(&ctx, &sse_channels, &mut seen);
+        tick_once(&ctx, &sse_channels, &pending, &mut seen);
     }
 }
 
 fn tick_once(
     ctx: &CellServerCtx,
     sse_channels: &SseChannels,
+    pending: &PendingPush,
     seen: &mut HashSet<Arc<str>>,
 ) {
     let Some(store) = ctx.registry.get(Message::ENTITY_NAME_STATIC) else {
@@ -99,14 +100,14 @@ fn tick_once(
         //   skipping the sender themselves so a broadcast doesn't echo
         //   back into the sender's transcript
         if let Some(to_sid) = &msg.to_session_id {
-            push_to_session(sse_channels, to_sid.0.as_ref(), &params);
+            push_to_session(sse_channels, pending, to_sid.0.as_ref(), &params);
         } else if let Some(to_room) = &msg.to_room_id {
             if let Some(members) = members_by_room.get(to_room.0.as_ref()) {
                 for member_sid in members {
                     if member_sid.as_ref() == msg.from_session_id.0.as_ref() {
                         continue;
                     }
-                    push_to_session(sse_channels, member_sid.as_ref(), &params);
+                    push_to_session(sse_channels, pending, member_sid.as_ref(), &params);
                 }
             }
         }
@@ -127,18 +128,45 @@ fn channel_params(msg: &Message) -> Value {
     })
 }
 
-fn push_to_session(sse_channels: &SseChannels, session_id: &str, params: &Value) {
-    let Some(channel) = sse_channels.get(session_id) else {
-        // Recipient is shim-connected (no SSE channel registered on
-        // this daemon) or just not subscribed — they get the message
-        // via shim NotifyChannel path or by querying
-        // `query_GetAllMessages`. Skip.
-        return;
+fn push_to_session(
+    sse_channels: &SseChannels,
+    pending: &PendingPush,
+    session_id: &str,
+    params: &Value,
+) {
+    // Try live delivery first: if the recipient has an SSE-on-POST
+    // stream open right now, the push lands directly in their MCP
+    // transcript. Otherwise (typical case for Claude Code, which
+    // closes POST→SSE streams after reading the response), buffer
+    // the frame so the recipient's next POST drains it.
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/claude/channel",
+        "params": params,
+    });
+    let body_str = match serde_json::to_string(&body) {
+        Ok(s) => s,
+        Err(_) => return,
     };
-    if !channel.send_notification("notifications/claude/channel", params.clone()) {
+    let frame = format!("event: message\ndata: {body_str}\n\n");
+
+    if let Some(channel) = sse_channels.get(session_id) {
+        if channel.send_raw_frame(frame.clone()) {
+            return;
+        }
         log::debug!(
-            "[push] SSE channel for {} closed before push could send",
+            "[push] SSE channel for {} closed; falling back to PendingPush",
             session_id
         );
     }
+    // No open channel (or channel write failed) — buffer for the
+    // recipient's next POST. Note: WS-shim recipients ALSO land here
+    // because they have no SSE channel; that's fine because shims
+    // get peer messages via the on_command<NotifyChannel> path
+    // (SendMessage::execute already pushed it before this loop ran),
+    // and they don't make HTTP POSTs to drain so the buffer entry
+    // is dead weight. The sweeper's `forget` call when the session
+    // gets DEL'd handles cleanup. (TODO: route by transport — only
+    // buffer for HTTP-MCP sessions — once we track that on Session.)
+    pending.append(session_id, frame);
 }

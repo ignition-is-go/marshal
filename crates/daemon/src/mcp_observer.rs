@@ -53,6 +53,63 @@ impl SseChannels {
     }
 }
 
+/// Per-session notification buffer for HTTP-MCP recipients that don't
+/// keep a long-lived SSE stream open. The push loop appends a frame
+/// here when the recipient has no currently-open SSE channel (or the
+/// write attempt fails). The next time the recipient POSTs to
+/// `/myko/mcp` with `Accept: text/event-stream`, the mirror's
+/// `SseConnected` handler drains this buffer into the response stream
+/// before it closes, so the client receives the notifications as
+/// additional SSE events alongside the JSON-RPC response.
+///
+/// This is the *only* path for server→client push when the client
+/// doesn't keep a GET-SSE listener open (Claude Code 2.1.x's empirical
+/// behaviour). For clients that DO hold an SSE stream open, live push
+/// via `SseChannels` works as before and `PendingPush` stays empty.
+#[derive(Clone, Default)]
+pub struct PendingPush {
+    inner: Arc<Mutex<HashMap<String, Vec<String>>>>,
+}
+
+impl PendingPush {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a pre-formatted SSE frame (including the trailing
+    /// `\n\n`) to the buffer for `session_id`. Called from the push
+    /// loop when live delivery isn't possible.
+    pub fn append(&self, session_id: &str, frame: String) {
+        self.inner
+            .lock()
+            .expect("PendingPush mutex poisoned")
+            .entry(session_id.to_string())
+            .or_default()
+            .push(frame);
+    }
+
+    /// Atomically remove and return everything buffered for
+    /// `session_id`. Called from `SseConnected` so the drained
+    /// frames can be written into the just-opened stream.
+    pub fn drain(&self, session_id: &str) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("PendingPush mutex poisoned")
+            .remove(session_id)
+            .unwrap_or_default()
+    }
+
+    /// Drop the buffer entry for a session entirely — called when
+    /// the sweeper DELs the session so we don't leak memory on
+    /// truly-gone sessions.
+    pub fn forget(&self, session_id: &str) {
+        self.inner
+            .lock()
+            .expect("PendingPush mutex poisoned")
+            .remove(session_id);
+    }
+}
+
 /// In-memory liveness map for HTTP-MCP sessions, keyed by `Mcp-Session-Id`.
 /// The observer bumps `last_seen` on every non-initialize POST; the sweeper
 /// reads it to keep sessions alive when their client (e.g. Claude Code)
@@ -97,14 +154,21 @@ pub struct McpSessionMirror {
     ctx: Arc<CellServerCtx>,
     sse_channels: SseChannels,
     last_seen: LastSeen,
+    pending: PendingPush,
 }
 
 impl McpSessionMirror {
-    pub fn new(ctx: Arc<CellServerCtx>, sse_channels: SseChannels, last_seen: LastSeen) -> Self {
+    pub fn new(
+        ctx: Arc<CellServerCtx>,
+        sse_channels: SseChannels,
+        last_seen: LastSeen,
+        pending: PendingPush,
+    ) -> Self {
         Self {
             ctx,
             sse_channels,
             last_seen,
+            pending,
         }
     }
 }
@@ -157,6 +221,18 @@ impl McpSessionObserver for McpSessionMirror {
             }
 
             McpSessionEvent::SseConnected { session_id, channel } => {
+                // Drain any frames buffered while no SSE channel was open
+                // into the just-opened channel. The channel's mpsc queues
+                // them; `respond_sse` will pump the queue onto the wire
+                // before the per-request stream closes.
+                let pending = self.pending.drain(&session_id);
+                for frame in pending {
+                    if !channel.send_raw_frame(frame) {
+                        // Channel already torn down between fire and drain —
+                        // give up; nothing else can save the frames here.
+                        break;
+                    }
+                }
                 self.sse_channels.insert(session_id, channel);
             }
 
