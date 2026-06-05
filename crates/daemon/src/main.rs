@@ -10,8 +10,11 @@
 
 use anyhow::{Context, Result};
 use daemon::persister::{DiskPersister, default_state_dir, migrate_from_claude_coord};
-use myko_server::{BlackholePersister, CellServer};
-use std::{net::SocketAddr, sync::Arc};
+use myko_server::{BlackholePersister, CellServer, mcp::dispatch::ServerInfo};
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    sync::Arc,
+};
 
 /// Default bind address. Binds all interfaces by default so peers on
 /// other hosts can reach the daemon without the user remembering to
@@ -25,9 +28,19 @@ const DEFAULT_BIND: &str = "0.0.0.0:6155";
 async fn main() -> Result<()> {
     init_logging();
 
-    let bind_addr: SocketAddr = std::env::var("MARSHAL_BIND")
-        .unwrap_or_else(|_| DEFAULT_BIND.to_string())
-        .parse()?;
+    // Resolve MARSHAL_BIND via the system resolver rather than a bare
+    // `SocketAddr::parse`, so it accepts a hostname (e.g. a NetBird DNS
+    // name like `marshal-01.lucid.host:6155`) and not just a numeric IP.
+    // Binding to a mesh hostname survives the peer's mesh IP being
+    // reassigned — the next start re-resolves. A hostname that resolves
+    // to multiple addresses binds the first; for marshal's single-mesh-IP
+    // case that's unambiguous.
+    let bind_spec = std::env::var("MARSHAL_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
+    let bind_addr: SocketAddr = bind_spec
+        .to_socket_addrs()
+        .with_context(|| format!("resolving MARSHAL_BIND '{bind_spec}'"))?
+        .next()
+        .with_context(|| format!("MARSHAL_BIND '{bind_spec}' resolved to no addresses"))?;
 
     // Force-link entities + sagas so their `inventory` registrations aren't
     // dead-code-eliminated.
@@ -59,6 +72,7 @@ async fn main() -> Result<()> {
         .with_default_persister(persister.clone() as Arc<dyn myko::server::Persister>)
         .with_persister_override("Client", blackhole.clone())
         .with_persister_override("Server", blackhole)
+        .with_server_info(marshal_server_info())
         .build();
 
     // Replay the log into the just-built server before we accept any
@@ -139,6 +153,48 @@ async fn main() -> Result<()> {
     log::info!("marshal-daemon listening on ws://{bind_addr}");
     server.run().await.map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
+}
+
+/// MCP `ServerInfo` advertised on `/myko/mcp` initialize responses.
+///
+/// The shim sets equivalent `instructions` per-connection (with the
+/// session's nickname interpolated). The daemon's HTTP-MCP path can't
+/// interpolate per session, so this is the static version — the same
+/// usage guidance any MCP-connected client benefits from. Note: the
+/// `notifications/claude/channel` push only surfaces in Claude Code
+/// sessions launched with `--dangerously-load-development-channels
+/// server:marshal`; without that flag the daemon's pushes are dropped
+/// client-side.
+fn marshal_server_info() -> ServerInfo {
+    ServerInfo {
+        name: "marshal".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        instructions: Some(
+            "Marshal is the coordination daemon for sibling Claude sessions on this fleet.\n\
+             \n\
+             READ paths are resources (use `resources/read`):\n\
+             - marshal://whoami       — your session id, nickname, pid, cwd, operator, host\n\
+             - marshal://roster       — every live session and what room(s) it's in\n\
+             - marshal://rooms        — every room and who its members are\n\
+             - marshal://messages     — message history; supports query params:\n\
+                                       inbox=true, sent=true, unread=true,\n\
+                                       room=ID, from=SID, to_session=SID,\n\
+                                       since=MILLIS, limit=N\n\
+             \n\
+             WRITE paths are tools (use `tools/call`):\n\
+             - send_message       — direct send to a peer's session_id\n\
+             - broadcast          — fan-out to all members of a room\n\
+             - join_room          — create or join an ad-hoc room\n\
+             - leave_room         — leave an ad-hoc room\n\
+             - set_status         — set this session's free-form status text\n\
+             - ack_messages       — mark message ids as read for this session\n\
+             \n\
+             Recipient ids are session_ids (uuids) from marshal://roster, not nicknames.\n\
+             Inbound peer messages arrive as `notifications/claude/channel` events; \
+             reply with `send_message` or `broadcast`."
+                .to_string(),
+        ),
+    }
 }
 
 fn init_logging() {
