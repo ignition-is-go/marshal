@@ -75,7 +75,10 @@ fn handle_session_start(req: CustomHttpRequest, last_seen: &LastSeen) -> CustomH
     let nickname = format!("{dir}@{}", &sid[..sid.len().min(8)]);
     let operator = query.get("operator").filter(|s| !s.is_empty()).cloned();
     let host = query.get("host").filter(|s| !s.is_empty()).map(|h| HostInfo {
-        name: h.clone(),
+        // `hostname` may return an FQDN (common on Windows); the host:*
+        // auto-room keys on the short name, so drop the domain. Matches
+        // Linux `hostname -s`.
+        name: h.split('.').next().unwrap_or(h).to_string(),
         os: query.get("os").cloned().unwrap_or_default(),
         arch: query.get("arch").cloned().unwrap_or_default(),
     });
