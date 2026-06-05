@@ -217,6 +217,7 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("b")),
         body: "hello bravo".into(),
+        as_session: None, // WS path: sender resolved from the connection
     };
     let response_cell = client_a.send_command::<SendMessage, SendMessageResult>(&cmd);
 

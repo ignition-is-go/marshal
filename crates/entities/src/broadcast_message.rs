@@ -30,13 +30,18 @@ use crate::{
     notify::NotifyChannel,
     room::{GetAllRooms, Room, RoomId},
     room_member::{GetAllRoomMembers, RoomMember},
-    session::{GetAllSessions, Session, SessionId},
+    session::{resolve_caller, GetAllSessions, Session, SessionId},
 };
 
 #[myko_command(BroadcastMessageResult)]
 pub struct BroadcastMessage {
     pub to_room_id: RoomId,
     pub body: String,
+
+    /// Self-identified sender for connectionless paths (HTTP-MCP agents).
+    /// WS shim callers omit it. See `resolve_caller`.
+    #[serde(default, rename = "asSession", skip_serializing_if = "Option::is_none")]
+    pub as_session: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,25 +80,10 @@ impl CommandHandler for BroadcastMessage {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
-        // Resolve sender from the calling WS connection (same path as
-        // SendMessage) — sender never has to enumerate themselves.
+        // Resolve sender — WS connection (shim) or self-identified
+        // `asSession` (HTTP-MCP agent). Same path as SendMessage.
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-        let caller_client_id = ctx
-            .client_id()
-            .ok_or_else(|| err(&ctx, "broadcast must be called over a connected client"))?;
-        let sender = sessions
-            .iter()
-            .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                        caller_client_id.0.as_ref(),
-                    ),
-                )
-            })?
-            .clone();
+        let sender = resolve_caller(&ctx, &sessions, self.as_session.as_ref())?;
 
         // Resolve room.
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
@@ -159,14 +149,10 @@ impl CommandHandler for BroadcastMessage {
                 continue;
             };
             let Some(client_id) = recipient.client_id.as_ref() else {
-                failed.push(FailedRecipient {
-                    session_id: recipient.id.clone(),
-                    to_nick: recipient.nickname.clone(),
-                    reason: format!(
-                        "session '{}' is offline — no live client to deliver to",
-                        recipient.id.0.as_ref(),
-                    ),
-                });
+                // Offline member: not a failure in the pull model — the
+                // broadcast Message is already persisted and addressed to
+                // the room, so this member picks it up via its next hook.
+                // Neither `delivered` (no live push) nor `failed`.
                 continue;
             };
 

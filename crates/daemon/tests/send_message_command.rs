@@ -1,18 +1,18 @@
-//! Integration tests for the `SendMessage` server command.
+//! Integration tests for the `SendMessage` server command (pull model).
 //!
 //! Spins up a real `CellServer` (no WS listener), pre-populates the
 //! Session store, then invokes `SendMessage::execute` directly through a
-//! synthetic `CommandContext`. The handler should:
-//!   - validate the recipient session exists, returning a clear
-//!     `CommandError` if not,
-//!   - validate the recipient is bound to a live client (`client_id`
-//!     populated), failing loudly when offline,
-//!   - resolve the sender from `ctx.client_id()` and reject calls that
-//!     don't map to a session,
-//!   - on the happy path, emit a `Message` SET and return the
-//!     `SendMessageResult` (the existing `MessageNotifySaga` handles the
-//!     subsequent `NotifyChannel` push — separately tested via the
-//!     end-to-end shim flow).
+//! synthetic `CommandContext`. Under the pull model the handler should:
+//!   - resolve the sender from the WS `client_id` OR an explicit
+//!     `as_session` (self-identify, for connectionless HTTP-MCP callers),
+//!   - reject an unknown recipient and an unresolvable sender with a clear
+//!     `CommandError` (these are the only hard failures),
+//!   - **persist the `Message` regardless of whether the recipient is
+//!     online** — delivery is decoupled from acceptance; an offline
+//!     recipient pulls it on its next hook turn,
+//!   - report `delivered_live` = whether a best-effort live push to a
+//!     connected recipient landed (always `false` in these fixtures, which
+//!     have no live `client_registry`).
 
 use std::sync::Arc;
 
@@ -69,7 +69,8 @@ fn set_session(ctx: &CellServerCtx, s: &Session) {
 }
 
 /// Build a CommandContext as if the WS server had just dispatched a
-/// command from the given client connection.
+/// command from the given client connection (`None` = no connection
+/// identity, the HTTP-MCP / hook path).
 fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
     let req = RequestContext::new(
         Arc::<str>::from(Uuid::new_v4().to_string().as_str()),
@@ -92,48 +93,94 @@ fn message_count(ctx: &CellServerCtx) -> usize {
         .unwrap_or(0)
 }
 
+fn only_message(ctx: &CellServerCtx) -> Message {
+    let store = ctx
+        .registry
+        .get(Message::ENTITY_NAME_STATIC)
+        .expect("Message store exists");
+    let entries = store.entries().get();
+    assert_eq!(entries.len(), 1, "expected exactly one Message");
+    myko::utils::downcast_item::<Message>(&entries.into_iter().next().unwrap().1)
+        .expect("entry is a Message")
+}
+
 #[test]
-fn fails_loudly_when_recipient_client_binding_is_stale() {
-    // Common case after the recipient bounces (self-update execve, etc.):
-    // the Session row still carries an old `client_id` that is no longer
-    // in the live `client_registry`. In that window the dispatch silently
-    // failed under the saga-based delivery path; the new SendMessage path
-    // turns it into a loud error and skips persistence.
+fn offline_recipient_succeeds_and_persists_for_pull() {
+    // Pull model: an offline recipient (no live client) is NOT an error.
+    // The message persists so the recipient pulls it on its next hook turn.
     let ctx = setup();
     set_session(&ctx, &session("sender", "sender", Some("c-sender")));
-    // `c-stale` is not registered with any live WS connection in this
-    // test fixture (no real server.run()), so it stands in for a
-    // post-bounce stale binding.
+    set_session(&ctx, &session("recipient", "recipient", None));
+
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "hi".into(),
+        as_session: None,
+    };
+    let result = cmd
+        .execute(cmd_ctx(&ctx, Some("c-sender")))
+        .expect("offline recipient is success under the pull model");
+
+    assert!(!result.delivered_live, "no live client → not delivered live");
+    assert_eq!(message_count(&ctx), 1, "message must persist for pull");
+    assert_eq!(only_message(&ctx).body, "hi");
+}
+
+#[test]
+fn stale_binding_succeeds_and_persists() {
+    // A recipient whose `client_id` points at a connection that is no
+    // longer live (post-bounce). The best-effort push finds no live client
+    // and reports `delivered_live = false`, but the message still persists.
+    let ctx = setup();
+    set_session(&ctx, &session("sender", "sender", Some("c-sender")));
     set_session(&ctx, &session("recipient", "recipient", Some("c-stale")));
 
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("recipient")),
         body: "hi".into(),
+        as_session: None,
     };
-    let err = cmd
+    let result = cmd
         .execute(cmd_ctx(&ctx, Some("c-sender")))
-        .expect_err("stale client binding should error");
+        .expect("stale binding is not a hard failure under the pull model");
 
-    assert!(
-        err.message.to_lowercase().contains("stale"),
-        "error should call out the stale binding, got: {}",
-        err.message,
-    );
-    assert_eq!(
-        message_count(&ctx),
-        0,
-        "Message must not be persisted when delivery fails",
-    );
+    assert!(!result.delivered_live);
+    assert_eq!(message_count(&ctx), 1);
 }
 
 #[test]
-fn fails_loudly_when_recipient_session_id_does_not_exist() {
+fn self_identified_sender_via_as_session_succeeds() {
+    // The HTTP-MCP path: no connection `client_id`; the caller names itself
+    // via `as_session`. Sender resolves from that, message persists, and
+    // it's attributed to the self-identified session.
+    let ctx = setup();
+    set_session(&ctx, &session("sender", "sender", None));
+    set_session(&ctx, &session("recipient", "recipient", None));
+
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "from http".into(),
+        as_session: Some(SessionId(Arc::from("sender"))),
+    };
+    let result = cmd
+        .execute(cmd_ctx(&ctx, None))
+        .expect("self-identified send succeeds");
+
+    assert!(!result.delivered_live);
+    let msg = only_message(&ctx);
+    assert_eq!(msg.from_session_id, SessionId(Arc::from("sender")));
+    assert_eq!(msg.body, "from http");
+}
+
+#[test]
+fn unknown_recipient_errors_and_does_not_persist() {
     let ctx = setup();
     set_session(&ctx, &session("sender", "sender", Some("c-sender")));
 
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("does-not-exist")),
         body: "?".into(),
+        as_session: None,
     };
     let err = cmd
         .execute(cmd_ctx(&ctx, Some("c-sender")))
@@ -148,40 +195,18 @@ fn fails_loudly_when_recipient_session_id_does_not_exist() {
 }
 
 #[test]
-fn fails_loudly_when_recipient_is_offline() {
-    let ctx = setup();
-    set_session(&ctx, &session("sender", "sender", Some("c-sender")));
-    // Offline = client_id is None on the recipient's Session row.
-    set_session(&ctx, &session("recipient", "recipient", None));
-
-    let cmd = SendMessage {
-        to_session_id: SessionId(Arc::from("recipient")),
-        body: "?".into(),
-    };
-    let err = cmd
-        .execute(cmd_ctx(&ctx, Some("c-sender")))
-        .expect_err("offline recipient should error");
-
-    assert!(
-        err.message.to_lowercase().contains("offline"),
-        "error should call out the offline state, got: {}",
-        err.message,
-    );
-    assert_eq!(message_count(&ctx), 0);
-}
-
-#[test]
-fn fails_loudly_when_caller_has_no_session_on_the_roster() {
+fn caller_without_session_errors() {
+    // Caller's client_id maps to no session and no `as_session` was given.
     let ctx = setup();
     set_session(
         &ctx,
         &session("recipient", "recipient", Some("c-recipient")),
     );
 
-    // Caller's client_id has no Session bound to it on the roster.
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("recipient")),
         body: "?".into(),
+        as_session: None,
     };
     let err = cmd
         .execute(cmd_ctx(&ctx, Some("c-orphan")))
@@ -192,4 +217,29 @@ fn fails_loudly_when_caller_has_no_session_on_the_roster() {
         "error should name the unbound client id, got: {}",
         err.message,
     );
+    assert_eq!(message_count(&ctx), 0);
+}
+
+#[test]
+fn unidentified_caller_errors() {
+    // No client_id AND no as_session → cannot resolve a sender at all.
+    let ctx = setup();
+    set_session(&ctx, &session("recipient", "recipient", None));
+
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "?".into(),
+        as_session: None,
+    };
+    let err = cmd
+        .execute(cmd_ctx(&ctx, None))
+        .expect_err("no identity should error");
+
+    assert!(
+        err.message.to_lowercase().contains("assession")
+            || err.message.to_lowercase().contains("connected client"),
+        "error should explain the missing identity, got: {}",
+        err.message,
+    );
+    assert_eq!(message_count(&ctx), 0);
 }

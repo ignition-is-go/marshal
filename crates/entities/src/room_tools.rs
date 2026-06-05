@@ -18,9 +18,9 @@ use myko::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    room::{AutoSource, GetAllRooms, Room, RoomId, RoomKind},
+    room::{GetAllRooms, Room, RoomId, RoomKind},
     room_member::{GetAllRoomMembers, RoomMember, RoomMemberId},
-    session::{GetAllSessions, Session},
+    session::{resolve_caller, GetAllSessions, Session, SessionId},
 };
 
 // ─── JoinRoom ──────────────────────────────────────────────────────────
@@ -35,6 +35,11 @@ pub struct JoinRoom {
     /// Optional human-readable purpose, surfaced in `list_rooms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Self-identified caller for connectionless paths (HTTP-MCP agents).
+    /// WS shim callers omit it. See `resolve_caller`.
+    #[serde(default, rename = "asSession", skip_serializing_if = "Option::is_none")]
+    pub as_session: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +80,7 @@ impl CommandHandler for JoinRoom {
             ));
         }
 
-        let sender = resolve_caller_session(&ctx)?;
+        let sender = resolve_caller_session(&ctx, self.as_session.as_ref())?;
 
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
@@ -132,6 +137,11 @@ pub struct LeaveRoom {
     /// Either a `room_id` (preferred) or the original room name —
     /// the server tries id-match first, then name-match.
     pub room: String,
+
+    /// Self-identified caller for connectionless paths (HTTP-MCP agents).
+    /// WS shim callers omit it. See `resolve_caller`.
+    #[serde(default, rename = "asSession", skip_serializing_if = "Option::is_none")]
+    pub as_session: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,7 +161,7 @@ impl CommandHandler for LeaveRoom {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
-        let sender = resolve_caller_session(&ctx)?;
+        let sender = resolve_caller_session(&ctx, self.as_session.as_ref())?;
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
 
@@ -205,24 +215,12 @@ fn err(ctx: &CommandContext, message: &str) -> CommandError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_caller_session(ctx: &CommandContext) -> Result<Arc<Session>, CommandError> {
+fn resolve_caller_session(
+    ctx: &CommandContext,
+    as_session: Option<&SessionId>,
+) -> Result<Arc<Session>, CommandError> {
     let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-    let caller_client_id = ctx
-        .client_id()
-        .ok_or_else(|| err(ctx, "must be called over a connected client"))?;
-    sessions
-        .iter()
-        .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-        .cloned()
-        .ok_or_else(|| {
-            err(
-                ctx,
-                &format!(
-                    "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                    caller_client_id.0.as_ref(),
-                ),
-            )
-        })
+    resolve_caller(ctx, &sessions, as_session)
 }
 
 /// Reserved room names + prefixes that can't be created via JoinRoom.

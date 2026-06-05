@@ -23,7 +23,7 @@ use crate::{
     message_read::{GetAllMessageReads, MessageRead},
     room::RoomId,
     room_member::{GetAllRoomMembers, RoomMember},
-    session::{GetAllSessions, Session, SessionId},
+    session::{resolve_caller, GetAllSessions, Session, SessionId},
 };
 
 #[myko_command(ReadMessagesResult)]
@@ -63,6 +63,13 @@ pub struct ReadMessages {
     /// Cap on returned messages (default 50, max 500).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+
+    /// Self-identified caller — whose inbox/sent view this is — for
+    /// connectionless paths (HTTP-MCP agents, the daemon's `/hook/*`
+    /// handlers reading on a session's behalf). WS shim callers omit it
+    /// and the caller is derived from the connection. See `resolve_caller`.
+    #[serde(default, rename = "asSession", skip_serializing_if = "Option::is_none")]
+    pub as_session: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,22 +109,7 @@ impl CommandHandler for ReadMessages {
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-        let caller_client_id = ctx
-            .client_id()
-            .ok_or_else(|| err(&ctx, "read_messages must be called over a connected client"))?;
-        let me = sessions
-            .iter()
-            .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-            .cloned()
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                        caller_client_id.0.as_ref(),
-                    ),
-                )
-            })?;
+        let me = resolve_caller(&ctx, &sessions, self.as_session.as_ref())?;
 
         let messages: Vec<Arc<Message>> = ctx.exec_query(GetAllMessages {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
@@ -230,12 +222,4 @@ fn is_addressed_to_me(
         }
     }
     false
-}
-
-fn err(ctx: &CommandContext, message: &str) -> CommandError {
-    CommandError {
-        tx: ctx.tx().to_string(),
-        command_id: ctx.command_id.to_string(),
-        message: message.to_string(),
-    }
 }

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     message::MessageId,
     message_read::{GetAllMessageReads, MessageRead, MessageReadId},
-    session::{GetAllSessions, Session},
+    session::{resolve_caller, GetAllSessions, Session, SessionId},
 };
 
 #[myko_command(AckMessagesResult)]
@@ -25,6 +25,12 @@ pub struct AckMessages {
     /// Messages to mark read. Order doesn't matter; missing/unknown
     /// ids are silently skipped (idempotent — re-acking is fine).
     pub message_ids: Vec<MessageId>,
+
+    /// Self-identified caller for connectionless paths (HTTP-MCP agents,
+    /// the daemon's `/hook/*` handlers acking on a session's behalf).
+    /// WS shim callers omit it. See `resolve_caller`.
+    #[serde(default, rename = "asSession", skip_serializing_if = "Option::is_none")]
+    pub as_session: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,22 +52,7 @@ impl CommandHandler for AckMessages {
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-        let caller_client_id = ctx
-            .client_id()
-            .ok_or_else(|| err(&ctx, "ack_messages must be called over a connected client"))?;
-        let me = sessions
-            .iter()
-            .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                        caller_client_id.0.as_ref(),
-                    ),
-                )
-            })?
-            .clone();
+        let me = resolve_caller(&ctx, &sessions, self.as_session.as_ref())?;
 
         let reads: Vec<Arc<MessageRead>> = ctx.exec_query(GetAllMessageReads {})?;
         let already: std::collections::HashSet<MessageId> = reads
@@ -92,13 +83,5 @@ impl CommandHandler for AckMessages {
             newly_acked,
             already_acked,
         })
-    }
-}
-
-fn err(ctx: &CommandContext, message: &str) -> CommandError {
-    CommandError {
-        tx: ctx.tx().to_string(),
-        command_id: ctx.command_id.to_string(),
-        message: message.to_string(),
     }
 }
