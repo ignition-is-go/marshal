@@ -40,7 +40,7 @@ marshal-entities = { path = "crates/entities", version = "0.8.1" }
 # branch name) so deploys are deterministic — bumping the rev is an
 # explicit commit, not a silent re-resolve at build time.
 [patch.crates-io]
-myko = { git = "https://github.com/ignition-is-go/myko.git", rev = "1d679246ea1115e0f4588560959d4c7d26a36e90" }
-myko-macros = { git = "https://github.com/ignition-is-go/myko.git", rev = "1d679246ea1115e0f4588560959d4c7d26a36e90" }
-myko-server = { git = "https://github.com/ignition-is-go/myko.git", rev = "1d679246ea1115e0f4588560959d4c7d26a36e90" }
-myko-leptos = { git = "https://github.com/ignition-is-go/myko.git", rev = "1d679246ea1115e0f4588560959d4c7d26a36e90" }
+myko = { git = "https://github.com/ignition-is-go/myko.git", rev = "d06d237d243d7b87700a30855e56e2c4b9481302" }
+myko-macros = { git = "https://github.com/ignition-is-go/myko.git", rev = "d06d237d243d7b87700a30855e56e2c4b9481302" }
+myko-server = { git = "https://github.com/ignition-is-go/myko.git", rev = "d06d237d243d7b87700a30855e56e2c4b9481302" }
+myko-leptos = { git = "https://github.com/ignition-is-go/myko.git", rev = "d06d237d243d7b87700a30855e56e2c4b9481302" }

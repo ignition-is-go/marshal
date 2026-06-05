@@ -139,6 +139,14 @@ async fn main() -> Result<()> {
     // replaces the marshal-shim's translation layer.
     daemon::curated::register(server.custom_mcp_registry(), last_seen.clone());
 
+    // Register the Claude Code hook endpoints (/hook/session-start,
+    // /hook/prompt-submit, /hook/session-end). These are plain-HTTP
+    // routes a dumb curl one-liner posts the raw hook JSON to; the
+    // daemon does the register / fetch / ack / format work and returns
+    // text for the agent's context. Replaces the per-platform hook
+    // scripts entirely.
+    daemon::hooks::register(&server, last_seen.clone());
+
     // Push loop: forward new `Message` entities into the SSE streams of
     // HTTP-connected recipients, or buffer them in `PendingPush` if no
     // channel is open right now (Claude Code's typical case). Shim-

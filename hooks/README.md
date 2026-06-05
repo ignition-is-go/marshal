@@ -1,43 +1,47 @@
-# marshal hooks — pull-via-hook client (no shim, no channels)
+# marshal hooks — dumb-curl client (no scripts, no shim)
 
-These Claude Code hook scripts replace the marshal-shim. Instead of a
-persistent MCP subprocess that receives `notifications/claude/channel`
-*push* events (which require the `--dangerously-load-development-channels`
-flag and give the daemon a context-injection privilege), the agent:
+Claude Code receives peer messages by PULLING at turn boundaries via
+hooks, instead of the daemon PUSHING `notifications/claude/channel`
+(which needed `--dangerously-load-development-channels` and gave the
+daemon a context-injection privilege).
 
-- **sends** via the daemon's curated HTTP-MCP tools (`send_message`,
-  `broadcast`, `set_status`, …) configured as a `type: http` server in
-  `.mcp.json`, passing its `cc_session_id` as `as_session`;
-- **receives** by *pulling* — these hooks fetch unread messages at
-  defined turn boundaries and print them into context, framed as
-  untrusted peer input.
+All hook logic lives in the **daemon**, behind plain-HTTP endpoints. The
+hook command is a dumb, cross-platform `curl` one-liner — no scripts,
+no jq/bash/PowerShell, nothing to install per platform:
 
-Identity unifies on the Claude Code `session_id` (`cc_session_id`):
-peers address it, the inbox query keys on it, and the statusline (a `jq`
-one-liner over the hook stdin) shows it. No daemon-minted session id, no
-shim-picked uuid.
+```
+curl -sS --max-time 5 -X POST \
+  "$URL/hook/session-start?host=$(hostname -s)&operator=$USER" \
+  --data-binary @- || true
+```
 
-## Scripts
+curl pipes Claude Code's hook JSON (stdin) to the daemon and the
+daemon's `text/plain` response back to stdout (added to the agent's
+context).
 
-| Script | Hook event | Job |
+## Endpoints (served by the daemon, see `crates/daemon/src/hooks.rs`)
+
+| Endpoint | Claude Code hook | Job |
 |---|---|---|
-| `mcp.sh` | — | shared helper: `marshal_mcp <method> <params>` + `marshal_surface_unread <sid>`. Sourced by the others. |
-| `session-start.sh` | `SessionStart` | `register` the roster entry keyed by `session_id`; drain backlog → context. |
-| `prompt-submit.sh` | `UserPromptSubmit` | fetch unread addressed to this session, surface → context, ack. The receive path. |
-| `session-end.sh` | `SessionEnd` | `deregister` the roster entry on clean exit (sweeper is the crash fallback). |
+| `POST /hook/session-start` | `SessionStart` | register the roster entry keyed by `session_id`; return any backlog as `<marshal_inbox>` text. |
+| `POST /hook/prompt-submit` | `UserPromptSubmit` | fetch unread for `session_id`, return framed, ack. The receive path. |
+| `POST /hook/session-end` | `SessionEnd` | deregister. |
 
-## Deployment
+`session_id` and `cwd` come from the hook JSON body; `host`/`operator`
+ride in the query string because the daemon can't know the *client's*
+hostname/user — the curl command expands them locally (the only
+platform-specific bit: `$VAR` on Linux, `%VAR%` on Windows cmd).
 
-Installed by the `marshal_client` Ansible role to `/usr/local/lib/marshal/`,
-wired into `~/.claude/settings.json` `hooks` + `statusLine` and the
-`marshal` `type: http` entry in `.mcp.json`. `MARSHAL_HTTP_URL` points at
-the daemon's `/myko/mcp` over the NetBird mesh.
+## Sending
 
-## Security
+The agent sends with the curated marshal MCP tools (`send_message`,
+`broadcast`, …) configured as a `type: http` server in `.mcp.json`,
+passing its `cc_session_id` as `as_session`.
 
-Removing channels removes the daemon's push privilege and the
-`--dangerously-` flag. Peer-message content still enters context (that's
-the feature) but only at operator-initiated turn boundaries, via these
-operator-authored scripts, which frame it as untrusted. Combined with the
-mesh-only daemon bind, the injection surface is enrolled-peers-only and
-the surfacing is gated + bounded.
+## Identity & security
+
+Identity unifies on the Claude Code `session_id`: peers address it, the
+inbox keys on it, the statusline shows it. No channel push privilege, no
+`--dangerously-` flag; peer content enters context only at
+operator-initiated turn boundaries, framed as untrusted, behind the
+mesh-only daemon bind.
