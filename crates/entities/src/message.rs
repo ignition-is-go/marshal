@@ -15,9 +15,14 @@ use crate::{
 /// broadcast can have per-recipient acks without ambiguity.
 #[myko_item]
 pub struct Message {
-    /// Sender's session id. Owned-by so the message disappears with the
-    /// sender (sessions are ephemeral; we don't keep dangling messages).
-    #[belongs_to(Session)]
+    /// Sender's session id. NOT a `belongs_to` cascade: a sent message
+    /// must survive the sender exiting so the recipient can still pull it.
+    /// In the pull-via-hook model the recipient reads on its next turn,
+    /// which can be after the sender's SessionEnd — cascading on the
+    /// sender would silently delete unread messages in that window. The
+    /// message's lifetime is governed by the *recipient* instead (the
+    /// `to_session_id` / `to_room_id` cascades below); `from_nick` is
+    /// denormalized so we still know who sent it after the sender is gone.
     pub from_session_id: SessionId,
 
     /// Sender's nickname captured at send time, denormalized so the
