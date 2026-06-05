@@ -1,9 +1,6 @@
 use myko::myko_item;
 
-use crate::{
-    room::Room,
-    session::{Session, SessionId},
-};
+use crate::session::SessionId;
 
 /// A message in the bus. Polymorphic recipient — either a peer session
 /// (direct send) or a room (broadcast). Exactly one of `to_session_id`

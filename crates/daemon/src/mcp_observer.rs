@@ -16,7 +16,6 @@ use std::{
     time::Instant,
 };
 
-use myko::server::CellServerCtx;
 use myko_server::mcp::{McpSessionChannel, McpSessionEvent, McpSessionObserver};
 
 /// Lookup table for per-session SSE push channels. Cloned cheaply; the
@@ -146,24 +145,18 @@ impl LastSeen {
     }
 }
 
-/// Materialises a marshal `Session` per HTTP-MCP client and tracks each
-/// client's SSE push channel for later notification routing.
+/// Tracks each HTTP-MCP client's SSE push channel + liveness for
+/// notification routing. (Roster registration moved to the SessionStart
+/// hook, so this no longer needs the server ctx.)
 pub struct McpSessionMirror {
-    ctx: Arc<CellServerCtx>,
     sse_channels: SseChannels,
     last_seen: LastSeen,
     pending: PendingPush,
 }
 
 impl McpSessionMirror {
-    pub fn new(
-        ctx: Arc<CellServerCtx>,
-        sse_channels: SseChannels,
-        last_seen: LastSeen,
-        pending: PendingPush,
-    ) -> Self {
+    pub fn new(sse_channels: SseChannels, last_seen: LastSeen, pending: PendingPush) -> Self {
         Self {
-            ctx,
             sse_channels,
             last_seen,
             pending,

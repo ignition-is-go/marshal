@@ -52,7 +52,7 @@ pub fn register(server: &CellServer, last_seen: LastSeen) {
     );
     server.register_custom_http_route(
         "/hook/session-end",
-        Arc::new(move |req| handle_session_end(req)),
+        Arc::new(handle_session_end),
     );
 }
 
@@ -237,14 +237,13 @@ fn url_decode(s: &str) -> String {
             b'%' => {
                 let h1 = bytes.next();
                 let h2 = bytes.next();
-                if let (Some(h1), Some(h2)) = (h1, h2) {
-                    if let (Some(d1), Some(d2)) =
+                if let (Some(h1), Some(h2)) = (h1, h2)
+                    && let (Some(d1), Some(d2)) =
                         ((h1 as char).to_digit(16), (h2 as char).to_digit(16))
                     {
                         out.push(((d1 * 16 + d2) as u8) as char);
                         continue;
                     }
-                }
                 out.push('%');
             }
             _ => out.push(b as char),

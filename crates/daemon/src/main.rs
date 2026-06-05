@@ -126,7 +126,6 @@ async fn main() -> Result<()> {
     // entity in the registry on `initialize`, mirroring what the
     // marshal-shim does on WebSocket connect.
     server.set_mcp_session_observer(daemon::mcp_observer::McpSessionMirror::new(
-        Arc::new(server.ctx()),
         sse_channels.clone(),
         last_seen.clone(),
         pending_push.clone(),

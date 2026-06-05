@@ -209,11 +209,10 @@ fn is_addressed_to_me(
     if message.to_session_id.as_ref() == Some(me) {
         return true;
     }
-    if let Some(room) = &message.to_room_id {
-        if my_rooms.contains(room) {
+    if let Some(room) = &message.to_room_id
+        && my_rooms.contains(room) {
             return true;
         }
-    }
     false
 }
 

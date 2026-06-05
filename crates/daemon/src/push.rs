@@ -101,8 +101,8 @@ fn tick_once(
         //   back into the sender's transcript
         if let Some(to_sid) = &msg.to_session_id {
             push_to_session(sse_channels, pending, to_sid.0.as_ref(), &params);
-        } else if let Some(to_room) = &msg.to_room_id {
-            if let Some(members) = members_by_room.get(to_room.0.as_ref()) {
+        } else if let Some(to_room) = &msg.to_room_id
+            && let Some(members) = members_by_room.get(to_room.0.as_ref()) {
                 for member_sid in members {
                     if member_sid.as_ref() == msg.from_session_id.0.as_ref() {
                         continue;
@@ -110,7 +110,6 @@ fn tick_once(
                     push_to_session(sse_channels, pending, member_sid.as_ref(), &params);
                 }
             }
-        }
     }
 }
 
