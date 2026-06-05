@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
     server.set_mcp_session_observer(daemon::mcp_observer::McpSessionMirror::new(
         Arc::new(server.ctx()),
         sse_channels.clone(),
-        last_seen,
+        last_seen.clone(),
         pending_push.clone(),
     ));
 
@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
     // marshal:// read resources). This is what HTTP-MCP callers see
     // before the auto-derived `command_*` / `query_*` tools — it
     // replaces the marshal-shim's translation layer.
-    daemon::curated::register(server.custom_mcp_registry());
+    daemon::curated::register(server.custom_mcp_registry(), last_seen.clone());
 
     // Push loop: forward new `Message` entities into the SSE streams of
     // HTTP-connected recipients, or buffer them in `PendingPush` if no

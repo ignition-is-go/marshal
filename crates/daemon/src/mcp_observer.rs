@@ -16,9 +16,7 @@ use std::{
     time::Instant,
 };
 
-use chrono::Utc;
-use marshal_entities::{Session, SessionId};
-use myko::{server::CellServerCtx, wire::MEventType};
+use myko::server::CellServerCtx;
 use myko_server::mcp::{McpSessionChannel, McpSessionEvent, McpSessionObserver};
 
 /// Lookup table for per-session SSE push channels. Cloned cheaply; the
@@ -133,7 +131,7 @@ impl LastSeen {
             .copied()
     }
 
-    fn touch(&self, session_id: String) {
+    pub fn touch(&self, session_id: String) {
         self.inner
             .lock()
             .expect("LastSeen mutex poisoned")
@@ -182,42 +180,19 @@ impl McpSessionObserver for McpSessionMirror {
 
             McpSessionEvent::Started {
                 session_id,
-                client_info,
+                client_info: _,
                 user_agent: _,
             } => {
-                self.last_seen.touch(session_id.clone());
-                let short = session_id.chars().take(8).collect::<String>();
-                let client_name = client_info
-                    .as_ref()
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("mcp-http");
-                let nickname = format!("{client_name}@{short}");
-
-                let session = Session {
-                    id: SessionId(Arc::from(session_id.as_str())),
-                    client_id: None,
-                    nickname,
-                    pid: 0,
-                    cwd: String::new(),
-                    git_branch: None,
-                    current_task: None,
-                    connected_at: Utc::now().timestamp_millis(),
-                    last_activity_at: None,
-                    last_tool: None,
-                    last_tool_at: None,
-                    operator: None,
-                    host: None,
-                    project: None,
-                };
-
-                let ev = myko::wire::MEvent::from_item(
-                    &session,
-                    MEventType::SET,
-                    &uuid::Uuid::new_v4().to_string(),
-                );
-                if let Err(e) = self.ctx.apply_event_batch(vec![ev]) {
-                    log::warn!("[mcp-observer] failed to SET Session on initialize: {e}");
-                }
+                // Roster registration is now owned by the SessionStart hook
+                // (curated `register` tool keyed by cc_session_id), so we no
+                // longer auto-materialise a Session per HTTP connection —
+                // doing so produced a throwaway `<client>@<minted-id>` entry
+                // for every hook curl (each hook invocation is a fresh
+                // connection) that competed with the real cc-sid entry and
+                // got swept moments later. We still bump liveness for the
+                // minted id so any legacy connection-identity caller (none
+                // in the hook model) isn't reaped mid-request.
+                self.last_seen.touch(session_id);
             }
 
             McpSessionEvent::SseConnected { session_id, channel } => {

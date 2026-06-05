@@ -22,11 +22,13 @@ use myko::{
     request::RequestContext,
 };
 use myko_server::mcp::{
-    CustomMcpRegistry, CustomResource, CustomResourceContext, CustomTool,
+    CustomMcpRegistry, CustomResource, CustomResourceContext, CustomResourceHandler, CustomTool,
+    CustomToolHandler,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::mcp_observer::LastSeen;
 use marshal_entities::{
     AckMessages, BroadcastMessage, GetAllRoomMembers, GetAllRooms, GetAllSessions, JoinRoom,
     LeaveRoom, MessageId, ReadMessages, Room, RoomId, RoomMember, SendMessage, Session, SessionId,
@@ -35,12 +37,31 @@ use marshal_entities::{
 
 /// Register the curated tool + resource set onto an existing
 /// `CustomMcpRegistry`. Called once at daemon startup.
-pub fn register(registry: &CustomMcpRegistry) {
-    for t in tools() {
+///
+/// `last_seen` is the same liveness map the sweeper consults. Curated
+/// calls that act AS a session (register, or any `as_session` write /
+/// `as_session` read) bump it for that session id, so hook-registered
+/// sessions — which have no connection-bound liveness signal — survive
+/// the sweeper as long as their hooks keep firing within the grace
+/// window. `deregister` (SessionEnd hook) removes them cleanly; the
+/// grace window is the crash fallback.
+pub fn register(registry: &CustomMcpRegistry, last_seen: LastSeen) {
+    for t in tools(&last_seen) {
         registry.register_tool(t);
     }
-    for r in resources() {
+    for r in resources(&last_seen) {
         registry.register_resource(r);
+    }
+}
+
+/// Bump liveness for the session a curated write call is acting as.
+fn bump_as_session(last_seen: &LastSeen, args: &Value) {
+    if let Some(s) = args
+        .get("as_session")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        last_seen.touch(s.to_string());
     }
 }
 
@@ -48,7 +69,16 @@ pub fn register(registry: &CustomMcpRegistry) {
 // Tools
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn tools() -> Vec<CustomTool> {
+fn tools(last_seen: &LastSeen) -> Vec<CustomTool> {
+    // Each write handler is wrapped so that acting AS a session bumps its
+    // liveness. `register` bumps the registered id directly (below).
+    let wrap = |inner: fn(Value, CommandContext) -> Result<Value, String>| -> CustomToolHandler {
+        let ls = last_seen.clone();
+        Arc::new(move |args: Value, ctx: CommandContext| {
+            bump_as_session(&ls, &args);
+            inner(args, ctx)
+        })
+    };
     vec![
         CustomTool {
             name: "set_status".into(),
@@ -64,7 +94,7 @@ fn tools() -> Vec<CustomTool> {
                 }),
                 &["text"],
             ),
-            handler: Arc::new(handle_set_status),
+            handler: wrap(handle_set_status),
         },
         CustomTool {
             name: "send_message".into(),
@@ -86,7 +116,7 @@ fn tools() -> Vec<CustomTool> {
                 }),
                 &["to", "body"],
             ),
-            handler: Arc::new(handle_send_message),
+            handler: wrap(handle_send_message),
         },
         CustomTool {
             name: "broadcast".into(),
@@ -107,7 +137,7 @@ fn tools() -> Vec<CustomTool> {
                 }),
                 &["to_room", "body"],
             ),
-            handler: Arc::new(handle_broadcast),
+            handler: wrap(handle_broadcast),
         },
         CustomTool {
             name: "join_room".into(),
@@ -129,7 +159,7 @@ fn tools() -> Vec<CustomTool> {
                 }),
                 &["name"],
             ),
-            handler: Arc::new(handle_join_room),
+            handler: wrap(handle_join_room),
         },
         CustomTool {
             name: "leave_room".into(),
@@ -145,7 +175,7 @@ fn tools() -> Vec<CustomTool> {
                 }),
                 &["room"],
             ),
-            handler: Arc::new(handle_leave_room),
+            handler: wrap(handle_leave_room),
         },
         CustomTool {
             name: "ack_messages".into(),
@@ -162,12 +192,68 @@ fn tools() -> Vec<CustomTool> {
                 }),
                 &["message_ids"],
             ),
-            handler: Arc::new(handle_ack_messages),
+            handler: wrap(handle_ack_messages),
+        },
+        CustomTool {
+            name: "register".into(),
+            description: "Upsert this session's roster entry, keyed by the supplied \
+                session_id (use your Claude Code session_id so peers, the inbox \
+                query, and the statusline all agree on one id). Called by the \
+                SessionStart hook. Idempotent across resume — preserves prior status."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["session_id", "nickname"],
+                "properties": {
+                    "session_id": { "type": "string", "description": "Your Claude Code session_id (uuid). Becomes the roster id peers address." },
+                    "nickname":   { "type": "string", "description": "Display name, e.g. <dir>@<short-id>." },
+                    "cwd":        { "type": "string", "description": "Working directory." },
+                    "git_branch": { "type": "string", "description": "Git branch in cwd, if any." },
+                    "operator":   { "type": "string", "description": "Human operator (USER)." },
+                    "project":    { "type": "string", "description": "Project basename — anchors the project:* auto-room." },
+                    "pid":        { "type": "integer", "description": "Claude Code parent pid." },
+                    "host": {
+                        "type": "object",
+                        "description": "Host info — anchors the host:* auto-room.",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "os":   { "type": "string" },
+                            "arch": { "type": "string" }
+                        }
+                    }
+                }
+            }),
+            handler: {
+                let ls = last_seen.clone();
+                Arc::new(move |args: Value, ctx: CommandContext| {
+                    if let Some(s) = args.get("session_id").and_then(|v| v.as_str()) {
+                        ls.touch(s.to_string());
+                    }
+                    handle_register(args, ctx)
+                })
+            },
+        },
+        CustomTool {
+            name: "deregister".into(),
+            description: "Remove this session's roster entry. Called by the SessionEnd \
+                hook so a cleanly-closed session disappears immediately. Idempotent."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["session_id"],
+                "properties": {
+                    "session_id": { "type": "string", "description": "The session_id you registered with." }
+                }
+            }),
+            handler: Arc::new(handle_deregister),
         },
     ]
 }
 
 fn handle_set_status(args: Value, ctx: CommandContext) -> Result<Value, String> {
+    let ctx = maybe_act_as(&args, ctx);
     let text = arg_str(&args, "text", "set_status: missing `text`")?;
 
     // Resolve the caller's session id (via WS client_id or HTTP
@@ -188,6 +274,7 @@ fn handle_set_status(args: Value, ctx: CommandContext) -> Result<Value, String> 
 }
 
 fn handle_send_message(args: Value, ctx: CommandContext) -> Result<Value, String> {
+    let ctx = maybe_act_as(&args, ctx);
     let to = arg_str(&args, "to", "send_message: missing `to` (session id)")?;
     let body = arg_str(&args, "body", "send_message: missing `body`")?;
     let cmd = SendMessage {
@@ -205,6 +292,7 @@ fn handle_send_message(args: Value, ctx: CommandContext) -> Result<Value, String
 }
 
 fn handle_broadcast(args: Value, ctx: CommandContext) -> Result<Value, String> {
+    let ctx = maybe_act_as(&args, ctx);
     let to_room = arg_str(&args, "to_room", "broadcast: missing `to_room` (room id)")?;
     let body = arg_str(&args, "body", "broadcast: missing `body`")?;
     let cmd = BroadcastMessage {
@@ -216,6 +304,7 @@ fn handle_broadcast(args: Value, ctx: CommandContext) -> Result<Value, String> {
 }
 
 fn handle_join_room(args: Value, ctx: CommandContext) -> Result<Value, String> {
+    let ctx = maybe_act_as(&args, ctx);
     let name = arg_str(&args, "name", "join_room: missing `name`")?;
     let description = args
         .get("description")
@@ -227,6 +316,7 @@ fn handle_join_room(args: Value, ctx: CommandContext) -> Result<Value, String> {
 }
 
 fn handle_leave_room(args: Value, ctx: CommandContext) -> Result<Value, String> {
+    let ctx = maybe_act_as(&args, ctx);
     let room = arg_str(&args, "room", "leave_room: missing `room` (id or name)")?;
     let cmd = LeaveRoom { room };
     let result = ctx.execute_command(cmd).map_err(cmd_err)?;
@@ -234,6 +324,7 @@ fn handle_leave_room(args: Value, ctx: CommandContext) -> Result<Value, String> 
 }
 
 fn handle_ack_messages(args: Value, ctx: CommandContext) -> Result<Value, String> {
+    let ctx = maybe_act_as(&args, ctx);
     let ids = args
         .get("message_ids")
         .and_then(|v| v.as_array())
@@ -254,7 +345,7 @@ fn handle_ack_messages(args: Value, ctx: CommandContext) -> Result<Value, String
 // Resources
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn resources() -> Vec<CustomResource> {
+fn resources(last_seen: &LastSeen) -> Vec<CustomResource> {
     vec![
         CustomResource {
             uri: "marshal://whoami".into(),
@@ -288,7 +379,18 @@ fn resources() -> Vec<CustomResource> {
                 room membership)."
                 .into(),
             mime_type: "application/json".into(),
-            handler: Arc::new(handle_messages),
+            handler: {
+                let ls = last_seen.clone();
+                Arc::new(move |uri: &str, res_ctx: CustomResourceContext| {
+                    // The inbox read acts as `as_session`; bump its liveness
+                    // so a session polled only via its UserPromptSubmit hook
+                    // survives the sweeper between turns.
+                    if let Some(s) = parse_query(uri).get("as_session") {
+                        ls.touch(s.clone());
+                    }
+                    handle_messages(uri, res_ctx)
+                }) as CustomResourceHandler
+            },
         },
     ]
 }
@@ -386,6 +488,7 @@ fn handle_rooms(uri: &str, res_ctx: CustomResourceContext) -> Result<String, Str
 
 fn handle_messages(uri: &str, res_ctx: CustomResourceContext) -> Result<String, String> {
     let query = parse_query(uri);
+    let ctx = build_cmd_ctx_as(&res_ctx, "messages", query.get("as_session").map(|s| s.as_str()));
     let cmd = ReadMessages {
         room: query
             .get("room")
@@ -405,7 +508,6 @@ fn handle_messages(uri: &str, res_ctx: CustomResourceContext) -> Result<String, 
         since: query.get("since").and_then(|s| s.parse::<i64>().ok()),
         limit: query.get("limit").and_then(|s| s.parse::<u32>().ok()),
     };
-    let ctx = build_cmd_ctx(&res_ctx, "messages");
     let result = cmd.execute(ctx).map_err(cmd_err)?;
     Ok(pretty(&json!(result)))
 }
@@ -415,12 +517,141 @@ fn handle_messages(uri: &str, res_ctx: CustomResourceContext) -> Result<String, 
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn build_cmd_ctx(res_ctx: &CustomResourceContext, name: &str) -> CommandContext {
+    build_cmd_ctx_as(res_ctx, name, None)
+}
+
+/// Like `build_cmd_ctx`, but lets a resource act AS an explicit session
+/// id (from an `as_session` query param) rather than the connection's
+/// Mcp-Session-Id. The hook-based clients use this to read "messages to
+/// ME" by declaring their cc_session_id, since the daemon-minted
+/// connection id has no matching Session entity. Falls back to the
+/// connection identity when `as_session` is absent.
+fn build_cmd_ctx_as(
+    res_ctx: &CustomResourceContext,
+    name: &str,
+    as_session: Option<&str>,
+) -> CommandContext {
     let tx: Arc<str> = Uuid::new_v4().to_string().into();
     let mut req = RequestContext::internal(tx, res_ctx.ctx.host_id, "mcp");
-    if let Some(sid) = &res_ctx.caller_session_id {
-        req = req.with_mcp_session_id(sid.clone());
+    let sid: Option<Arc<str>> = match as_session {
+        Some(s) if !s.is_empty() => Some(Arc::from(s)),
+        _ => res_ctx.caller_session_id.clone(),
+    };
+    if let Some(sid) = sid {
+        req = req.with_mcp_session_id(sid);
     }
     CommandContext::new(Arc::from(name), Arc::new(req), res_ctx.ctx.clone())
+}
+
+/// Override the acting identity of a curated *write* command when the
+/// caller passes an explicit `as_session` argument. This is how the
+/// hook-based HTTP clients act AS their `cc_session_id` without a
+/// connection-bound identity: `caller_session()` resolves via
+/// `mcp_session_id` when `client_id` is absent, so we clone the ctx,
+/// clear `client_id`, and set `mcp_session_id` to the declared id.
+/// Absent/empty `as_session` leaves the connection identity untouched —
+/// the WS shim and legacy HTTP path keep resolving caller from the
+/// connection.
+fn maybe_act_as(args: &Value, ctx: CommandContext) -> CommandContext {
+    match args.get("as_session").and_then(|v| v.as_str()) {
+        Some(sid) if !sid.is_empty() => {
+            let mut new_ctx = ctx.clone();
+            let mut req = (*ctx.req).clone();
+            req.client_id = None;
+            req.mcp_session_id = Some(Arc::from(sid));
+            new_ctx.req = Arc::new(req);
+            new_ctx
+        }
+        _ => ctx,
+    }
+}
+
+fn host_info_from_json(v: &Value) -> Option<marshal_entities::HostInfo> {
+    Some(marshal_entities::HostInfo {
+        name: v.get("name")?.as_str()?.to_string(),
+        os: v.get("os").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        arch: v.get("arch").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    })
+}
+
+/// Upsert this session's roster entry. Called by the SessionStart hook
+/// with the agent's `cc_session_id` as `session_id`, so the roster keys
+/// on the same id peers address and the statusline shows — no
+/// connection-bound identity, no shim-picked uuid. Idempotent across
+/// resume: preserves the prior `current_task` + original `connected_at`
+/// when the session already exists.
+fn handle_register(args: Value, ctx: CommandContext) -> Result<Value, String> {
+    let session_id = arg_str(&args, "session_id", "register: missing `session_id`")?;
+    let nickname = arg_str(&args, "nickname", "register: missing `nickname`")?;
+    let cwd = args.get("cwd").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let git_branch = args
+        .get("git_branch")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let operator = args
+        .get("operator")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let project = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let pid = args.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let host = args.get("host").and_then(host_info_from_json);
+
+    let sid = SessionId(Arc::from(session_id.as_str()));
+    let existing: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {}).map_err(cmd_err)?;
+    let prior = existing.iter().find(|s| s.id == sid);
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let session = Session {
+        id: sid,
+        client_id: None,
+        nickname,
+        pid,
+        cwd,
+        git_branch,
+        current_task: prior.and_then(|p| p.current_task.clone()),
+        connected_at: prior.map(|p| p.connected_at).unwrap_or(now),
+        last_activity_at: Some(now),
+        last_tool: None,
+        last_tool_at: None,
+        operator,
+        host,
+        project,
+    };
+    let resumed = prior.is_some();
+    ctx.emit_set(&session).map_err(cmd_err)?;
+    Ok(json!({ "ok": true, "session_id": session_id, "resumed": resumed }))
+}
+
+/// Remove this session's roster entry. Called by the SessionEnd hook so
+/// a cleanly-closed session disappears immediately rather than waiting
+/// for the staleness sweeper. Idempotent — DEL of a missing id is a
+/// no-op.
+fn handle_deregister(args: Value, ctx: CommandContext) -> Result<Value, String> {
+    let session_id = arg_str(&args, "session_id", "deregister: missing `session_id`")?;
+    let stub = Session {
+        id: SessionId(Arc::from(session_id.as_str())),
+        client_id: None,
+        nickname: String::new(),
+        pid: 0,
+        cwd: String::new(),
+        git_branch: None,
+        current_task: None,
+        connected_at: 0,
+        last_activity_at: None,
+        last_tool: None,
+        last_tool_at: None,
+        operator: None,
+        host: None,
+        project: None,
+    };
+    ctx.emit_del(&stub).map_err(cmd_err)?;
+    Ok(json!({ "ok": true }))
 }
 
 fn arg_str(args: &Value, key: &str, missing_msg: &str) -> Result<String, String> {
@@ -434,10 +665,21 @@ fn parse_bool(s: &str) -> bool {
     matches!(s.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y")
 }
 
+/// Build a write-tool input schema. Every write tool also accepts an
+/// optional `as_session` — the cc_session_id the caller is acting as —
+/// so hook-based HTTP clients can attribute calls to their registered
+/// identity without a connection-bound one (see `maybe_act_as`).
 fn schema_object(properties: Value, required: &[&str]) -> Value {
+    let mut props = properties;
+    if let Some(obj) = props.as_object_mut() {
+        obj.entry("as_session").or_insert(json!({
+            "type": "string",
+            "description": "Act as this session id (your cc_session_id). Omit when connected as a single identity (WS shim).",
+        }));
+    }
     json!({
         "type": "object",
-        "properties": properties,
+        "properties": props,
         "required": required,
         "additionalProperties": false,
     })
