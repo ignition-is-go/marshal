@@ -179,7 +179,7 @@ impl CommandHandler for ReadMessages {
 
         // Newest-first; truncate to `limit`.
         let mut sorted: Vec<&Arc<Message>> = visible.into_iter().collect();
-        sorted.sort_by(|a, b| b.sent_at.cmp(&a.sent_at));
+        sorted.sort_by_key(|m| std::cmp::Reverse(m.sent_at));
         sorted.truncate(limit as usize);
 
         let views: Vec<MessageView> = sorted
@@ -216,10 +216,10 @@ fn is_addressed_to_me(
     if message.to_session_id.as_ref() == Some(me) {
         return true;
     }
-    if let Some(room) = &message.to_room_id {
-        if my_rooms.contains(room) {
-            return true;
-        }
+    if let Some(room) = &message.to_room_id
+        && my_rooms.contains(room)
+    {
+        return true;
     }
     false
 }

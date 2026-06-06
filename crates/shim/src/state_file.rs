@@ -56,16 +56,14 @@ pub fn read_nickname() -> Option<String> {
     let mut pid = current_ppid()?;
     for _ in 0..MAX_ANCESTOR_WALK {
         let path = dir.join(format!("shim-by-ppid-{pid}.json"));
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(nick) = v
-                    .get("nickname")
-                    .and_then(|s| s.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    return Some(nick.to_string());
-                }
-            }
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && let Some(nick) = v
+                .get("nickname")
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+        {
+            return Some(nick.to_string());
         }
         // Stop walking once we hit the init/root sentinel — anything
         // above PID 1 (Linux/macOS) or 0/4 (Windows kernel/system) is

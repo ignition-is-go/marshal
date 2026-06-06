@@ -37,17 +37,12 @@ pub struct Room {
 /// What kind of room this is. Auto-rooms carry their `AutoSource` so
 /// the saga can reconcile membership and the UI can flag them
 /// differently from ad-hoc rooms (icon, dim color, can't-leave).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RoomKind {
     Auto { source: AutoSource },
+    #[default]
     Adhoc,
-}
-
-impl Default for RoomKind {
-    fn default() -> Self {
-        RoomKind::Adhoc
-    }
 }
 
 /// Identity attribute that anchors an auto-room. The daemon's

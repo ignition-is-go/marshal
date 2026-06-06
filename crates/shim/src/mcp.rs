@@ -75,6 +75,7 @@ pub type ResourceError = ToolError;
 #[derive(Debug)]
 pub enum ToolOutcome {
     /// One or more text content blocks. Most callers want this.
+    #[allow(dead_code)] // matched in render; for future text-returning tools
     Text(String),
     /// Pretty-printed JSON in a single text block.
     Json(Value),
@@ -96,6 +97,7 @@ impl ToolError {
             data: None,
         }
     }
+    #[allow(dead_code)] // JSON-RPC error helper kept for completeness
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
             code: INTERNAL_ERROR,
@@ -103,16 +105,22 @@ impl ToolError {
             data: None,
         }
     }
+    #[allow(dead_code)] // JSON-RPC error helper kept for completeness
     pub fn with_data(mut self, data: Value) -> Self {
         self.data = Some(data);
         self
     }
 }
 
+// Standard JSON-RPC error codes; the full set is kept for reference even
+// though only a subset is currently emitted.
+#[allow(dead_code)]
 pub const PARSE_ERROR: i32 = -32700;
+#[allow(dead_code)]
 pub const INVALID_REQUEST: i32 = -32600;
 pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
+#[allow(dead_code)]
 pub const INTERNAL_ERROR: i32 = -32603;
 
 /// Handle for sending push notifications to the connected MCP client.
@@ -173,6 +181,7 @@ impl Notifier {
     }
 
     /// Send a `notifications/message` (logging) event.
+    #[allow(dead_code)] // notification helper kept for completeness
     pub fn log(&self, level: &str, data: Value) {
         let params = serde_json::json!({
             "level": level,
