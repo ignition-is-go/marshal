@@ -168,9 +168,9 @@ impl DiskPersister {
         drop(state);
 
         let surviving_count = surviving.len();
-        let applied = ctx.apply_event_batch(surviving).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("apply_event_batch: {e}"))
-        })?;
+        let applied = ctx
+            .apply_event_batch(surviving)
+            .map_err(|e| std::io::Error::other(format!("apply_event_batch: {e}")))?;
 
         log::info!(
             "[disk-persister] replayed event log {} ({} survived dedup, {} applied)",

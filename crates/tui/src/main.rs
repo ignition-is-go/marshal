@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
             let connected = matches!(&**status, ConnectionStatus::Connected(_));
             conn_state.update(|s| {
                 s.connected = connected;
-                s.last_event = Some(format!("[{}] {}", time_str(), describe(&status)));
+                s.last_event = Some(format!("[{}] {}", time_str(), describe(status)));
             });
         }
     });
@@ -248,18 +248,17 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
         loop {
             let snap = state.snapshot();
             terminal.draw(|frame| draw(&snap, frame.area(), frame))?;
-            if event::poll(FRAME_POLL)? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        key_activity.bump();
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                break;
-                            }
-                            _ => {}
-                        }
+            if event::poll(FRAME_POLL)?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                key_activity.bump();
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break;
                     }
+                    _ => {}
                 }
             }
         }

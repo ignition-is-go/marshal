@@ -1,20 +1,21 @@
 //! Server-handled `SendMessage` command.
 //!
-//! Live push is the primary purpose; persistence is auxiliary (so peers can
-//! browse history later). The handler:
-//!   1. resolves the sender from `ctx.client_id()` — the shim never sends
-//!      its own id; the server populates it via the client registry,
-//!   2. validates the recipient `Session` exists and is bound to a live
-//!      WS client (`client_id` populated AND that client is in the live
-//!      `client_registry` — a non-`None` value can be stale across a shim
-//!      bounce),
-//!   3. dispatches a `NotifyChannel` command at the recipient's connection,
-//!   4. **only on dispatch success**, persists the `Message` SET so the
-//!      transcript reflects what was actually delivered,
-//!   5. returns the result for the caller.
+//! Persistence is primary; live push is a best-effort overlay. The pull
+//! model decouples acceptance from delivery — the recipient reads on its
+//! next turn via the hook, online or not. The handler:
+//!   1. resolves the sender — `asSession` for connectionless HTTP-MCP
+//!      callers, or the WS `client_id` for shim callers (`resolve_caller`),
+//!   2. validates the recipient `Session` exists on the roster (it need
+//!      NOT be online),
+//!   3. persists the `Message` SET unconditionally,
+//!   4. if the recipient has a live WS client, best-effort dispatches a
+//!      `NotifyChannel` to surface it immediately (the Track-2 live path);
+//!      otherwise the recipient pulls it next turn,
+//!   5. returns the result, with `deliveredLive` reflecting whether the
+//!      best-effort push landed.
 //!
-//! Failure at any step returns a `CommandError` so the shim's tool surfaces
-//! it instead of pretending the message landed.
+//! Only an unresolvable sender or unknown recipient returns a
+//! `CommandError`; an offline recipient is success.
 
 use std::sync::Arc;
 
@@ -29,13 +30,21 @@ use uuid::Uuid;
 use crate::{
     message::{Message, MessageId},
     notify::NotifyChannel,
-    session::{GetAllSessions, Session, SessionId},
+    session::{resolve_caller, GetAllSessions, Session, SessionId},
 };
 
 #[myko_command(SendMessageResult)]
 pub struct SendMessage {
     pub to_session_id: SessionId,
     pub body: String,
+
+    /// Self-identified sender, for callers with no connection identity —
+    /// an agent calling this tool over stock myko's HTTP-MCP transport
+    /// (no WS `client_id`). The id is the agent's own `session_id`, which
+    /// it learned from its SessionStart hook output. WS shim callers omit
+    /// this; the server derives the sender from the live connection.
+    #[serde(default, rename = "asSession", skip_serializing_if = "Option::is_none")]
+    pub as_session: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +53,12 @@ pub struct SendMessageResult {
     pub message_id: MessageId,
     pub to_nick: String,
     pub sent_at: i64,
+    /// `true` if the recipient had a live WS client and the notification
+    /// was pushed into its session right now; `false` if the recipient is
+    /// between turns and will pick the message up via its next hook. Both
+    /// are success — the message is always persisted.
+    #[serde(default)]
+    pub delivered_live: bool,
 }
 
 impl CommandHandler for SendMessage {
@@ -59,21 +74,7 @@ impl CommandHandler for SendMessage {
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
 
-        let caller_client_id = ctx
-            .client_id()
-            .ok_or_else(|| err(&ctx, "send_message must be called over a connected client"))?;
-        let sender = sessions
-            .iter()
-            .find(|s| s.client_id.as_ref() == Some(&caller_client_id))
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                        caller_client_id.0.as_ref(),
-                    ),
-                )
-            })?;
+        let sender = resolve_caller(&ctx, &sessions, self.as_session.as_ref())?;
 
         let recipient = sessions
             .iter()
@@ -88,17 +89,6 @@ impl CommandHandler for SendMessage {
                 )
             })?;
 
-        let recipient_client_id = recipient.client_id.as_ref().ok_or_else(|| {
-            err(
-                &ctx,
-                &format!(
-                    "session '{}' (nickname '{}') is offline — no live client to deliver to",
-                    recipient.id.0.as_ref(),
-                    recipient.nickname,
-                ),
-            )
-        })?;
-
         let now = Utc::now().timestamp_millis();
         let msg = Message {
             id: MessageId(Arc::from(Uuid::new_v4().to_string())),
@@ -111,42 +101,40 @@ impl CommandHandler for SendMessage {
             sent_at: now,
         };
 
-        let dispatched = push_to_client(
-            recipient_client_id.0.as_ref(),
-            format!(
-                "marshal: new message from '{}': {}",
-                sender.nickname, self.body
-            ),
-            serde_json::json!({
-                "source": "marshal",
-                "kind": "new_message",
-                "from_nick": sender.nickname,
-                "from_session": sender.id.0.as_ref(),
-                "to_nick": recipient.nickname,
-                "body": self.body,
-                "sent_at": now,
-            }),
-        );
-        if !dispatched {
-            return Err(err(
-                &ctx,
-                &format!(
-                    "session '{}' (nickname '{}') has a stale client binding ({}); the recipient bounced \
-                     and hasn't re-SET its Session yet — retry shortly",
-                    recipient.id.0.as_ref(),
-                    recipient.nickname,
-                    recipient_client_id.0.as_ref(),
-                ),
-            ));
-        }
-
-        // Persist only after the live push succeeds.
+        // Persist unconditionally: in the pull model the recipient reads
+        // this on its next turn via the hook, whether or not it has a live
+        // connection right now. Delivery is decoupled from acceptance.
         ctx.emit_set(&msg)?;
+
+        // Best-effort live push: if the recipient is a WS shim with a live
+        // client, surface the message in its session immediately (the
+        // Track-2 conversation path). Offline recipients simply pull it
+        // next turn — not an error.
+        let delivered_live = match recipient.client_id.as_ref() {
+            Some(cid) => push_to_client(
+                cid.0.as_ref(),
+                format!(
+                    "marshal: new message from '{}': {}",
+                    sender.nickname, self.body
+                ),
+                serde_json::json!({
+                    "source": "marshal",
+                    "kind": "new_message",
+                    "from_nick": sender.nickname,
+                    "from_session": sender.id.0.as_ref(),
+                    "to_nick": recipient.nickname,
+                    "body": self.body,
+                    "sent_at": now,
+                }),
+            ),
+            None => false,
+        };
 
         Ok(SendMessageResult {
             message_id: msg.id,
             to_nick: recipient.nickname.clone(),
             sent_at: now,
+            delivered_live,
         })
     }
 }

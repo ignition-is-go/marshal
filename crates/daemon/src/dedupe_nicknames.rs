@@ -229,8 +229,9 @@ fn pick_one_correction(sessions: &[Arc<Session>]) -> Option<(&Arc<Session>, Stri
 /// dispatches another `DedupeNicknames`. This helper just collapses
 /// that loop into a tight in-process iteration for test determinism.
 pub fn run_until_converged(ctx: &CellServerCtx, max_passes: usize) -> Result<usize, String> {
-    let mut applied = 0usize;
-    for _ in 0..max_passes {
+    // `applied` (the enumerate index) is the count of corrections made so
+    // far: each completed iteration applies exactly one before looping.
+    for (applied, _) in (0..max_passes).enumerate() {
         let store = ctx
             .registry
             .get(Session::ENTITY_NAME_STATIC)
@@ -250,7 +251,6 @@ pub fn run_until_converged(ctx: &CellServerCtx, max_passes: usize) -> Result<usi
         let event = MEvent::from_item(&updated, MEventType::SET, &Uuid::new_v4().to_string());
         ctx.apply_event_batch(vec![event])
             .map_err(|e| format!("apply_event_batch: {e}"))?;
-        applied += 1;
     }
     Err(format!(
         "dedupe did not converge within {max_passes} passes — likely an idempotency bug",

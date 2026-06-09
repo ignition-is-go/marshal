@@ -1,4 +1,10 @@
-use myko::{entities::client::ClientId, myko_item};
+use std::sync::Arc;
+
+use myko::{
+    command::{CommandContext, CommandError},
+    entities::client::ClientId,
+    myko_item,
+};
 use serde::{Deserialize, Serialize};
 
 /// Per-session host environment summary the shim auto-populates at startup
@@ -194,4 +200,72 @@ pub struct Session {
     /// isn't inside a git repo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+}
+
+/// Resolve the session a write command is acting *as*.
+///
+/// Two caller-identity paths converge here:
+///
+/// 1. **Self-identify** (`as_session = Some`): the HTTP-MCP and hook
+///    paths have no connection `client_id` — an agent calling
+///    `command_SendMessage` over stock myko's HTTP transport, or the
+///    daemon's `/hook/*` handlers acting on a session's behalf, name
+///    the acting session explicitly. The id is the one the agent learned
+///    from its SessionStart hook output (its own `session_id`).
+///    Trust note: this is self-asserted — a caller can name any session
+///    id. On a trusted sibling-agent mesh that's acceptable (the WS shim
+///    path is no stronger), but it is the reason the daemon must not be
+///    exposed off the mesh.
+///
+/// 2. **Connection-bound** (`as_session = None`): the WS shim path. The
+///    server populated `client_id` from the live connection; we map it
+///    back to the session that SET itself with that client.
+///
+/// Errors with an actionable message if neither resolves to a roster
+/// session.
+pub fn resolve_caller(
+    ctx: &CommandContext,
+    sessions: &[Arc<Session>],
+    as_session: Option<&SessionId>,
+) -> Result<Arc<Session>, CommandError> {
+    if let Some(sid) = as_session {
+        return sessions
+            .iter()
+            .find(|s| &s.id == sid)
+            .cloned()
+            .ok_or_else(|| {
+                caller_err(
+                    ctx,
+                    &format!("asSession '{}' is not on the roster", sid.0.as_ref()),
+                )
+            });
+    }
+
+    let client_id = ctx.client_id().ok_or_else(|| {
+        caller_err(
+            ctx,
+            "command needs either an `asSession` id (HTTP/self-identify) or a connected client (WS shim)",
+        )
+    })?;
+    sessions
+        .iter()
+        .find(|s| s.client_id.as_ref() == Some(&client_id))
+        .cloned()
+        .ok_or_else(|| {
+            caller_err(
+                ctx,
+                &format!(
+                    "caller (client {}) has no session on the roster — re-SET your Session and retry",
+                    client_id.0.as_ref(),
+                ),
+            )
+        })
+}
+
+fn caller_err(ctx: &CommandContext, message: &str) -> CommandError {
+    CommandError {
+        tx: ctx.tx().to_string(),
+        command_id: ctx.command_id.to_string(),
+        message: message.to_string(),
+    }
 }

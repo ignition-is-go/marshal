@@ -20,8 +20,9 @@ pub fn App() -> impl IntoView {
     myko_leptos::provide_myko(DEFAULT_ADDRESS);
 
     let connected = myko_leptos::use_connection_status();
-    let sessions = myko_leptos::live_query::<GetAllSessions>(GetAllSessions {});
-    let messages = myko_leptos::live_query::<GetAllMessages>(GetAllMessages {});
+    // myko-leptos 4.17: live_query takes a closure returning the query.
+    let sessions = myko_leptos::live_query(|| GetAllSessions {});
+    let messages = myko_leptos::live_query(|| GetAllMessages {});
 
     view! {
         <Title text="marshal"/>

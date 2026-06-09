@@ -312,11 +312,11 @@ async fn main() -> Result<()> {
             // ever holds the un-dedup'd basename we sent at startup.
             let snapshot: Vec<Arc<marshal_entities::Session>> =
                 hyphae::Gettable::get(&sessions_cell_for_publish);
-            if let Some(me) = snapshot.iter().find(|s| s.id == session_id_for_publish) {
-                if last_state_nickname.as_deref() != Some(me.nickname.as_str()) {
-                    state_file::write(me, &session_id_for_publish);
-                    last_state_nickname = Some(me.nickname.clone());
-                }
+            if let Some(me) = snapshot.iter().find(|s| s.id == session_id_for_publish)
+                && last_state_nickname.as_deref() != Some(me.nickname.as_str())
+            {
+                state_file::write(me, &session_id_for_publish);
+                last_state_nickname = Some(me.nickname.clone());
             }
         }
     });

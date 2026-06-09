@@ -10,6 +10,8 @@
 pub mod auto_rooms;
 pub mod cleanup;
 pub mod dedupe_nicknames;
+pub mod hooks;
+pub mod http_listener;
 pub mod persister;
 
 pub fn link() {
