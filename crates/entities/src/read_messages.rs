@@ -23,7 +23,7 @@ use crate::{
     message_read::{GetAllMessageReads, MessageRead},
     room::RoomId,
     room_member::{GetAllRoomMembers, RoomMember},
-    session::{resolve_caller, GetAllSessions, Session, SessionId},
+    session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
 
 #[myko_command(ReadMessagesResult)]

@@ -40,7 +40,9 @@ pub struct Room {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RoomKind {
-    Auto { source: AutoSource },
+    Auto {
+        source: AutoSource,
+    },
     #[default]
     Adhoc,
 }

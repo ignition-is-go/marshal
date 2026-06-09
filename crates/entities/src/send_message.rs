@@ -30,7 +30,7 @@ use uuid::Uuid;
 use crate::{
     message::{Message, MessageId},
     notify::NotifyChannel,
-    session::{resolve_caller, GetAllSessions, Session, SessionId},
+    session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
 
 #[myko_command(SendMessageResult)]

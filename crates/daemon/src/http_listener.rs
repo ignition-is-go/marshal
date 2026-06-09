@@ -86,7 +86,10 @@ async fn handle_conn(mut stream: TcpStream, ctx: Arc<CellServerCtx>) -> std::io:
     // Body bytes already buffered past the header terminator, plus any
     // remainder up to Content-Length.
     let body_start = header_end + 4;
-    let mut body: Vec<u8> = buf.get(body_start..).map(|s| s.to_vec()).unwrap_or_default();
+    let mut body: Vec<u8> = buf
+        .get(body_start..)
+        .map(|s| s.to_vec())
+        .unwrap_or_default();
     while body.len() < content_length {
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
@@ -138,7 +141,5 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }

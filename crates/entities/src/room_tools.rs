@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     room::{GetAllRooms, Room, RoomId, RoomKind},
     room_member::{GetAllRoomMembers, RoomMember, RoomMemberId},
-    session::{resolve_caller, GetAllSessions, Session, SessionId},
+    session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
 
 // ─── JoinRoom ──────────────────────────────────────────────────────────

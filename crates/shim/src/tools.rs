@@ -285,7 +285,11 @@ async fn join_room(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolErr
         .get("description")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let cmd = JoinRoom { name, description, as_session: None };
+    let cmd = JoinRoom {
+        name,
+        description,
+        as_session: None,
+    };
     let cell = host.client.send_command::<JoinRoom, JoinRoomResult>(&cmd);
     let result = await_command(cell, REQUEST_TIMEOUT)
         .await
@@ -295,7 +299,10 @@ async fn join_room(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolErr
 
 async fn leave_room(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
     let room = arg_str(args, "room", "leave_room: missing `room` (id or name)")?;
-    let cmd = LeaveRoom { room, as_session: None };
+    let cmd = LeaveRoom {
+        room,
+        as_session: None,
+    };
     let cell = host.client.send_command::<LeaveRoom, LeaveRoomResult>(&cmd);
     let result = await_command(cell, REQUEST_TIMEOUT)
         .await
@@ -315,7 +322,10 @@ async fn ack_messages(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         .filter_map(|v| v.as_str())
         .map(|s| MessageId(Arc::<str>::from(s)))
         .collect();
-    let cmd = AckMessages { message_ids, as_session: None };
+    let cmd = AckMessages {
+        message_ids,
+        as_session: None,
+    };
     let cell = host
         .client
         .send_command::<AckMessages, AckMessagesResult>(&cmd);

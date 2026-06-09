@@ -121,7 +121,10 @@ fn offline_recipient_succeeds_and_persists_for_pull() {
         .execute(cmd_ctx(&ctx, Some("c-sender")))
         .expect("offline recipient is success under the pull model");
 
-    assert!(!result.delivered_live, "no live client → not delivered live");
+    assert!(
+        !result.delivered_live,
+        "no live client → not delivered live"
+    );
     assert_eq!(message_count(&ctx), 1, "message must persist for pull");
     assert_eq!(only_message(&ctx).body, "hi");
 }
