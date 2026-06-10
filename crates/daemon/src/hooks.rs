@@ -65,8 +65,10 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> S
         })
         .unwrap_or("")
         .to_string();
+    // Recognise both `/` and `\` as path separators when extracting the
+    // trailing component.
     let dir = cwd
-        .rsplit('/')
+        .rsplit(|c: char| c == '/' || c == '\\')
         .next()
         .filter(|s| !s.is_empty())
         .unwrap_or("session");
