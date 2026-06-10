@@ -47,23 +47,33 @@ const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
 /// treated as not set.
 const SESSION_ID_ENV: &str = "MARSHAL_SESSION_ID";
 
+/// File-name prefix shared by host hook writes (output) and this shim's
+/// read (input). One file per Claude Code process, keyed by a PID the
+/// host hook can produce. Files live in `std::env::temp_dir()` on every
+/// platform so both sides agree on the directory without negotiating.
+const SESSION_ID_FILE_PREFIX: &str = "marshal-session-id.";
+
 /// Resolve the session id this shim should register under.
 ///
-/// Three sources, tried in order:
+/// Four sources, tried in order:
 /// 1. `MARSHAL_SESSION_ID` environment variable (when set non-empty).
-/// 2. A small file in the OS temp dir keyed by parent PID, written by
-///    a host-side hook that does know the session id. Path:
-///    `{temp_dir}/marshal-session-id.<ppid>`. Polled up to 2s in 100ms
-///    steps to absorb the race between the host firing the hook and
-///    spawning this child.
-/// 3. Random v4 UUID, so the shim still has *some* identity if neither
-///    of the above is provided. The fallback path logs at WARN so
+/// 2. PPID-keyed file at `{temp_dir}/marshal-session-id.<ppid>`. Polled
+///    up to 2s in 100ms steps to absorb the host-vs-child startup race.
+///    This is the primary path on platforms where the host hook's PPID
+///    matches what the child sees as its parent — generally Unix.
+/// 3. Most-recent file matching `{temp_dir}/marshal-session-id.*`
+///    (created within `SCAN_WINDOW_SECS` of now). Escape hatch for
+///    platforms whose shells run in a translated PID space and can't
+///    write a file whose suffix matches the child's real parent PID —
+///    e.g. Git Bash on Windows, where `$PPID` always evaluates to `1`
+///    in the MSYS PID space regardless of the native parent.
+/// 4. Random v4 UUID, so the shim still has *some* identity if none of
+///    the above are provided. The fallback path logs at WARN so
 ///    operators see the parallel-identity hazard.
 ///
-/// The PPID convention lets the host write one file per Claude Code
-/// process from its own SessionStart hook (where the session id is
-/// available on stdin) and have the child shim discover it without any
-/// extra IPC contract.
+/// The host writes the session id from its own SessionStart hook,
+/// where the id is available on stdin. The child discovers it without
+/// any further IPC contract.
 fn resolve_session_id() -> SessionId {
     if let Ok(v) = std::env::var(SESSION_ID_ENV)
         && !v.is_empty()
@@ -72,31 +82,100 @@ fn resolve_session_id() -> SessionId {
         return SessionId(Arc::from(v));
     }
 
-    if let Some(ppid) = state_file::current_ppid() {
-        let path = std::env::temp_dir().join(format!("marshal-session-id.{ppid}"));
-        for _ in 0..20 {
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                let sid = contents.trim();
-                if !sid.is_empty() {
-                    log::info!("[marshal-shim] session id from {}", path.display());
-                    return SessionId(Arc::from(sid.to_string()));
-                }
+    let temp_dir = std::env::temp_dir();
+    let ppid = state_file::current_ppid();
+    let ppid_path = ppid.map(|p| temp_dir.join(format!("{SESSION_ID_FILE_PREFIX}{p}")));
+
+    /// How long to wait for either the PPID file or a recent-file match
+    /// before giving up. Long enough to absorb a slow hook fire, short
+    /// enough that a real misconfiguration surfaces promptly.
+    const POLL_ATTEMPTS: u32 = 20;
+    const POLL_INTERVAL_MS: u64 = 100;
+    /// A file older than this is considered stale (left from a prior
+    /// session) and ignored by the recent-file scan.
+    const SCAN_WINDOW_SECS: u64 = 30;
+
+    for _ in 0..POLL_ATTEMPTS {
+        if let Some(ref path) = ppid_path
+            && let Ok(contents) = std::fs::read_to_string(path)
+        {
+            let sid = contents.trim();
+            if !sid.is_empty() {
+                log::info!("[marshal-shim] session id from {}", path.display());
+                return SessionId(Arc::from(sid.to_string()));
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        if let Some((path, sid)) = newest_session_id_file(&temp_dir, SCAN_WINDOW_SECS) {
+            log::info!(
+                "[marshal-shim] session id from {} (recent-file fallback)",
+                path.display(),
+            );
+            return SessionId(Arc::from(sid));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+    }
+
+    if let Some(ref path) = ppid_path {
         log::warn!(
-            "[marshal-shim] no session id at {} after 2s; falling back to random UUID — \
-             host will see a Session row that does not match the hook-registered one",
+            "[marshal-shim] no session id at {} or as a recent {}* file after {}ms; \
+             falling back to random UUID — host will see a Session row that does not \
+             match the hook-registered one",
             path.display(),
+            SESSION_ID_FILE_PREFIX,
+            (POLL_ATTEMPTS as u64) * POLL_INTERVAL_MS,
         );
     } else {
         log::warn!(
-            "[marshal-shim] could not determine parent PID; falling back to random UUID — \
+            "[marshal-shim] could not determine parent PID and no recent \
+             {SESSION_ID_FILE_PREFIX}* file found; falling back to random UUID — \
              host will see a Session row that does not match the hook-registered one"
         );
     }
 
     SessionId(Arc::from(Uuid::new_v4().to_string()))
+}
+
+/// Walk `dir` for `marshal-session-id.*` files written within
+/// `window_secs` of now and return the contents (trimmed) of the
+/// newest. Returns `None` if no qualifying file is present or
+/// readable, or if the file's contents are empty.
+fn newest_session_id_file(
+    dir: &std::path::Path,
+    window_secs: u64,
+) -> Option<(std::path::PathBuf, String)> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let now = std::time::SystemTime::now();
+    let window = std::time::Duration::from_secs(window_secs);
+
+    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(SESSION_ID_FILE_PREFIX) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        match now.duration_since(mtime) {
+            Ok(age) if age <= window => {}
+            _ => continue,
+        }
+        if newest
+            .as_ref()
+            .map(|(_, current)| mtime > *current)
+            .unwrap_or(true)
+        {
+            newest = Some((entry.path(), mtime));
+        }
+    }
+
+    let (path, _) = newest?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let sid = contents.trim();
+    if sid.is_empty() {
+        return None;
+    }
+    Some((path, sid.to_string()))
 }
 
 #[tokio::main]
