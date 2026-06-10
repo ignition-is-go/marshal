@@ -87,9 +87,11 @@ fn resolve_session_id() -> SessionId {
     let ppid_path = ppid.map(|p| temp_dir.join(format!("{SESSION_ID_FILE_PREFIX}{p}")));
 
     /// How long to wait for either the PPID file or a recent-file match
-    /// before giving up. Long enough to absorb a slow hook fire, short
-    /// enough that a real misconfiguration surfaces promptly.
-    const POLL_ATTEMPTS: u32 = 20;
+    /// before giving up. Has to absorb a host-side hook process startup,
+    /// which on Windows (Git Bash) can be multiple seconds before any
+    /// actual write happens. 10s gives the slow path room without
+    /// hanging a real misconfiguration forever.
+    const POLL_ATTEMPTS: u32 = 100;
     const POLL_INTERVAL_MS: u64 = 100;
     /// A file older than this is considered stale (left from a prior
     /// session) and ignored by the recent-file scan.
