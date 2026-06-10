@@ -109,13 +109,13 @@ pub fn write(session: &Session, session_id: &SessionId) {
 // ─── Platform: current parent PID ───────────────────────────────────────────
 
 #[cfg(unix)]
-fn current_ppid() -> Option<u32> {
+pub fn current_ppid() -> Option<u32> {
     // POSIX getppid() never fails.
     Some(unsafe { libc::getppid() as u32 })
 }
 
 #[cfg(windows)]
-fn current_ppid() -> Option<u32> {
+pub fn current_ppid() -> Option<u32> {
     // Windows has no getppid(): the parent PID isn't stored on the
     // process itself, only in the toolhelp snapshot. Reuse the
     // arbitrary-PID lookup with our own PID.
@@ -125,7 +125,7 @@ fn current_ppid() -> Option<u32> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn current_ppid() -> Option<u32> {
+pub fn current_ppid() -> Option<u32> {
     None
 }
 

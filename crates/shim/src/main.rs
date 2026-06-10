@@ -41,6 +41,64 @@ const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
 const ADDRESS_ENV: &str = "MARSHAL_DAEMON_ADDRESS";
 const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
 
+/// Env var an MCP host can set to make this process register under a
+/// specific session id rather than generating a new one. When present,
+/// it overrides the PPID-keyed file mechanism below. Empty value is
+/// treated as not set.
+const SESSION_ID_ENV: &str = "MARSHAL_SESSION_ID";
+
+/// Resolve the session id this shim should register under.
+///
+/// Three sources, tried in order:
+/// 1. `MARSHAL_SESSION_ID` environment variable (when set non-empty).
+/// 2. A small file in the OS temp dir keyed by parent PID, written by
+///    a host-side hook that does know the session id. Path:
+///    `{temp_dir}/marshal-session-id.<ppid>`. Polled up to 2s in 100ms
+///    steps to absorb the race between the host firing the hook and
+///    spawning this child.
+/// 3. Random v4 UUID, so the shim still has *some* identity if neither
+///    of the above is provided. The fallback path logs at WARN so
+///    operators see the parallel-identity hazard.
+///
+/// The PPID convention lets the host write one file per Claude Code
+/// process from its own SessionStart hook (where the session id is
+/// available on stdin) and have the child shim discover it without any
+/// extra IPC contract.
+fn resolve_session_id() -> SessionId {
+    if let Ok(v) = std::env::var(SESSION_ID_ENV)
+        && !v.is_empty()
+    {
+        log::info!("[marshal-shim] session id from {SESSION_ID_ENV} env");
+        return SessionId(Arc::from(v));
+    }
+
+    if let Some(ppid) = state_file::current_ppid() {
+        let path = std::env::temp_dir().join(format!("marshal-session-id.{ppid}"));
+        for _ in 0..20 {
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                let sid = contents.trim();
+                if !sid.is_empty() {
+                    log::info!("[marshal-shim] session id from {}", path.display());
+                    return SessionId(Arc::from(sid.to_string()));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        log::warn!(
+            "[marshal-shim] no session id at {} after 2s; falling back to random UUID — \
+             host will see a Session row that does not match the hook-registered one",
+            path.display(),
+        );
+    } else {
+        log::warn!(
+            "[marshal-shim] could not determine parent PID; falling back to random UUID — \
+             host will see a Session row that does not match the hook-registered one"
+        );
+    }
+
+    SessionId(Arc::from(Uuid::new_v4().to_string()))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Subcommand dispatch. Bare invocation falls through to the MCP
@@ -102,7 +160,7 @@ async fn main() -> Result<()> {
     let project = detect_project_basename(&cwd);
     let operator = detect_operator();
     let host = detect_host();
-    let session_id = SessionId(Arc::from(Uuid::new_v4().to_string()));
+    let session_id = resolve_session_id();
 
     let session = Session {
         id: session_id.clone(),
