@@ -65,8 +65,8 @@ fn SessionsCard(
                 <table class="data">
                     <thead>
                         <tr>
-                            <th>"nick"</th>
                             <th>"id"</th>
+                            <th>"host"</th>
                             <th>"cwd"</th>
                             <th>"branch"</th>
                             <th>"status"</th>
@@ -142,10 +142,15 @@ fn SessionRow(session: std::sync::Arc<marshal_entities::Session>) -> impl IntoVi
         }
         .into_any()
     };
+    let where_label = session
+        .host
+        .as_ref()
+        .map(|h| h.name.clone())
+        .unwrap_or_else(|| "—".into());
     view! {
         <tr>
-            <td><strong>{session.nickname.clone()}</strong></td>
-            <td class="mono text-muted">{short_id(&session.id.0)}</td>
+            <td class="mono">{short_id(&session.id.0)}</td>
+            <td><strong>{where_label}</strong></td>
             <td class="mono text-subtle truncate">{session.cwd.clone()}</td>
             <td class="mono text-muted">{session.git_branch.clone().unwrap_or_else(|| "—".into())}</td>
             <td class="text-subtle">{status_view}</td>
@@ -217,9 +222,13 @@ fn MessagesCard(
                         let:m
                     >
                         <li class="msg">
-                            <span class="from"><strong>{m.from_nick.clone()}</strong></span>
+                            <span class="from mono">{short_id(&m.from_session_id.0)}</span>
                             <span class="arrow">"→"</span>
-                            <span class="to"><strong>{m.to_nick.clone()}</strong></span>
+                            <span class="to mono">{
+                                m.to_session_id.as_ref().map(|s| short_id(&s.0))
+                                    .or_else(|| m.to_room_id.as_ref().map(|r| format!("#{}", short_id(&r.0))))
+                                    .unwrap_or_default()
+                            }</span>
                             <span class="body">{m.body.clone()}</span>
                         </li>
                     </For>

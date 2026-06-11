@@ -12,14 +12,14 @@
 mod activity;
 mod mcp;
 mod self_update;
-mod state_file;
+mod session_discovery;
 mod statusline;
 mod tools;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use hyphae::Watchable;
-use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session, SessionId};
+use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session};
 use mcp::ServerConfig;
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -41,63 +41,23 @@ const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
 const ADDRESS_ENV: &str = "MARSHAL_DAEMON_ADDRESS";
 const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
 
-/// Env var an MCP host can set to make this process register under a
-/// specific session id rather than generating a new one. When present,
-/// it overrides the PPID-keyed file mechanism below. Empty value is
-/// treated as not set.
-const SESSION_ID_ENV: &str = "MARSHAL_SESSION_ID";
-
-/// Resolve the session id this shim should register under.
+/// Filename the shim reads from a per-user config dir when neither
+/// `MARSHAL_DAEMON_ADDRESS` nor `MYKO_ADDRESS` is set in the
+/// environment. The file contains a single line: the daemon URL.
 ///
-/// Three sources, tried in order:
-/// 1. `MARSHAL_SESSION_ID` environment variable (when set non-empty).
-/// 2. A small file in the OS temp dir keyed by parent PID, written by
-///    a host-side hook that does know the session id. Path:
-///    `{temp_dir}/marshal-session-id.<ppid>`. Polled up to 2s in 100ms
-///    steps to absorb the race between the host firing the hook and
-///    spawning this child.
-/// 3. Random v4 UUID, so the shim still has *some* identity if neither
-///    of the above is provided. The fallback path logs at WARN so
-///    operators see the parallel-identity hazard.
+/// Why: env-var propagation across shells (VS Code terminal, dev-channels
+/// plugin spawn, Git Bash, cmd.exe) is fragile — a user-level env var set
+/// after a parent process started isn't seen by that process or its
+/// children. A file at a fixed path the operator owns is read fresh on
+/// every shim startup, so it works regardless of how the shim was
+/// invoked.
 ///
-/// The PPID convention lets the host write one file per Claude Code
-/// process from its own SessionStart hook (where the session id is
-/// available on stdin) and have the child shim discover it without any
-/// extra IPC contract.
-fn resolve_session_id() -> SessionId {
-    if let Ok(v) = std::env::var(SESSION_ID_ENV)
-        && !v.is_empty()
-    {
-        log::info!("[marshal-shim] session id from {SESSION_ID_ENV} env");
-        return SessionId(Arc::from(v));
-    }
-
-    if let Some(ppid) = state_file::current_ppid() {
-        let path = std::env::temp_dir().join(format!("marshal-session-id.{ppid}"));
-        for _ in 0..20 {
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                let sid = contents.trim();
-                if !sid.is_empty() {
-                    log::info!("[marshal-shim] session id from {}", path.display());
-                    return SessionId(Arc::from(sid.to_string()));
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        log::warn!(
-            "[marshal-shim] no session id at {} after 2s; falling back to random UUID — \
-             host will see a Session row that does not match the hook-registered one",
-            path.display(),
-        );
-    } else {
-        log::warn!(
-            "[marshal-shim] could not determine parent PID; falling back to random UUID — \
-             host will see a Session row that does not match the hook-registered one"
-        );
-    }
-
-    SessionId(Arc::from(Uuid::new_v4().to_string()))
-}
+/// Search order, first match wins:
+/// 1. Linux/macOS: `$XDG_CONFIG_HOME/marshal/daemon-address`, then
+///    `$HOME/.config/marshal/daemon-address`.
+/// 2. Windows: `%APPDATA%\marshal\daemon-address`, then
+///    `%PROGRAMDATA%\marshal\daemon-address`.
+const ADDRESS_FILE: &str = "daemon-address";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -124,9 +84,27 @@ async fn main() -> Result<()> {
     init_logging();
     marshal_entities::link();
 
-    let daemon_address = std::env::var(ADDRESS_ENV)
-        .or_else(|_| std::env::var(ADDRESS_ENV_LEGACY))
-        .unwrap_or_else(|_| DEFAULT_DAEMON_ADDRESS.to_string());
+    // Resolution order, first match wins:
+    //   1. config file at the per-user well-known path
+    //   2. MARSHAL_DAEMON_ADDRESS env var
+    //   3. legacy MYKO_ADDRESS env var
+    //   4. compiled-in localhost default
+    //
+    // Config file BEFORE env (inverted from the usual env-wins convention)
+    // because the shim's parent process tree is brittle on Windows: a
+    // VS Code instance launched before fleet config was finalized
+    // captures stale user-env values at start, and every terminal (and
+    // every Claude.exe, and every shim) downstream of it inherits those
+    // stale values. Claude Code's `.claude.json` mcpServers env block
+    // does not reliably override inherited env in its stdio MCP spawn,
+    // so env-wins meant a leaked value from a stale parent shadowed the
+    // role-deployed per-host config file. Config-wins makes the file the
+    // per-host source of truth; env becomes a deliberate one-off
+    // override the operator can apply by deleting the file.
+    let daemon_address = read_address_from_config_file()
+        .or_else(|| std::env::var(ADDRESS_ENV).ok())
+        .or_else(|| std::env::var(ADDRESS_ENV_LEGACY).ok())
+        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string());
 
     log::info!("[marshal-shim] connecting to {daemon_address}");
 
@@ -150,22 +128,26 @@ async fn main() -> Result<()> {
         .display()
         .to_string();
     let pid = std::process::id();
-    let nickname = std::path::Path::new(&cwd)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("session")
-        .to_string();
     let git_branch = detect_git_branch(&cwd);
     let project = detect_project_basename(&cwd);
     let operator = detect_operator();
     let host = detect_host();
-    let session_id = resolve_session_id();
+
+    // Claude Code's canonical session_id is the filename of its per-session
+    // transcript at `~/.claude/projects/<encoded_cwd>/<id>.jsonl`. Adopting
+    // that id keeps shim + hook on a single Session row keyed by it. We
+    // hard-fail if discovery doesn't converge — better to die loudly than
+    // register under a synthetic id and silently break peer routing.
+    let Some(session_id) = session_discovery::resolve(&cwd) else {
+        anyhow::bail!(
+            "could not discover Claude Code session_id from ~/.claude/projects/*/*.jsonl \
+             (cwd={cwd}); refusing to start under a synthetic id"
+        );
+    };
 
     let session = Session {
         id: session_id.clone(),
         client_id: None,
-        nickname: nickname.clone(),
         pid,
         cwd: cwd.clone(),
         git_branch: git_branch.clone(),
@@ -179,13 +161,6 @@ async fn main() -> Result<()> {
         project: project.clone(),
     };
     let session = Arc::new(Mutex::new(session));
-
-    // Write the initial PPID-keyed state file so consumers (e.g. a
-    // statusLine script) can resolve the nickname immediately, before
-    // the WS handshake completes and the periodic publisher first
-    // ticks. The periodic loop below refreshes this file with the
-    // dedup'd nickname once the daemon corrects any collisions.
-    state_file::write(&session.lock().unwrap(), &session_id);
 
     // Open the long-lived `GetAll*` subscriptions BEFORE we connect so
     // they're primed by the time the WS handshake completes — tools and
@@ -230,7 +205,6 @@ async fn main() -> Result<()> {
     let host = Arc::new(tools::ToolHost {
         client: Arc::clone(&client),
         session_id: session_id.clone(),
-        nickname: nickname.clone(),
         pid,
         cwd: cwd.clone(),
         session: Arc::clone(&session),
@@ -245,11 +219,11 @@ async fn main() -> Result<()> {
         name: "marshal-shim".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         instructions: format!(
-            "You are session '{nickname}' (id {}) in {cwd}. Coordinate with \
-             sibling Claude sessions via the marshal daemon.\n\
+            "You are marshal session {} in {cwd}. Coordinate with sibling \
+             Claude sessions via the marshal daemon.\n\
              \n\
              READ paths are resources (use `resources/read`):\n\
-             - marshal://whoami       — your session id, nickname, pid, cwd, operator, host\n\
+             - marshal://whoami       — your session id, pid, cwd, operator, host\n\
              - marshal://roster       — every live session and what room(s) it's in\n\
              - marshal://rooms        — every room and who its members are\n\
              - marshal://messages     — message history; supports query params:\n\
@@ -264,6 +238,10 @@ async fn main() -> Result<()> {
              - leave_room         — leave an ad-hoc room\n\
              - set_status         — set this session's free-form status text\n\
              - ack_messages       — mark message ids as read for this session\n\
+             \n\
+             Sessions have NO nickname field. Compose any display label \
+             yourself from `host.name` + cwd basename + session_id[:8]. \
+             Address peers ONLY by their session_id.\n\
              \n\
              Inbound peer messages arrive as `notifications/claude/channel` \
              events; reply with `send_message` or `broadcast`.",
@@ -296,7 +274,6 @@ async fn main() -> Result<()> {
     let client_for_publish = Arc::clone(&client);
     let session_for_publish = Arc::clone(&session);
     let session_id_for_publish = session_id.clone();
-    let sessions_cell_for_publish = handler.host.sessions_cell.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -306,7 +283,6 @@ async fn main() -> Result<()> {
         let mut pushed_activity_at: Option<i64> = None;
         let mut pushed_tool: Option<String> = None;
         let mut pushed_tool_at: Option<i64> = None;
-        let mut last_state_nickname: Option<String> = None;
         loop {
             interval.tick().await;
 
@@ -363,19 +339,6 @@ async fn main() -> Result<()> {
                 sess.last_tool = last_tool.clone();
                 sess.last_tool_at = last_tool_at;
             }
-
-            // Refresh the PPID-keyed state file with the *daemon-side*
-            // nickname (post-dedupe). Look ourselves up in the live
-            // roster rather than trusting the local mirror, which only
-            // ever holds the un-dedup'd basename we sent at startup.
-            let snapshot: Vec<Arc<marshal_entities::Session>> =
-                hyphae::Gettable::get(&sessions_cell_for_publish);
-            if let Some(me) = snapshot.iter().find(|s| s.id == session_id_for_publish)
-                && last_state_nickname.as_deref() != Some(me.nickname.as_str())
-            {
-                state_file::write(me, &session_id_for_publish);
-                last_state_nickname = Some(me.nickname.clone());
-            }
         }
     });
 
@@ -406,6 +369,61 @@ fn emit_session_set(client: &MykoClient, session: &Session) -> Result<()> {
         .send_event(event)
         .map_err(|e| anyhow::anyhow!("send_event failed: {e}"))?;
     Ok(())
+}
+
+/// Try each well-known per-user config path in order; return the first
+/// non-empty trimmed line from the first readable file. Trailing newlines
+/// and surrounding whitespace are stripped so an operator can `echo URL >
+/// daemon-address` without worrying about formatting.
+fn read_address_from_config_file() -> Option<String> {
+    for path in address_file_candidates() {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let line = contents.lines().next().unwrap_or("").trim();
+            if !line.is_empty() {
+                log::info!(
+                    "[marshal-shim] daemon address from config file {}: {}",
+                    path.display(),
+                    line
+                );
+                return Some(line.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn address_file_candidates() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
+        out.push(std::path::PathBuf::from(xdg).join("marshal").join(ADDRESS_FILE));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        out.push(
+            std::path::PathBuf::from(home)
+                .join(".config")
+                .join("marshal")
+                .join(ADDRESS_FILE),
+        );
+    }
+    out
+}
+
+#[cfg(windows)]
+fn address_file_candidates() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        out.push(std::path::PathBuf::from(appdata).join("marshal").join(ADDRESS_FILE));
+    }
+    if let Some(pd) = std::env::var_os("PROGRAMDATA") {
+        out.push(std::path::PathBuf::from(pd).join("marshal").join(ADDRESS_FILE));
+    }
+    out
+}
+
+#[cfg(not(any(unix, windows)))]
+fn address_file_candidates() -> Vec<std::path::PathBuf> {
+    Vec::new()
 }
 
 fn init_logging() {

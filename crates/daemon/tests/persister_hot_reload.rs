@@ -54,11 +54,10 @@ fn setup() -> (
     (log_path, persister, ctx, dir)
 }
 
-fn session_set_line(id: &str, nickname: &str) -> String {
+fn session_set_line(id: &str) -> String {
     let event = MEvent {
         item: serde_json::json!({
             "id": id,
-            "nickname": nickname,
             "pid": 0,
             "cwd": "/tmp",
             "connectedAt": chrono::Utc::now().timestamp_millis(),
@@ -107,7 +106,7 @@ fn external_append_is_picked_up() {
 
     assert_eq!(session_count(&ctx), 0, "registry starts empty");
 
-    append_external(&log_path, &session_set_line("s-ext-1", "external"));
+    append_external(&log_path, &session_set_line("s-ext-1"));
     let n = wait_for_sessions(&ctx, 1);
     assert_eq!(
         n, 1,
@@ -123,7 +122,7 @@ fn truncation_triggers_reload() {
     for i in 0..3 {
         append_external(
             &log_path,
-            &session_set_line(&format!("s-pre-{i}"), "before"),
+            &session_set_line(&format!("s-pre-{i}")),
         );
     }
     assert_eq!(wait_for_sessions(&ctx, 3), 3);
@@ -134,7 +133,7 @@ fn truncation_triggers_reload() {
             .truncate(true)
             .open(&log_path)
             .expect("truncate log");
-        writeln!(f, "{}", session_set_line("s-post-1", "after")).unwrap();
+        writeln!(f, "{}", session_set_line("s-post-1")).unwrap();
         f.sync_data().unwrap();
     }
 
@@ -165,7 +164,7 @@ fn rename_replacement_triggers_reload() {
     let (log_path, persister, ctx, dir) = setup();
     let _watcher = persister.start_watcher(ctx.clone()).expect("start watcher");
 
-    append_external(&log_path, &session_set_line("s-orig-1", "original"));
+    append_external(&log_path, &session_set_line("s-orig-1"));
     assert_eq!(wait_for_sessions(&ctx, 1), 1);
 
     let staging = dir.path().join("events.jsonl.new");
@@ -176,7 +175,7 @@ fn rename_replacement_triggers_reload() {
             .truncate(true)
             .open(&staging)
             .expect("open staging");
-        writeln!(f, "{}", session_set_line("s-replaced-1", "via mv")).unwrap();
+        writeln!(f, "{}", session_set_line("s-replaced-1")).unwrap();
         f.sync_data().unwrap();
     }
     std::fs::rename(&staging, &log_path).expect("rename onto log");
@@ -208,7 +207,7 @@ fn own_writes_do_not_double_apply() {
     let (log_path, persister, ctx, _dir) = setup();
     let _watcher = persister.start_watcher(ctx.clone()).expect("start watcher");
 
-    let line = session_set_line("s-own-1", "via apply_event_batch");
+    let line = session_set_line("s-own-1");
     let event: MEvent = serde_json::from_str(&line).unwrap();
     let applied = ctx.apply_event_batch(vec![event]).expect("apply own event");
     assert_eq!(applied, 1);
@@ -230,7 +229,7 @@ fn own_writes_do_not_double_apply() {
 
     append_external(
         &log_path,
-        &session_set_line("s-own-2", "external after own"),
+        &session_set_line("s-own-2"),
     );
     assert_eq!(wait_for_sessions(&ctx, 2), 2);
 }

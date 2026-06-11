@@ -29,8 +29,6 @@ use std::time::Duration;
 pub struct ToolHost {
     pub client: Arc<MykoClient>,
     pub session_id: SessionId,
-    #[allow(dead_code)] // populated at startup; kept for roster/debug introspection
-    pub nickname: String,
     pub pid: u32,
     pub cwd: String,
     /// The shim's local copy of its Session entity. Mutations
@@ -108,7 +106,6 @@ fn read_whoami(host: &ToolHost, uri: &str) -> ResourceContent {
         uri,
         json!({
             "session_id": host.session_id.0.as_ref(),
-            "nickname": snapshot.nickname,
             "pid": host.pid,
             "cwd": host.cwd,
             "operator": snapshot.operator,
@@ -132,13 +129,13 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
             json!({
                 "session_id": s.id.0.as_ref(),
                 "is_self": s.id.0.as_ref() == me,
-                "nickname": s.nickname,
                 "pid": s.pid,
                 "cwd": s.cwd,
                 "git_branch": s.git_branch,
                 "current_task": s.current_task,
                 "operator": s.operator,
                 "host": s.host,
+                "project": s.project,
                 "connected_at": s.connected_at,
                 "rooms": rooms,
             })
@@ -158,13 +155,11 @@ fn read_rooms(host: &ToolHost, uri: &str) -> ResourceContent {
                 .iter()
                 .filter(|m| m.room_id == r.id)
                 .map(|m| {
-                    let nick = sessions
-                        .iter()
-                        .find(|s| s.id == m.session_id)
-                        .map(|s| s.nickname.clone());
+                    let member = sessions.iter().find(|s| s.id == m.session_id);
                     json!({
                         "session_id": m.session_id.0.as_ref(),
-                        "nickname": nick,
+                        "host": member.and_then(|s| s.host.as_ref().map(|h| h.name.clone())),
+                        "cwd": member.map(|s| s.cwd.clone()),
                         "joined_at": m.joined_at,
                     })
                 })
@@ -256,9 +251,9 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         .map_err(ToolError::invalid_params)?;
     Ok(ToolOutcome::Json(json!({
         "message_id": result.message_id.0.as_ref(),
-        "to_session_id": cmd.to_session_id.0.as_ref(),
-        "to_nick": result.to_nick,
+        "to_session_id": result.to_session_id.0.as_ref(),
         "sent_at": result.sent_at,
+        "delivered_live": result.delivered_live,
     })))
 }
 
@@ -362,10 +357,10 @@ pub fn tools_def() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct send to a peer's session_id. Look up the id under marshal://roster first; nicknames are display-only and not accepted as recipients. Daemon validates and returns an error if the session is unknown, offline, or has a stale client binding.".into(),
+            description: "Direct send to a peer's session_id. Look up the id under marshal://roster first. Daemon validates and returns an error if the session is unknown, offline, or has a stale client binding.".into(),
             input_schema: schema_object(
                 json!({
-                    "to":   { "type": "string", "description": "Recipient `session_id` (uuid) from marshal://roster. Not a nickname." },
+                    "to":   { "type": "string", "description": "Recipient `session_id` (uuid) from marshal://roster." },
                     "body": { "type": "string", "description": "Message body." }
                 }),
                 &["to", "body"],
@@ -425,13 +420,13 @@ pub fn resources_def() -> Vec<ResourceDef> {
         ResourceDef {
             uri: "marshal://whoami".into(),
             name: "whoami".into(),
-            description: "This session's id, nickname, pid, cwd, operator, and host info.".into(),
+            description: "This session's id, pid, cwd, operator, and host info.".into(),
             mime_type: "application/json".into(),
         },
         ResourceDef {
             uri: "marshal://roster".into(),
             name: "roster".into(),
-            description: "Every live session with its nickname, cwd, git branch, status, operator, host, and room memberships.".into(),
+            description: "Every live session with its id, cwd, git branch, status, operator, host, project, and room memberships.".into(),
             mime_type: "application/json".into(),
         },
         ResourceDef {

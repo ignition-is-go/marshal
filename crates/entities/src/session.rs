@@ -35,7 +35,6 @@ mod tests {
         // failing to load older Session SETs.
         let payload = serde_json::json!({
             "id": "sess-001",
-            "nickname": "old",
             "pid": 1234,
             "cwd": "/tmp",
             "connectedAt": 1_700_000_000_000_i64,
@@ -53,7 +52,6 @@ mod tests {
         let s = Session {
             id: SessionId(Arc::from("sess-002")),
             client_id: None,
-            nickname: "live".into(),
             pid: 4321,
             cwd: "/home/x".into(),
             git_branch: None,
@@ -81,7 +79,6 @@ mod tests {
         let s = Session {
             id: SessionId(Arc::from("sess-003")),
             client_id: None,
-            nickname: "operator-test".into(),
             pid: 1,
             cwd: "/repo".into(),
             git_branch: None,
@@ -121,13 +118,6 @@ pub struct Session {
     #[myko_client_id]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<ClientId>,
-
-    /// Free-form display name. Defaults to the cwd basename for shims;
-    /// the TUI sets it to "tui" so it isn't confused with a Claude session.
-    /// The daemon's `DedupeNicknameSaga` rewrites colliding names by
-    /// appending `-{N}` so peers always have a unique addressable handle.
-    #[myko_setter]
-    pub nickname: String,
 
     /// OS process id of the connecting client.
     pub pid: u32,

@@ -86,12 +86,10 @@ pub struct ReadMessagesResult {
 pub struct MessageView {
     pub message_id: MessageId,
     pub from_session_id: SessionId,
-    pub from_nick: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to_session_id: Option<SessionId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to_room_id: Option<RoomId>,
-    pub to_nick: String,
     pub body: String,
     pub sent_at: i64,
     pub read_by_me: bool,
@@ -187,10 +185,8 @@ impl CommandHandler for ReadMessages {
             .map(|m| MessageView {
                 message_id: m.id.clone(),
                 from_session_id: m.from_session_id.clone(),
-                from_nick: m.from_nick.clone(),
                 to_session_id: m.to_session_id.clone(),
                 to_room_id: m.to_room_id.clone(),
-                to_nick: m.to_nick.clone(),
                 body: m.body.clone(),
                 sent_at: m.sent_at,
                 read_by_me: my_reads.contains(&m.id),

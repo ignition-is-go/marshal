@@ -43,11 +43,10 @@ fn setup() -> CellServerCtx {
     ctx
 }
 
-fn session(id: &str, nickname: &str, client_id: Option<&str>) -> Session {
+fn session(id: &str, client_id: Option<&str>) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
         client_id: client_id.map(|c| ClientId(Arc::from(c))),
-        nickname: nickname.into(),
         pid: 0,
         cwd: "/repo".into(),
         git_branch: None,
@@ -109,8 +108,8 @@ fn offline_recipient_succeeds_and_persists_for_pull() {
     // Pull model: an offline recipient (no live client) is NOT an error.
     // The message persists so the recipient pulls it on its next hook turn.
     let ctx = setup();
-    set_session(&ctx, &session("sender", "sender", Some("c-sender")));
-    set_session(&ctx, &session("recipient", "recipient", None));
+    set_session(&ctx, &session("sender", Some("c-sender")));
+    set_session(&ctx, &session("recipient", None));
 
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("recipient")),
@@ -135,8 +134,8 @@ fn stale_binding_succeeds_and_persists() {
     // longer live (post-bounce). The best-effort push finds no live client
     // and reports `delivered_live = false`, but the message still persists.
     let ctx = setup();
-    set_session(&ctx, &session("sender", "sender", Some("c-sender")));
-    set_session(&ctx, &session("recipient", "recipient", Some("c-stale")));
+    set_session(&ctx, &session("sender", Some("c-sender")));
+    set_session(&ctx, &session("recipient", Some("c-stale")));
 
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("recipient")),
@@ -157,8 +156,8 @@ fn self_identified_sender_via_as_session_succeeds() {
     // via `as_session`. Sender resolves from that, message persists, and
     // it's attributed to the self-identified session.
     let ctx = setup();
-    set_session(&ctx, &session("sender", "sender", None));
-    set_session(&ctx, &session("recipient", "recipient", None));
+    set_session(&ctx, &session("sender", None));
+    set_session(&ctx, &session("recipient", None));
 
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("recipient")),
@@ -178,7 +177,7 @@ fn self_identified_sender_via_as_session_succeeds() {
 #[test]
 fn unknown_recipient_errors_and_does_not_persist() {
     let ctx = setup();
-    set_session(&ctx, &session("sender", "sender", Some("c-sender")));
+    set_session(&ctx, &session("sender", Some("c-sender")));
 
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("does-not-exist")),
@@ -203,7 +202,7 @@ fn caller_without_session_errors() {
     let ctx = setup();
     set_session(
         &ctx,
-        &session("recipient", "recipient", Some("c-recipient")),
+        &session("recipient", Some("c-recipient")),
     );
 
     let cmd = SendMessage {
@@ -227,7 +226,7 @@ fn caller_without_session_errors() {
 fn unidentified_caller_errors() {
     // No client_id AND no as_session → cannot resolve a sender at all.
     let ctx = setup();
-    set_session(&ctx, &session("recipient", "recipient", None));
+    set_session(&ctx, &session("recipient", None));
 
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("recipient")),
