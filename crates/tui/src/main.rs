@@ -370,8 +370,11 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             let short_id: String = s.id.0.chars().take(8).collect();
             Row::new(vec![
                 conn_cell,
-                RowCell::from(short_id)
-                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                RowCell::from(short_id).style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
                 RowCell::from(short_cwd(&s.cwd)).style(Style::default().fg(Color::Gray)),
                 RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),

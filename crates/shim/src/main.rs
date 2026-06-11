@@ -396,7 +396,11 @@ fn read_address_from_config_file() -> Option<String> {
 fn address_file_candidates() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        out.push(std::path::PathBuf::from(xdg).join("marshal").join(ADDRESS_FILE));
+        out.push(
+            std::path::PathBuf::from(xdg)
+                .join("marshal")
+                .join(ADDRESS_FILE),
+        );
     }
     if let Some(home) = std::env::var_os("HOME") {
         out.push(
@@ -413,10 +417,18 @@ fn address_file_candidates() -> Vec<std::path::PathBuf> {
 fn address_file_candidates() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        out.push(std::path::PathBuf::from(appdata).join("marshal").join(ADDRESS_FILE));
+        out.push(
+            std::path::PathBuf::from(appdata)
+                .join("marshal")
+                .join(ADDRESS_FILE),
+        );
     }
     if let Some(pd) = std::env::var_os("PROGRAMDATA") {
-        out.push(std::path::PathBuf::from(pd).join("marshal").join(ADDRESS_FILE));
+        out.push(
+            std::path::PathBuf::from(pd)
+                .join("marshal")
+                .join(ADDRESS_FILE),
+        );
     }
     out
 }

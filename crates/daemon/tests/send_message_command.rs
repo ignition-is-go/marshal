@@ -200,10 +200,7 @@ fn unknown_recipient_errors_and_does_not_persist() {
 fn caller_without_session_errors() {
     // Caller's client_id maps to no session and no `as_session` was given.
     let ctx = setup();
-    set_session(
-        &ctx,
-        &session("recipient", Some("c-recipient")),
-    );
+    set_session(&ctx, &session("recipient", Some("c-recipient")));
 
     let cmd = SendMessage {
         to_session_id: SessionId(Arc::from("recipient")),

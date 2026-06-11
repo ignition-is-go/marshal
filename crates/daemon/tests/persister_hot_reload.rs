@@ -120,10 +120,7 @@ fn truncation_triggers_reload() {
     let _watcher = persister.start_watcher(ctx.clone()).expect("start watcher");
 
     for i in 0..3 {
-        append_external(
-            &log_path,
-            &session_set_line(&format!("s-pre-{i}")),
-        );
+        append_external(&log_path, &session_set_line(&format!("s-pre-{i}")));
     }
     assert_eq!(wait_for_sessions(&ctx, 3), 3);
 
@@ -227,9 +224,6 @@ fn own_writes_do_not_double_apply() {
         "registry still has exactly one session after watcher ticks",
     );
 
-    append_external(
-        &log_path,
-        &session_set_line("s-own-2"),
-    );
+    append_external(&log_path, &session_set_line("s-own-2"));
     assert_eq!(wait_for_sessions(&ctx, 2), 2);
 }

@@ -233,7 +233,11 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         // The transcript JSON-escapes backslashes: "cwd":"C:\\Users\\admin"
         let mut f = std::fs::File::create(proj.join("ddd.jsonl")).unwrap();
-        writeln!(f, r#"{{"type":"system","cwd":"C:\\Users\\admin","timestamp":1}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"system","cwd":"C:\\Users\\admin","timestamp":1}}"#
+        )
+        .unwrap();
         drop(f);
 
         let got = resolve_under(&home, r"C:\Users\admin", Duration::from_millis(10));
@@ -254,7 +258,11 @@ mod tests {
     fn write_transcript(path: &Path, cwd: &str) {
         let mut f = std::fs::File::create(path).unwrap();
         writeln!(f, r#"{{"type":"last-prompt","leafUuid":"x"}}"#).unwrap();
-        writeln!(f, r#"{{"type":"permission-mode","permissionMode":"default"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"permission-mode","permissionMode":"default"}}"#
+        )
+        .unwrap();
         let escaped = cwd.replace('\\', r"\\").replace('"', r#"\""#);
         writeln!(f, r#"{{"type":"system","cwd":"{escaped}","timestamp":1}}"#).unwrap();
     }
