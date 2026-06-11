@@ -95,11 +95,10 @@ fn spawn_server(bind: SocketAddr) -> ServerHandle {
     }
 }
 
-fn session_set_event(id: &str, nickname: &str) -> MEvent {
+fn session_set_event(id: &str) -> MEvent {
     let session = Session {
         id: SessionId(Arc::from(id)),
         client_id: None,
-        nickname: nickname.into(),
         pid: 0,
         cwd: "/tmp".into(),
         git_branch: None,
@@ -159,7 +158,7 @@ fn client_subscription_resumes_after_server_restart() {
 
     server_v1
         .ctx
-        .apply_event_batch(vec![session_set_event("s-pre", "before-restart")])
+        .apply_event_batch(vec![session_set_event("s-pre")])
         .expect("apply pre-restart session");
 
     let c1 = cell.clone();
@@ -195,7 +194,7 @@ fn client_subscription_resumes_after_server_restart() {
 
     server_v2
         .ctx
-        .apply_event_batch(vec![session_set_event("s-post", "after-restart")])
+        .apply_event_batch(vec![session_set_event("s-post")])
         .expect("apply post-restart session");
 
     let c2 = cell.clone();
@@ -235,7 +234,7 @@ fn many_subscriptions_resume_together_after_restart() {
 
     server_v1
         .ctx
-        .apply_event_batch(vec![session_set_event("s-pre", "before-restart")])
+        .apply_event_batch(vec![session_set_event("s-pre")])
         .expect("apply pre");
 
     for (i, cell) in cells.iter().enumerate() {
@@ -271,7 +270,7 @@ fn many_subscriptions_resume_together_after_restart() {
 
     server_v2
         .ctx
-        .apply_event_batch(vec![session_set_event("s-post", "after-restart")])
+        .apply_event_batch(vec![session_set_event("s-post")])
         .expect("apply post");
 
     for (i, cell) in cells.iter().enumerate() {
@@ -327,7 +326,7 @@ fn dropped_cell_handle_still_pumps_updates_after_reconnect() {
 
     server_v1
         .ctx
-        .apply_event_batch(vec![session_set_event("s-pre", "before-restart")])
+        .apply_event_batch(vec![session_set_event("s-pre")])
         .expect("apply pre-restart session");
 
     let m1 = mirror.clone();
@@ -365,7 +364,7 @@ fn dropped_cell_handle_still_pumps_updates_after_reconnect() {
 
     server_v2
         .ctx
-        .apply_event_batch(vec![session_set_event("s-post", "after-restart")])
+        .apply_event_batch(vec![session_set_event("s-post")])
         .expect("apply post-restart session");
 
     let m2 = mirror.clone();
