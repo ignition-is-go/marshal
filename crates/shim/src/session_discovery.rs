@@ -14,20 +14,30 @@
 //!
 //! A shim invocation's PARENT process IS its Claude session: stdio MCP
 //! children are spawned by the parent's `child_process.spawn`, and POSIX +
-//! Windows both expose the parent PID directly. We resolve in two tiers,
-//! both keyed off that parent:
+//! Windows both expose the parent PID directly. We resolve in three tiers
+//! keyed off that parent:
 //!
-//! 1. **Parent cmdline parse.** If the parent was started with
-//!    `--resume <path>.jsonl` or `--session-id <uuid>` (Claude's
-//!    fork/resume code path), the id is there literally. Authoritative.
+//! 0. **Claude's own per-PID session manifest.** Claude Code (≥ 2.1.172)
+//!    writes `~/.claude/sessions/<pid>.json` for every active session
+//!    containing `{ pid, sessionId, cwd, startedAt, ... }`. The shim reads
+//!    `~/.claude/sessions/<parent_pid>.json` and takes `sessionId`
+//!    verbatim. Authoritative, no heuristic involved. This is the
+//!    happy path and covers fresh starts, resumes, self-upgrade
+//!    restarts, forks, and `--continue` — all of which Claude tracks in
+//!    the same per-PID record.
 //!
-//! 2. **Parent start time → .jsonl creation time correlation.** Claude
-//!    creates the `.jsonl` at the moment the session starts (fresh) or
-//!    keeps the existing one (resumed but without an explicit flag —
-//!    rare; usually `--resume` is set). The file whose creation time is
-//!    closest to the parent process's start time is the right one. With
-//!    multiple sibling sessions in the same cwd, each has a distinct
-//!    start time so the match is unambiguous.
+//! 1. **Parent cmdline parse.** Fallback for older Claude versions or
+//!    sandboxed environments where `sessions/<pid>.json` is unavailable.
+//!    `--resume <path>.jsonl` or `--session-id <uuid>` name the id
+//!    literally.
+//!
+//! 2. **Parent start time → .jsonl creation time correlation.** Last
+//!    resort: each fresh session's `.jsonl` is created when claude
+//!    starts, so file ctime ≈ parent.started_at. Sibling sessions in
+//!    the same cwd have distinct start times so the match is
+//!    unambiguous for fresh starts. Self-upgrade / resumed sessions
+//!    don't create a new file and therefore can't be matched this way
+//!    — tier 0 covers those.
 //!
 //! Tier 2 uses `Metadata::created()` (statx birthtime on Linux 4.11+,
 //! NTFS creation time on Windows). It falls back to `modified()` if
@@ -97,18 +107,23 @@ where
         parent.cmdline.len()
     );
 
+    // Tier 0: Claude's own per-PID session manifest. Authoritative.
+    if let Some(sid) = sid_from_claude_sessions_file(home, parent.pid) {
+        log::info!(
+            "[marshal-shim] session discovery: ~/.claude/sessions/{}.json → session_id {}",
+            parent.pid,
+            sid.0
+        );
+        return Some(sid);
+    }
+
     // Tier 1: parent cmdline parse — authoritative, no polling needed
     // (cmdline is immutable after exec).
     if let Some(stem) = sid_from_cmdline(&parent.cmdline) {
-        let candidate = projects.join(format!("placeholder/{stem}.jsonl"));
         log::info!(
             "[marshal-shim] session discovery: parent cmdline → session_id {}",
             stem
         );
-        // Best effort cwd verification: if a matching .jsonl exists in
-        // any project dir, check it. Failure to verify isn't fatal here
-        // — the cmdline is authoritative.
-        let _ = candidate; // path is illustrative; real verification below
         let _ = verify_cwd_for_session_id(&projects, &stem, cwd);
         return Some(SessionId(Arc::from(stem.as_str())));
     }
@@ -143,6 +158,34 @@ pub(crate) struct ParentInfo {
     pub pid: u32,
     pub started_at: Option<SystemTime>,
     pub cmdline: Vec<String>,
+}
+
+/// Read `<home>/.claude/sessions/<parent_pid>.json` and pull `sessionId`.
+/// This is Claude Code's own per-PID session manifest (≥ 2.1.172) — the
+/// canonical source. Returns None if the file doesn't exist, isn't
+/// valid JSON, or doesn't carry a non-empty `sessionId`. The parser
+/// uses minimal direct string scanning to avoid a serde_json dep on
+/// the hot path; if Claude ever drops the convention this gracefully
+/// falls through to the other tiers.
+fn sid_from_claude_sessions_file(home: &Path, parent_pid: u32) -> Option<SessionId> {
+    let path = home
+        .join(".claude")
+        .join("sessions")
+        .join(format!("{parent_pid}.json"));
+    let content = std::fs::read_to_string(&path).ok()?;
+    // Cheap parse: look for `"sessionId":"..."`. The file is small
+    // (~300 bytes) and Claude writes it as a single-line JSON object;
+    // anything trickier (escaped quotes inside a UUID value) doesn't
+    // happen in practice.
+    let needle = "\"sessionId\":\"";
+    let start = content.find(needle)? + needle.len();
+    let rest = &content[start..];
+    let end = rest.find('"')?;
+    let sid = &rest[..end];
+    if sid.is_empty() {
+        return None;
+    }
+    Some(SessionId(Arc::from(sid)))
 }
 
 fn sid_from_cmdline(args: &[String]) -> Option<String> {
@@ -546,6 +589,52 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    // ── Tier 0: Claude's per-PID sessions manifest ────────────────────
+
+    #[test]
+    fn tier0_sessions_file_wins() {
+        let tmp = make_tempdir();
+        let home = tmp.join("home");
+        std::fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
+        std::fs::create_dir_all(home.join(".claude").join("projects").join("-tmp-a")).unwrap();
+        std::fs::write(
+            home.join(".claude").join("sessions").join("12345.json"),
+            r#"{"pid":12345,"sessionId":"14b684ba-618f-48f4-91d7-422ef99c9e38","cwd":"/tmp/x"}"#,
+        )
+        .unwrap();
+        let parent = ParentInfo {
+            pid: 12345,
+            started_at: None,
+            cmdline: Vec::new(),
+        };
+        let got = resolve_under(&home, "/tmp/x", Duration::from_millis(10), move || {
+            Some(clone_parent(&parent))
+        });
+        assert_eq!(
+            got.as_ref().map(|s| s.0.as_ref()),
+            Some("14b684ba-618f-48f4-91d7-422ef99c9e38")
+        );
+    }
+
+    #[test]
+    fn tier0_missing_sessions_file_falls_through_to_tier1() {
+        let tmp = make_tempdir();
+        let home = tmp.join("home");
+        let proj = home.join(".claude").join("projects").join("-tmp-fallback");
+        std::fs::create_dir_all(&proj).unwrap();
+        // Tier 0 absent.
+        // Tier 1: cmdline names the id directly.
+        let parent = ParentInfo {
+            pid: 99999,
+            started_at: None,
+            cmdline: vec!["claude".into(), "--session-id".into(), "from-cmdline".into()],
+        };
+        let got = resolve_under(&home, "/tmp/fallback", Duration::from_millis(10), move || {
+            Some(clone_parent(&parent))
+        });
+        assert_eq!(got.as_ref().map(|s| s.0.as_ref()), Some("from-cmdline"));
+    }
 
     // ── Tier 1: cmdline parse ────────────────────────────────────────
 
