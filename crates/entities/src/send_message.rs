@@ -51,7 +51,10 @@ pub struct SendMessage {
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageResult {
     pub message_id: MessageId,
-    pub to_nick: String,
+    /// Recipient's session id, echoed back so callers can confirm what
+    /// was actually addressed (the daemon's caller resolution can
+    /// disambiguate by host+cwd in edge cases the client couldn't see).
+    pub to_session_id: SessionId,
     pub sent_at: i64,
     /// `true` if the recipient had a live WS client and the notification
     /// was pushed into its session right now; `false` if the recipient is
@@ -93,10 +96,8 @@ impl CommandHandler for SendMessage {
         let msg = Message {
             id: MessageId(Arc::from(Uuid::new_v4().to_string())),
             from_session_id: sender.id.clone(),
-            from_nick: sender.nickname.clone(),
             to_session_id: Some(recipient.id.clone()),
             to_room_id: None,
-            to_nick: recipient.nickname.clone(),
             body: self.body.clone(),
             sent_at: now,
         };
@@ -107,22 +108,21 @@ impl CommandHandler for SendMessage {
         ctx.emit_set(&msg)?;
 
         // Best-effort live push: if the recipient is a WS shim with a live
-        // client, surface the message in its session immediately (the
-        // Track-2 conversation path). Offline recipients simply pull it
-        // next turn — not an error.
+        // client, surface the message in its session immediately. Offline
+        // recipients simply pull it next turn — not an error.
         let delivered_live = match recipient.client_id.as_ref() {
             Some(cid) => push_to_client(
                 cid.0.as_ref(),
                 format!(
-                    "marshal: new message from '{}': {}",
-                    sender.nickname, self.body
+                    "marshal: new message from session {}: {}",
+                    sender.id.0.as_ref(),
+                    self.body
                 ),
                 serde_json::json!({
                     "source": "marshal",
                     "kind": "new_message",
-                    "from_nick": sender.nickname,
                     "from_session": sender.id.0.as_ref(),
-                    "to_nick": recipient.nickname,
+                    "to_session": recipient.id.0.as_ref(),
                     "body": self.body,
                     "sent_at": now,
                 }),
@@ -132,7 +132,7 @@ impl CommandHandler for SendMessage {
 
         Ok(SendMessageResult {
             message_id: msg.id,
-            to_nick: recipient.nickname.clone(),
+            to_session_id: recipient.id.clone(),
             sent_at: now,
             delivered_live,
         })

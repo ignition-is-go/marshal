@@ -336,7 +336,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
 
     let header = Row::new(vec![
         RowCell::from("conn"),
-        RowCell::from("nick"),
+        RowCell::from("id"),
         RowCell::from("identity"),
         RowCell::from("cwd"),
         RowCell::from("branch"),
@@ -367,10 +367,11 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             let activity_cell = build_activity_cell(s, now);
             let identity = format_identity(s);
             let rooms_summary = format_member_rooms(s, &snap.members);
+            let short_id: String = s.id.0.chars().take(8).collect();
             Row::new(vec![
                 conn_cell,
-                RowCell::from(s.nickname.clone())
-                    .style(Style::default().add_modifier(Modifier::BOLD)),
+                RowCell::from(short_id)
+                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
                 RowCell::from(short_cwd(&s.cwd)).style(Style::default().fg(Color::Gray)),
                 RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
@@ -386,7 +387,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         rows,
         [
             Constraint::Length(7),  // conn
-            Constraint::Length(16), // nick
+            Constraint::Length(10), // id (session_id[:8])
             Constraint::Length(22), // identity (operator@host)
             // cwd / branch / rooms split residual width 1 : 1 : 2 —
             // rooms tends to grow fastest as ad-hoc memberships
@@ -519,6 +520,13 @@ fn format_member_rooms(s: &Session, members: &[Arc<RoomMember>]) -> String {
     ids.join(", ")
 }
 
+/// Eight-char short form of a session_id, used as the display label in
+/// the messages pane. Session_id is the sole stored identity; readable
+/// labels are composed at view time.
+fn short_sid(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
 fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let now = now_ms();
 
@@ -528,14 +536,16 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         .map(|m| {
             // Broadcasts (to_room_id set) render with a `#` prefix on the
             // recipient and a brighter arrow so the eye picks them out
-            // of the direct-send stream. Direct sends keep the `→ nick`
-            // shape we had before.
+            // of the direct-send stream. Direct sends just show the
+            // recipient's short session_id.
             let is_broadcast = m.to_room_id.is_some();
             let arrow = if is_broadcast { " ⇒ " } else { " → " };
-            let recipient_label = if is_broadcast {
-                format!("#{}", m.to_nick)
+            let recipient_label = if let Some(rid) = m.to_room_id.as_ref() {
+                format!("#{}", short_sid(rid.0.as_ref()))
+            } else if let Some(sid) = m.to_session_id.as_ref() {
+                short_sid(sid.0.as_ref())
             } else {
-                m.to_nick.clone()
+                "?".to_string()
             };
             let recipient_style = if is_broadcast {
                 Style::default()
@@ -552,7 +562,7 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    format!("{:>14}", m.from_nick),
+                    format!("{:>8}", short_sid(m.from_session_id.0.as_ref())),
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),

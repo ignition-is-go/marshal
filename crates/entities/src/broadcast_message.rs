@@ -49,7 +49,10 @@ pub struct BroadcastMessage {
 pub struct BroadcastMessageResult {
     pub message_id: MessageId,
     pub to_room_id: RoomId,
-    pub to_nick: String,
+    /// Room name at acceptance time. Rooms are user-named, not derived,
+    /// so we DO echo this back — it's the routing label the caller
+    /// addressed (`join_room`/`broadcast` accept names, not ids only).
+    pub to_room_name: String,
     pub sent_at: i64,
     /// Number of recipients the resolution found (excluding sender).
     pub total: u32,
@@ -61,14 +64,12 @@ pub struct BroadcastMessageResult {
 #[serde(rename_all = "camelCase")]
 pub struct DeliveredRecipient {
     pub session_id: SessionId,
-    pub to_nick: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailedRecipient {
     pub session_id: SessionId,
-    pub to_nick: String,
     pub reason: String,
 }
 
@@ -126,10 +127,8 @@ impl CommandHandler for BroadcastMessage {
         let msg = Message {
             id: MessageId(Arc::from(Uuid::new_v4().to_string())),
             from_session_id: sender.id.clone(),
-            from_nick: sender.nickname.clone(),
             to_session_id: None,
             to_room_id: Some(room.id.clone()),
-            to_nick: room.name.clone(),
             body: self.body.clone(),
             sent_at: now,
         };
@@ -143,7 +142,6 @@ impl CommandHandler for BroadcastMessage {
             let Some(recipient) = sessions.iter().find(|s| &s.id == recipient_id) else {
                 failed.push(FailedRecipient {
                     session_id: recipient_id.clone(),
-                    to_nick: recipient_id.0.as_ref().to_string(),
                     reason: "session vanished from roster mid-broadcast".to_string(),
                 });
                 continue;
@@ -159,16 +157,17 @@ impl CommandHandler for BroadcastMessage {
             let dispatched = push_to_client(
                 client_id.0.as_ref(),
                 format!(
-                    "marshal: new message from '{}' to room '{}': {}",
-                    sender.nickname, room.name, self.body,
+                    "marshal: new message from session {} to room '{}': {}",
+                    sender.id.0.as_ref(),
+                    room.name,
+                    self.body,
                 ),
                 serde_json::json!({
                     "source": "marshal",
                     "kind": "new_message",
-                    "from_nick": sender.nickname,
                     "from_session": sender.id.0.as_ref(),
                     "to_room": room.id.0.as_ref(),
-                    "to_nick": room.name,
+                    "to_room_name": room.name,
                     "body": self.body,
                     "sent_at": now,
                 }),
@@ -176,12 +175,10 @@ impl CommandHandler for BroadcastMessage {
             if dispatched {
                 delivered.push(DeliveredRecipient {
                     session_id: recipient.id.clone(),
-                    to_nick: recipient.nickname.clone(),
                 });
             } else {
                 failed.push(FailedRecipient {
                     session_id: recipient.id.clone(),
-                    to_nick: recipient.nickname.clone(),
                     reason: format!(
                         "stale client binding ({}); recipient bounced and hasn't re-SET",
                         client_id.0.as_ref(),
@@ -193,7 +190,7 @@ impl CommandHandler for BroadcastMessage {
         Ok(BroadcastMessageResult {
             message_id: msg.id,
             to_room_id: room.id.clone(),
-            to_nick: room.name.clone(),
+            to_room_name: room.name.clone(),
             sent_at: now,
             total: recipient_ids.len() as u32,
             delivered,

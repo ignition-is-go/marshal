@@ -86,7 +86,8 @@ impl CommandHandler for JoinRoom {
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
 
         // Find or create the room. We slugify and append `-N` on
-        // collision (mirrors the nickname dedup convention).
+        // collision so the resulting id is naturally unique without a
+        // separate reconciliation pass.
         let room_id_str = pick_unique_room_id(&slug, &rooms);
         let room_id = RoomId(Arc::from(room_id_str.as_str()));
         let now = Utc::now().timestamp_millis();

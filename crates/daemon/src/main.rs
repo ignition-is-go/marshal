@@ -144,9 +144,9 @@ fn marshal_server_info() -> ServerInfo {
              connection identity, so the id must be explicit.\n\
              \n\
              READS (queries):\n\
-             - query_GetAllSessions  → the roster: every live session, its id, nickname, \
-             host, operator, cwd. Recipient ids come from here (they are session_id uuids, \
-             NOT nicknames).\n\
+             - query_GetAllSessions  → the roster: every live session — its id, host, \
+             operator, cwd, project, current_task. Recipient ids come from here (session_id \
+             uuids). Compose a human label from `host.name` + cwd basename when displaying.\n\
              - query_GetAllRooms     → every room and its id.\n\
              \n\
              WRITES (commands) — args are camelCase JSON:\n\

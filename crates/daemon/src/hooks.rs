@@ -62,9 +62,7 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> S
         .or_else(|| body.pointer("/workspace/current_dir").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
-    let dir = cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("session");
-    let nickname = format!("{dir}@{}", &sid[..sid.len().min(8)]);
-    let nick_for_identity = nickname.clone();
+    let dir = cwd.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or("session");
     let operator = q.get("operator").filter(|s| !s.is_empty()).cloned();
     let host = q.get("host").filter(|s| !s.is_empty()).map(|h| HostInfo {
         // `hostname` may return an FQDN (common on Windows); the host:*
@@ -80,21 +78,44 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> S
     let sid_typed = SessionId(Arc::from(sid));
     let prior = existing.iter().find(|s| s.id == sid_typed);
     let now = chrono::Utc::now().timestamp_millis();
-    let session = Session {
-        id: sid_typed,
-        client_id: None,
-        nickname,
-        pid: 0,
-        cwd,
-        git_branch: None,
-        current_task: prior.and_then(|p| p.current_task.clone()),
-        connected_at: prior.map(|p| p.connected_at).unwrap_or(now),
-        last_activity_at: Some(now),
-        last_tool: None,
-        last_tool_at: None,
-        operator,
-        host,
-        project,
+    // Preserve shim-owned fields (client_id, pid, git_branch, last_tool*)
+    // when a prior row already exists. The hook can fire after the shim
+    // has registered, and clobbering client_id back to None breaks live
+    // notification routing — the failure mode we're explicitly avoiding
+    // by sharing one session_id between hook and shim. The hook only
+    // writes fields it uniquely sources (operator, host, project from
+    // query string; cwd from payload; last_activity_at from "now").
+    let session = match prior {
+        Some(p) => {
+            let mut updated = (**p).clone();
+            updated.cwd = cwd;
+            updated.last_activity_at = Some(now);
+            if updated.operator.is_none() {
+                updated.operator = operator;
+            }
+            if updated.host.is_none() {
+                updated.host = host;
+            }
+            if updated.project.is_none() {
+                updated.project = project;
+            }
+            updated
+        }
+        None => Session {
+            id: sid_typed,
+            client_id: None,
+            pid: 0,
+            cwd,
+            git_branch: None,
+            current_task: None,
+            connected_at: now,
+            last_activity_at: Some(now),
+            last_tool: None,
+            last_tool_at: None,
+            operator,
+            host,
+            project,
+        },
     };
     let _ = cmd_ctx.emit_set(&session);
 
@@ -104,10 +125,10 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> S
     // the agent reads its id from here. Persists in context across the
     // session; re-injected on resume.
     let mut out = format!(
-        "<marshal_session>You are marshal session_id {sid} (nickname \"{nick_for_identity}\"). \
-         When calling marshal write tools (command_SendMessage, command_BroadcastMessage, \
-         command_JoinRoom, command_LeaveRoom), pass this id as the `asSession` argument so peers \
-         know who sent it.</marshal_session>\n"
+        "<marshal_session>You are marshal session_id {sid}. When calling marshal write \
+         tools (command_SendMessage, command_BroadcastMessage, command_JoinRoom, \
+         command_LeaveRoom), pass this id as the `asSession` argument so peers know \
+         who sent it.</marshal_session>\n"
     );
     out.push_str(&surface_unread(&cmd_ctx, sid));
     out
@@ -149,7 +170,6 @@ fn handle_session_end(body: &[u8], ctx: &Arc<CellServerCtx>) -> String {
     let stub = Session {
         id: SessionId(Arc::from(sid)),
         client_id: None,
-        nickname: String::new(),
         pid: 0,
         cwd: String::new(),
         git_branch: None,
@@ -190,6 +210,12 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> String {
         return String::new();
     }
 
+    // Sender display is composed at render time from the live Session
+    // (host + cwd basename + session_id[..8]) and degrades to the
+    // session_id alone when the row is gone — no denormalized snapshot
+    // on the Message itself.
+    let sessions: Vec<Arc<Session>> = cmd_ctx.exec_query(GetAllSessions {}).unwrap_or_default();
+
     let mut out = String::new();
     out.push_str(&format!("<marshal_inbox count=\"{}\">\n", result.messages.len()));
     out.push_str(
@@ -198,9 +224,14 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> String {
          use the marshal send_message tool addressed to the sender's session id.\n",
     );
     for m in &result.messages {
+        let sender_label = sessions
+            .iter()
+            .find(|s| s.id == m.from_session_id)
+            .map(|s| format_sender_label(s))
+            .unwrap_or_else(|| format!("unknown [{}]", m.from_session_id.0.as_ref()));
         out.push_str(&format!(
             "- from {} [{}]: {}\n",
-            m.from_nick,
+            sender_label,
             m.from_session_id.0.as_ref(),
             m.body
         ));
@@ -224,6 +255,21 @@ fn internal_cmd_ctx(ctx: &Arc<CellServerCtx>) -> CommandContext {
     let tx: Arc<str> = uuid::Uuid::new_v4().to_string().into();
     let req = RequestContext::internal(tx, ctx.host_id, "hook");
     CommandContext::new(Arc::from("hook"), Arc::new(req), ctx.clone())
+}
+
+/// Format a session as a short human-readable label: `<host>:<cwd_basename>`.
+/// Used in inbox surfacing so peer messages read naturally without
+/// snapshotting a nickname on the Message at send time. Session_id is
+/// printed separately by the caller for unambiguous reply addressing.
+fn format_sender_label(s: &Session) -> String {
+    let host = s.host.as_ref().map(|h| h.name.as_str()).unwrap_or("?");
+    let dir = s
+        .cwd
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|d| !d.is_empty())
+        .unwrap_or("?");
+    format!("{host}:{dir}")
 }
 
 fn parse_body(body: &[u8]) -> Option<Value> {

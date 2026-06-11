@@ -108,11 +108,10 @@ fn wait_for(label: &str, mut f: impl FnMut() -> bool) {
     panic!("timed out waiting for: {label}");
 }
 
-fn make_session(id: &str, nickname: &str) -> Session {
+fn make_session(id: &str) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
         client_id: None, // server auto-populates
-        nickname: nickname.into(),
         pid: 0,
         cwd: "/repo".into(),
         git_branch: None,
@@ -198,8 +197,8 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     thread::sleep(Duration::from_millis(200));
 
     // Each side announces its Session. The server fills in client_id.
-    send_session_set(&client_a, &make_session("a", "alpha"));
-    send_session_set(&client_b, &make_session("b", "bravo"));
+    send_session_set(&client_a, &make_session("sess-alpha"));
+    send_session_set(&client_b, &make_session("sess-bravo"));
 
     // Wait until both sessions are in A's view of GetAllSessions, with
     // their client_id populated by the server.
@@ -207,15 +206,15 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         let cell = _a_sessions.clone();
         wait_for("both sessions visible to A with client_ids", move || {
             let sessions = cell.get();
-            let a = sessions.iter().find(|s| s.id.0.as_ref() == "a");
-            let b = sessions.iter().find(|s| s.id.0.as_ref() == "b");
+            let a = sessions.iter().find(|s| s.id.0.as_ref() == "sess-alpha");
+            let b = sessions.iter().find(|s| s.id.0.as_ref() == "sess-bravo");
             matches!((a, b), (Some(a), Some(b)) if a.client_id.is_some() && b.client_id.is_some())
         });
     }
 
     // A sends to B by session id.
     let cmd = SendMessage {
-        to_session_id: SessionId(Arc::from("b")),
+        to_session_id: SessionId(Arc::from("sess-bravo")),
         body: "hello bravo".into(),
         as_session: None, // WS path: sender resolved from the connection
     };
@@ -230,7 +229,7 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         });
     }
     let result = response_cell.get().expect("got response").expect("ok");
-    assert_eq!(result.to_nick, "bravo");
+    assert_eq!(result.to_session_id.0.as_ref(), "sess-bravo");
 
     // The NotifyChannel push should have landed on B before the response
     // returned (handler emits both inline). Don't wait long — if it isn't
@@ -252,8 +251,8 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         Some(&serde_json::json!("new_message"))
     );
     assert_eq!(
-        push.meta.get("from_nick"),
-        Some(&serde_json::json!("alpha"))
+        push.meta.get("from_session"),
+        Some(&serde_json::json!("sess-alpha"))
     );
 
     // And the server persisted exactly one Message — only after the push

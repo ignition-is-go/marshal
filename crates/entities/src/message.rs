@@ -10,6 +10,12 @@ use crate::session::SessionId;
 ///
 /// Read state lives on the `MessageRead` join entity, not here, so a
 /// broadcast can have per-recipient acks without ambiguity.
+///
+/// No denormalized display fields. Sender/recipient labels are computed
+/// at read time from the live Session row (and degrade to the session_id
+/// itself when the row is gone). Snapshotting nicknames at send time was
+/// the source of consistency drift after rename/disconnect; with
+/// session_id as the sole stored identity there is nothing to drift.
 #[myko_item]
 pub struct Message {
     /// Sender's session id. NOT a `belongs_to(Session)` cascade: a sent
@@ -18,14 +24,8 @@ pub struct Message {
     /// next turn — which can be after the sender's SessionEnd — so
     /// cascading on the sender would silently delete unread messages in
     /// that window. The message's lifetime is governed by the *recipient*
-    /// instead (the `to_session_id` / `to_room_id` cascades below);
-    /// `from_nick` is denormalized so we still know who sent it once the
-    /// sender is gone.
+    /// instead (the `to_session_id` / `to_room_id` cascades below).
     pub from_session_id: SessionId,
-
-    /// Sender's nickname captured at send time, denormalized so the
-    /// recipient still knows who sent it after the sender disconnects.
-    pub from_nick: String,
 
     /// Direct recipient — set for 1:1 sends, `None` for broadcasts.
     /// Cascade-DELs the message when the recipient session is DEL'd.
@@ -40,11 +40,6 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[belongs_to(Room, optional)]
     pub to_room_id: Option<crate::room::RoomId>,
-
-    /// Display name of the recipient at send time — peer's nickname for
-    /// direct sends, room's name for broadcasts. Denormalized so the
-    /// transcript still reads naturally after a rename or DEL.
-    pub to_nick: String,
 
     pub body: String,
 
