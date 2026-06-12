@@ -503,42 +503,26 @@ fn dispatch_request<H>(
     activity.bump();
     match method.as_str() {
         "initialize" => {
-            // Detect whether the client granted the experimental
-            // `claude/channel` capability — that's the channel Claude
-            // Code uses to surface `notifications/claude/channel` events
-            // mid-turn in the agent's transcript. The grant requires
-            // launching claude with `--dangerously-load-development-channels
-            // server:marshal`. Without it, the shim's notification
-            // pushes are silently dropped by Claude; tool calls still
-            // work but peer messages only appear in <marshal_inbox> at
-            // the START of the next user turn, never mid-turn.
+            // Whether Claude will honor `notifications/claude/channel`
+            // events from us is purely a client-side decision; Claude
+            // never tells the server, so we can't detect it over the
+            // MCP wire. The grant requires launching claude with
+            // `--dangerously-load-development-channels server:marshal`
+            // (or `--channels server:marshal`); both forms put marshal
+            // in claude's argv, so we read the parent's cmdline to
+            // know. Without the grant, the shim's pushes are silently
+            // dropped by claude. Tool calls still work; peer messages
+            // only surface in <marshal_inbox> at the START of the next
+            // user turn.
             //
-            // We can't fix that from the shim side, but we CAN make the
-            // failure visible: stamp a loud warning into the
-            // `instructions` block (which Claude injects into every
-            // turn's system context) so the agent itself surfaces the
-            // degraded mode whenever the operator asks about marshal.
-            let client_has_channel = params
-                .get("capabilities")
-                .and_then(|c| c.get("experimental"))
-                .and_then(|e| e.get("claude/channel"))
-                .is_some();
-
-            // Persist the grant for the statusline subcommand to pick up.
-            // Both processes are children of the same claude.exe; the
-            // status file key is that shared parent PID. Best-effort —
-            // if parent_pid lookup fails (rare), the statusline just
-            // shows the basic prefix without the degraded-mode flag.
-            if let Some(claude_pid) = crate::session_status::parent_pid() {
-                crate::session_status::write(
-                    claude_pid,
-                    &crate::session_status::SessionStatus {
-                        channel_granted: client_has_channel,
-                    },
-                );
-            }
-
-            let instructions = if client_has_channel {
+            // Stamp a loud warning into the `instructions` block
+            // (which Claude injects into every turn's system context)
+            // so the agent surfaces the degraded mode whenever the
+            // operator asks about marshal. The statusline subcommand
+            // independently calls the same detection helper so the
+            // operator's status bar shows the warning too.
+            let channels_granted = crate::channel_grant::marshal_channel_granted();
+            let instructions = if channels_granted {
                 config.instructions.clone()
             } else {
                 log::warn!(
@@ -774,85 +758,12 @@ mod tests {
         let _ = server.await;
     }
 
-    #[tokio::test]
-    async fn initialize_without_claude_channel_grant_stamps_warning() {
-        let (client_w, server_r) = duplex(64 * 1024);
-        let (server_w, client_r) = duplex(64 * 1024);
-
-        let server = tokio::spawn(serve(
-            make_config(),
-            Arc::new(EchoHandler),
-            Arc::new(Activity::new()),
-            |_| {},
-            server_r,
-            server_w,
-        ));
-
-        let mut client_w = client_w;
-        // No experimental.claude/channel in client capabilities — this is
-        // what `claude` (without --dangerously-load-development-channels
-        // server:marshal) looks like on the wire.
-        let req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": { "capabilities": { "experimental": {} } }
-        });
-        client_w
-            .write_all(format!("{}\n", req).as_bytes())
-            .await
-            .unwrap();
-
-        let mut client_r = client_r;
-        let line = read_line(&mut client_r).await;
-        let resp: Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(resp["id"], 1);
-        let instructions = resp["result"]["instructions"].as_str().unwrap();
-        assert!(
-            instructions.contains("MARSHAL DEGRADED MODE"),
-            "instructions should warn about degraded mode; got: {instructions}",
-        );
-        assert!(
-            instructions.contains("--dangerously-load-development-channels"),
-            "instructions should name the missing flag; got: {instructions}",
-        );
-        // Original instructions still included after the warning.
-        assert!(instructions.contains("test instructions"));
-
-        drop(client_w);
-        let _ = server.await;
-    }
-
-    #[tokio::test]
-    async fn initialize_with_claude_channel_grant_returns_unmodified_instructions() {
-        let (client_w, server_r) = duplex(64 * 1024);
-        let (server_w, client_r) = duplex(64 * 1024);
-
-        let server = tokio::spawn(serve(
-            make_config(),
-            Arc::new(EchoHandler),
-            Arc::new(Activity::new()),
-            |_| {},
-            server_r,
-            server_w,
-        ));
-
-        let mut client_w = client_w;
-        let req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": { "capabilities": { "experimental": { "claude/channel": {} } } }
-        });
-        client_w
-            .write_all(format!("{}\n", req).as_bytes())
-            .await
-            .unwrap();
-
-        let mut client_r = client_r;
-        let line = read_line(&mut client_r).await;
-        let resp: Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(resp["result"]["instructions"], "test instructions");
-
-        drop(client_w);
-        let _ = server.await;
-    }
+    // Channel-grant detection is exercised by `channel_grant::tests`
+    // against fabricated argv lists. We don't re-test the
+    // wire-handshake side here because the warning's content is
+    // entirely a function of `channel_grant::marshal_channel_granted()`
+    // which depends on the current process's real parent — not
+    // something a tokio duplex pair can simulate.
 
     #[tokio::test]
     async fn tools_list_returns_definitions() {

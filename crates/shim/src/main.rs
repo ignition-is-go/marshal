@@ -10,10 +10,10 @@
 //! 4. serves stdio MCP with a curated tool surface backed by the MykoClient.
 
 mod activity;
+mod channel_grant;
 mod mcp;
 mod self_update;
 mod session_discovery;
-mod session_status;
 mod statusline;
 mod tools;
 
