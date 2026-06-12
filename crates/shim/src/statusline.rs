@@ -71,11 +71,7 @@ pub fn run() -> anyhow::Result<()> {
     // instead of after the first missed peer message.
     let degraded = !crate::channel_grant::marshal_channel_granted();
 
-    let suffix = if degraded {
-        " ⚠ NO LIVE PUSH (relaunch with --dangerously-load-development-channels server:marshal)"
-    } else {
-        ""
-    };
+    let suffix = if degraded { " channels:off" } else { "" };
 
     if sid8.is_empty() {
         println!("[{user}@{host} {dir}]{suffix}");
