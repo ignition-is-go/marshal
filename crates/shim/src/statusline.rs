@@ -64,16 +64,12 @@ pub fn run() -> anyhow::Result<()> {
 
     let sid8 = &session_id[..session_id.len().min(8)];
 
-    // Pull the per-claude.exe status file (written by the MCP server in
-    // `mcp.rs::initialize`). If the parent didn't grant the experimental
-    // `claude/channel` capability — i.e. claude wasn't launched with
-    // `--dangerously-load-development-channels server:marshal` — flag
-    // it loudly. The operator reads this every render so a missed flag
-    // surfaces immediately instead of silently dropping every push.
-    let degraded = crate::session_status::parent_pid()
-        .and_then(crate::session_status::read)
-        .map(|s| !s.channel_granted)
-        .unwrap_or(false);
+    // Read the parent claude.exe's argv to detect whether marshal is in
+    // its `--channels` / `--dangerously-load-development-channels` list.
+    // Without that, `notifications/claude/channel` pushes are silently
+    // dropped — flag it loudly so the operator notices on every render
+    // instead of after the first missed peer message.
+    let degraded = !crate::channel_grant::marshal_channel_granted();
 
     let suffix = if degraded {
         " ⚠ NO LIVE PUSH (relaunch with --dangerously-load-development-channels server:marshal)"
