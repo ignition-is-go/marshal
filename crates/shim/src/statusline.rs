@@ -63,10 +63,28 @@ pub fn run() -> anyhow::Result<()> {
         .unwrap_or("");
 
     let sid8 = &session_id[..session_id.len().min(8)];
-    if sid8.is_empty() {
-        println!("[{user}@{host} {dir}]");
+
+    // Pull the per-claude.exe status file (written by the MCP server in
+    // `mcp.rs::initialize`). If the parent didn't grant the experimental
+    // `claude/channel` capability — i.e. claude wasn't launched with
+    // `--dangerously-load-development-channels server:marshal` — flag
+    // it loudly. The operator reads this every render so a missed flag
+    // surfaces immediately instead of silently dropping every push.
+    let degraded = crate::session_status::parent_pid()
+        .and_then(crate::session_status::read)
+        .map(|s| !s.channel_granted)
+        .unwrap_or(false);
+
+    let suffix = if degraded {
+        " ⚠ NO LIVE PUSH (relaunch with --dangerously-load-development-channels server:marshal)"
     } else {
-        println!("[{user}@{host} {dir} {sid8}]");
+        ""
+    };
+
+    if sid8.is_empty() {
+        println!("[{user}@{host} {dir}]{suffix}");
+    } else {
+        println!("[{user}@{host} {dir} {sid8}]{suffix}");
     }
     Ok(())
 }

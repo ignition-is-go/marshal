@@ -523,6 +523,21 @@ fn dispatch_request<H>(
                 .and_then(|c| c.get("experimental"))
                 .and_then(|e| e.get("claude/channel"))
                 .is_some();
+
+            // Persist the grant for the statusline subcommand to pick up.
+            // Both processes are children of the same claude.exe; the
+            // status file key is that shared parent PID. Best-effort —
+            // if parent_pid lookup fails (rare), the statusline just
+            // shows the basic prefix without the degraded-mode flag.
+            if let Some(claude_pid) = crate::session_status::parent_pid() {
+                crate::session_status::write(
+                    claude_pid,
+                    &crate::session_status::SessionStatus {
+                        channel_granted: client_has_channel,
+                    },
+                );
+            }
+
             let instructions = if client_has_channel {
                 config.instructions.clone()
             } else {
