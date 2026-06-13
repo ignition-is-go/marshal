@@ -71,7 +71,14 @@ pub fn run() -> anyhow::Result<()> {
     // instead of after the first missed peer message.
     let degraded = !crate::channel_grant::marshal_channel_granted();
 
-    let suffix = if degraded { " channels:off" } else { "" };
+    // Yellow ANSI on the warning so it actually catches the eye in the
+    // status bar. Claude Code renders the statusLine command's stdout
+    // verbatim and honors ANSI escapes.
+    let suffix = if degraded {
+        " \x1b[33m⚠ marshal channels disabled\x1b[0m"
+    } else {
+        ""
+    };
 
     if sid8.is_empty() {
         println!("[{user}@{host} {dir}]{suffix}");
