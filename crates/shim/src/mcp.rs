@@ -503,51 +503,6 @@ fn dispatch_request<H>(
     activity.bump();
     match method.as_str() {
         "initialize" => {
-            // Whether Claude will honor `notifications/claude/channel`
-            // events from us is purely a client-side decision; Claude
-            // never tells the server, so we can't detect it over the
-            // MCP wire. The grant requires launching claude with
-            // `--dangerously-load-development-channels server:marshal`
-            // (or `--channels server:marshal`); both forms put marshal
-            // in claude's argv, so we read the parent's cmdline to
-            // know. Without the grant, the shim's pushes are silently
-            // dropped by claude. Tool calls still work; peer messages
-            // only surface in <marshal_inbox> at the START of the next
-            // user turn.
-            //
-            // Stamp a loud warning into the `instructions` block
-            // (which Claude injects into every turn's system context)
-            // so the agent surfaces the degraded mode whenever the
-            // operator asks about marshal. The statusline subcommand
-            // independently calls the same detection helper so the
-            // operator's status bar shows the warning too.
-            let channels_granted = crate::channel_grant::marshal_channel_granted();
-            let instructions = if channels_granted {
-                config.instructions.clone()
-            } else {
-                log::warn!(
-                    "[marshal-shim] client did NOT declare experimental \
-                     `claude/channel` capability. Mid-turn live push is \
-                     disabled. Relaunch claude with \
-                     `--dangerously-load-development-channels server:marshal` \
-                     to enable it."
-                );
-                format!(
-                    "⚠ MARSHAL DEGRADED MODE — LIVE PUSH DISABLED ⚠\n\
-                     This Claude session was launched WITHOUT \
-                     `--dangerously-load-development-channels server:marshal`. \
-                     Peer messages from sibling agents will NOT surface \
-                     mid-turn as `notifications/claude/channel` events; \
-                     they will only appear in the <marshal_inbox> block at \
-                     the START of your next user turn. Tool calls \
-                     (send_message, roster, whoami) still work normally. \
-                     Tell the operator: \"To enable mid-turn live push, \
-                     /quit claude and re-run with \
-                     `claude --dangerously-load-development-channels server:marshal`.\"\n\n\
-                     ─── normal marshal instructions follow ───\n\n{}",
-                    config.instructions
-                )
-            };
             let result = serde_json::json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {
@@ -562,7 +517,7 @@ fn dispatch_request<H>(
                     "name": config.name,
                     "version": config.version,
                 },
-                "instructions": instructions,
+                "instructions": config.instructions.clone(),
             });
             let _ = notifier.out_tx.send(OutboundMessage::Reply { id, result });
         }
@@ -757,13 +712,6 @@ mod tests {
         drop(client_w); // close stdin so server exits
         let _ = server.await;
     }
-
-    // Channel-grant detection is exercised by `channel_grant::tests`
-    // against fabricated argv lists. We don't re-test the
-    // wire-handshake side here because the warning's content is
-    // entirely a function of `channel_grant::marshal_channel_granted()`
-    // which depends on the current process's real parent — not
-    // something a tokio duplex pair can simulate.
 
     #[tokio::test]
     async fn tools_list_returns_definitions() {
