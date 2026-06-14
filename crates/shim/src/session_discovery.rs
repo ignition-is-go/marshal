@@ -434,9 +434,7 @@ fn macos_process_start_time(pid: u32) -> Option<SystemTime> {
     chrono::NaiveDateTime::parse_from_str(s.trim(), "%a %b %e %H:%M:%S %Y")
         .ok()
         .and_then(|dt| dt.and_utc().timestamp_millis().try_into().ok())
-        .and_then(|millis: u64| {
-            SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis))
-        })
+        .and_then(|millis: u64| SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis)))
 }
 
 #[cfg(target_os = "macos")]
@@ -628,11 +626,18 @@ mod tests {
         let parent = ParentInfo {
             pid: 99999,
             started_at: None,
-            cmdline: vec!["claude".into(), "--session-id".into(), "from-cmdline".into()],
+            cmdline: vec![
+                "claude".into(),
+                "--session-id".into(),
+                "from-cmdline".into(),
+            ],
         };
-        let got = resolve_under(&home, "/tmp/fallback", Duration::from_millis(10), move || {
-            Some(clone_parent(&parent))
-        });
+        let got = resolve_under(
+            &home,
+            "/tmp/fallback",
+            Duration::from_millis(10),
+            move || Some(clone_parent(&parent)),
+        );
         assert_eq!(got.as_ref().map(|s| s.0.as_ref()), Some("from-cmdline"));
     }
 
@@ -655,10 +660,7 @@ mod tests {
 
     #[test]
     fn cmdline_equals_form_session_id() {
-        let args = vec![
-            "claude".to_string(),
-            "--session-id=abc".to_string(),
-        ];
+        let args = vec!["claude".to_string(), "--session-id=abc".to_string()];
         assert_eq!(sid_from_cmdline(&args).as_deref(), Some("abc"));
     }
 
@@ -758,7 +760,10 @@ mod tests {
     fn parent_correlation_outside_window_excludes_match() {
         let tmp = make_tempdir();
         let home = tmp.join("home");
-        let proj = home.join(".claude").join("projects").join("-tmp-far-from-now");
+        let proj = home
+            .join(".claude")
+            .join("projects")
+            .join("-tmp-far-from-now");
         std::fs::create_dir_all(&proj).unwrap();
         write_transcript(&proj.join("only.jsonl"), "/tmp/wanted-cwd");
 
@@ -831,7 +836,11 @@ mod tests {
         let proj = home.join(".claude").join("projects").join("C--Users-admin");
         std::fs::create_dir_all(&proj).unwrap();
         let mut f = std::fs::File::create(proj.join("win-sid.jsonl")).unwrap();
-        writeln!(f, r#"{{"type":"system","cwd":"C:\\Users\\admin","timestamp":1}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"system","cwd":"C:\\Users\\admin","timestamp":1}}"#
+        )
+        .unwrap();
         drop(f);
 
         let target_meta = std::fs::metadata(proj.join("win-sid.jsonl")).unwrap();
