@@ -10,11 +10,8 @@
 //! 4. serves stdio MCP with a curated tool surface backed by the MykoClient.
 
 mod activity;
-mod channel_grant;
 mod mcp;
-mod self_update;
 mod session_discovery;
-mod statusline;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -62,19 +59,14 @@ const ADDRESS_FILE: &str = "daemon-address";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Subcommand dispatch. Bare invocation falls through to the MCP
-    // server (the default and dominant mode). `--check` is the self-
-    // update smoke test. `statusline` is the Claude Code statusLine
-    // renderer — folded into this binary so users get one declarative
-    // command on every platform.
+    // `--check` is a no-op smoke test for the deploy role's
+    // idempotency check ("does the installed binary actually run on
+    // this host"). Print "ok" and exit clean.
     let mut argv = std::env::args().skip(1);
     match argv.next().as_deref() {
         Some("--check") if argv.next().is_none() => {
             println!("ok");
             return Ok(());
-        }
-        Some("statusline") if argv.next().is_none() => {
-            return statusline::run();
         }
         Some(other) => {
             anyhow::bail!("unknown argument: {other}");
@@ -253,12 +245,10 @@ async fn main() -> Result<()> {
     };
 
     // Activity tracker: bumped by the MCP dispatcher on each request and
-    // start/end-bracketed around tools/call. The self-update watcher uses
-    // it to find a safe moment to re-exec; the roster-publish loop uses
+    // start/end-bracketed around tools/call. The roster-publish loop uses
     // it to keep `Session.last_activity_at` / `last_tool` / `last_tool_at`
     // current upstream.
     let activity = Arc::new(activity::Activity::new());
-    self_update::spawn(Arc::clone(&activity));
 
     // Roster liveness publisher: every 5s, dispatch the three liveness
     // setters with the current snapshot. The cadence is a deliberate
