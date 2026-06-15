@@ -12,6 +12,7 @@
 mod activity;
 mod mcp;
 mod session_discovery;
+mod statusline;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -57,15 +58,24 @@ const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
 ///    `%PROGRAMDATA%\marshal\daemon-address`.
 const ADDRESS_FILE: &str = "daemon-address";
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // `--check` is a no-op smoke test for the deploy role's
-    // idempotency check ("does the installed binary actually run on
-    // this host"). Print "ok" and exit clean.
+fn main() -> Result<()> {
+    // Subcommands are dispatched BEFORE the async runtime is built so the
+    // statusline (invoked on every Claude render) and the deploy smoke
+    // test never pay for tokio / WS / MCP init. This is why both live as
+    // subcommands of the one binary instead of separate artifacts that
+    // would have to be built, deployed, and kept in lockstep.
+    //
+    // `--check` is the deploy role's idempotency smoke test ("does the
+    // installed binary run on this host"). `statusline` renders Claude
+    // Code's status prefix from stdin.
     let mut argv = std::env::args().skip(1);
     match argv.next().as_deref() {
         Some("--check") if argv.next().is_none() => {
             println!("ok");
+            return Ok(());
+        }
+        Some("statusline") if argv.next().is_none() => {
+            statusline::render();
             return Ok(());
         }
         Some(other) => {
@@ -74,6 +84,17 @@ async fn main() -> Result<()> {
         None => {}
     }
 
+    // Only the MCP-server path needs async. `#[tokio::main]` defaults to a
+    // multi-thread runtime with all features; build the same explicitly so
+    // the subcommands above stay runtime-free.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     init_logging();
     marshal_entities::link();
 
