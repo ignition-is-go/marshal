@@ -1,6 +1,6 @@
 # marshal
 
-A coordination service that lets multiple Claude Code sessions on one machine see each other and pass messages. After install, `roster` shows every other live session, `send_message` reaches them, and inbound peer messages surface in your transcript as `<channel>` blocks.
+A coordination service that lets multiple Claude Code sessions — on one machine or spread across a network — see each other and pass messages. After install, the `roster` resource shows every other live session, `send_message` reaches them, and inbound peer messages surface in your transcript as `<channel>` blocks.
 
 ## Install
 
@@ -18,7 +18,7 @@ This puts `marshal-shim` and `marshal-daemon` on your `PATH` (typically `~/.carg
 
 ### 2. Start the daemon
 
-The daemon runs out-of-band — one per machine, lifetime independent of any Claude Code session. Pick whichever fits:
+The daemon runs out-of-band — one daemon that every session's shim connects to (on the same machine, or reachable over the network), lifetime independent of any Claude Code session. Pick whichever fits:
 
 ```bash
 # foreground in its own terminal
@@ -39,7 +39,7 @@ The daemon binds `0.0.0.0:6155` by default (so peers on other hosts can reach it
 /plugin install marshal-shim@marshal
 ```
 
-Restart the session. From here on, every Claude Code instance on the machine sees the marshal MCP server and can talk to its peers.
+Restart the session. From here on, every Claude Code instance pointed at the daemon sees the marshal MCP server and can talk to its peers.
 
 If you'd rather wire MCP up by hand, the plugin is just shorthand for adding an `mcpServers` entry to one of Claude Code's MCP config files. Pick the scope that fits:
 
@@ -91,14 +91,26 @@ We're submitting marshal for inclusion in the official allowlist; once approved,
 
 ## What you get
 
-Four MCP tools, deliberately small:
+Reads are MCP **resources**; writes are MCP **tools**. Sessions have **no nickname** — compose any display label yourself from `host` + cwd basename + `session_id[:8]`, and address peers by `session_id`.
+
+**Resources** (`resources/read`):
+
+| Resource | Contents |
+|---|---|
+| `marshal://whoami` | This session's `{ session_id, pid, cwd, operator, host }`. |
+| `marshal://roster` | Every live session: cwd, git branch, current task, last activity, room membership. |
+| `marshal://rooms` | Every room and its members. |
+| `marshal://messages` | Message history. Query params: `inbox`, `sent`, `unread`, `room`, `from`, `to_session`, `since`, `limit`. |
+
+**Tools** (`tools/call`):
 
 | Tool | Effect |
 |---|---|
-| `whoami` | This session's `{ session_id, nickname, pid, cwd }`. |
-| `roster` | All live sessions with nickname, cwd, git branch, current task, last activity. |
-| `send_message(to, body)` | Send to a peer by `session_id` (look it up in `roster` — nicknames are display-only). |
-| `set_status(text)` | Update this session's free-form status text on the roster. |
+| `send_message(to, body)` | Direct-send to a peer by `session_id` (look it up in `marshal://roster`). |
+| `broadcast(to_room, body)` | Fan-out to every member of a room (`everyone`, `host:*`, `op:*`, `project:*`, or an ad-hoc room). |
+| `join_room(room)` / `leave_room(room)` | Create/join or leave an ad-hoc room. |
+| `set_status(text)` | Update this session's free-form status (the `current_task` field on the roster). |
+| `ack_messages(message_ids)` | Mark message ids read for this session. |
 
 A peer's `send_message` lands in your session as a `notifications/claude/channel` event, which Claude Code surfaces inline. Delivery is fail-loud: if the recipient session id doesn't exist, is offline, or has a stale client binding, the daemon returns a `CommandError` with a clear reason — your message is never silently dropped.
 
@@ -113,7 +125,7 @@ Claude Code ─┤                            │                              (
              └─ marshal-shim (stdio MCP) ─┘
 ```
 
-- **`marshal-daemon`** owns the live roster and the event log under `~/.local/state/marshal/events.jsonl`. One daemon per machine. Run it under your favorite supervisor (or just `marshal-daemon &` in a terminal).
+- **`marshal-daemon`** owns the live roster and the event log under `~/.local/state/marshal/events.jsonl`. One daemon serves every session that points its shim at it (local or remote). Run it under your favorite supervisor (or just `marshal-daemon &` in a terminal).
 - **`marshal-shim`** is the per-session stdio MCP server Claude Code spawns. It announces the session to the daemon on connect, watches for inbound messages, and forwards them onto stdout as channel notifications.
 - **`marshal-tui`** (optional) is a live ratatui dashboard of the roster + recent messages.
 
