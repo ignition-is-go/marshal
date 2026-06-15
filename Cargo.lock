@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-daemon"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1874,7 +1874,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-entities"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "chrono",
  "log",
@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-shim"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-tui"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-web"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
