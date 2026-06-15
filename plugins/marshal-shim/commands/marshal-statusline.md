@@ -1,9 +1,9 @@
 ---
-description: Configure Claude Code's statusLine to show this session's marshal nickname.
+description: Configure Claude Code's statusLine to show this session's id, host, and cwd.
 allowed-tools: Bash, Read, Edit, Write
 ---
 
-Wire up the user's Claude Code `statusLine` to invoke `marshal-shim statusline` so the marshal nickname appears in the footer. The renderer is a subcommand of the shim binary, so the same command string works on every platform — no path resolution, no platform branching.
+Wire up the user's Claude Code `statusLine` to invoke `marshal-shim statusline` so the session prefix `[user@host dir sid8]` appears in the footer. The renderer is a subcommand of the shim binary, so the same command string works on every platform — no path resolution, no platform branching.
 
 Do this in order:
 
