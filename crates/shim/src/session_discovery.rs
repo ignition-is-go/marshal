@@ -61,6 +61,18 @@ use marshal_entities::SessionId;
 
 const MAX_WAIT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Claude Code exports the canonical session id into the environment of
+/// every process it spawns — MCP servers (us) and hooks alike. It is
+/// fixed at exec time, so it is present from the shim's very first
+/// instant with no file, poll, or parent-PID heuristic involved. This is
+/// the primary, race-free discovery path; the `~/.claude` file tiers in
+/// `resolve_under` are fallback for older Claude builds that predate this
+/// var or sandboxes that strip it. (Unlike the daemon-address value —
+/// which we deliberately read from a config file because a stale parent's
+/// env can shadow per-host config — this var carries no staleness risk:
+/// each Claude process sets it to ITS OWN session id for ITS OWN
+/// children, so sibling sessions in one cwd are disambiguated for free.)
+const SESSION_ID_ENV: &str = "CLAUDE_CODE_SESSION_ID";
 /// Cap lines read per candidate while looking for the cwd marker. The
 /// `"cwd":` field shows up within the first ~dozen lines of every real
 /// transcript; 200 is well above the worst case and caps I/O if we're
@@ -75,6 +87,16 @@ const MAX_HEADER_LINES: usize = 200;
 const PARENT_CORRELATION_WINDOW: Duration = Duration::from_secs(30);
 
 pub fn resolve(cwd: &str) -> Option<SessionId> {
+    // Primary path: the session id Claude handed us in the environment.
+    // Race-free and exact — short-circuits the entire file/heuristic
+    // stack below.
+    if let Some(sid) = sid_from_env(std::env::var(SESSION_ID_ENV).ok()) {
+        log::info!(
+            "[marshal-shim] session discovery: {SESSION_ID_ENV} → session_id {}",
+            sid.0
+        );
+        return Some(sid);
+    }
     let home = home_dir()?;
     resolve_under(&home, cwd, MAX_WAIT, real_parent_info)
 }
@@ -107,40 +129,54 @@ where
         parent.cmdline.len()
     );
 
-    // Tier 0: Claude's own per-PID session manifest. Authoritative.
-    if let Some(sid) = sid_from_claude_sessions_file(home, parent.pid) {
-        log::info!(
-            "[marshal-shim] session discovery: ~/.claude/sessions/{}.json → session_id {}",
-            parent.pid,
-            sid.0
-        );
-        return Some(sid);
-    }
-
-    // Tier 1: parent cmdline parse — authoritative, no polling needed
-    // (cmdline is immutable after exec).
-    if let Some(stem) = sid_from_cmdline(&parent.cmdline) {
-        log::info!(
-            "[marshal-shim] session discovery: parent cmdline → session_id {}",
-            stem
-        );
-        let _ = verify_cwd_for_session_id(&projects, &stem, cwd);
-        return Some(SessionId(Arc::from(stem.as_str())));
-    }
-
-    // Tier 2: ctime correlation. Polls because the .jsonl may not exist
-    // yet at the moment Claude spawns the shim (race between fork and
-    // first write into the transcript).
+    // All three tiers are retried inside one poll loop. This is the crux
+    // of fresh-launch robustness: on a brand-new session Claude writes
+    // both the per-PID manifest (tier 0) and the transcript .jsonl
+    // (tier 2) around the same instant it spawns this shim as an MCP
+    // child — so a single up-front read of either can lose the race by a
+    // few hundred ms. Previously tiers 0 and 1 were checked exactly once
+    // before the loop; a near-simultaneous tier-0 manifest write was
+    // missed, and the shim fell through to tier-2 ctime correlation,
+    // which on a no-prompt-yet fresh session has no .jsonl to match and
+    // expired → `resolve()` returned None → the shim bailed and the MCP
+    // connection dropped. `/mcp reconnect` "fixed" it only because by
+    // then the manifest was long on disk. Polling the authoritative
+    // tiers converges the moment the manifest lands (sub-second), with
+    // no dependency on the transcript existing.
     let cwd_norm = normalize_cwd(cwd);
     let deadline = Instant::now() + max_wait;
     loop {
+        // Tier 0: Claude's own per-PID session manifest. Authoritative.
+        if let Some(sid) = sid_from_claude_sessions_file(home, parent.pid) {
+            log::info!(
+                "[marshal-shim] session discovery: ~/.claude/sessions/{}.json → session_id {}",
+                parent.pid,
+                sid.0
+            );
+            return Some(sid);
+        }
+
+        // Tier 1: parent cmdline parse — authoritative. Immutable after
+        // exec, so it can only ever succeed on the first pass, but it's
+        // cheap to recheck and keeps the precedence order explicit.
+        if let Some(stem) = sid_from_cmdline(&parent.cmdline) {
+            log::info!(
+                "[marshal-shim] session discovery: parent cmdline → session_id {}",
+                stem
+            );
+            let _ = verify_cwd_for_session_id(&projects, &stem, cwd);
+            return Some(SessionId(Arc::from(stem.as_str())));
+        }
+
+        // Tier 2: ctime correlation against the per-session transcript.
         if let Some(id) = scan_by_parent_correlation(&projects, &cwd_norm, &parent) {
             return Some(id);
         }
+
         if Instant::now() >= deadline {
             log::warn!(
-                "[marshal-shim] session discovery: no .jsonl matched parent (pid={}) start \
-                 time within {:?}; giving up",
+                "[marshal-shim] session discovery: no manifest, cmdline id, or .jsonl matched \
+                 parent (pid={}) within {:?}; giving up",
                 parent.pid,
                 max_wait
             );
@@ -186,6 +222,21 @@ fn sid_from_claude_sessions_file(home: &Path, parent_pid: u32) -> Option<Session
         return None;
     }
     Some(SessionId(Arc::from(sid)))
+}
+
+/// Extract a `SessionId` from the raw `CLAUDE_CODE_SESSION_ID` value.
+/// Returns None for an absent or whitespace-only value so we fall
+/// through to the file-based tiers. Pure (takes the value rather than
+/// reading the env) so it's testable without mutating process env —
+/// which matters because the test runner is itself a Claude child and
+/// has this var set.
+fn sid_from_env(val: Option<String>) -> Option<SessionId> {
+    let v = val?;
+    let v = v.trim();
+    if v.is_empty() {
+        return None;
+    }
+    Some(SessionId(Arc::from(v)))
 }
 
 fn sid_from_cmdline(args: &[String]) -> Option<String> {
@@ -639,6 +690,61 @@ mod tests {
             move || Some(clone_parent(&parent)),
         );
         assert_eq!(got.as_ref().map(|s| s.0.as_ref()), Some("from-cmdline"));
+    }
+
+    #[test]
+    fn tier0_manifest_written_after_start_is_polled() {
+        // Fresh-launch race: Claude writes ~/.claude/sessions/<pid>.json a
+        // beat AFTER it spawns this shim. The single up-front read that
+        // used to gate tiers 0/1 missed it and fell through to tier-2
+        // ctime correlation, which on a no-prompt-yet session has no
+        // .jsonl to match → None → shim bails → MCP disconnect. With the
+        // authoritative tiers folded into the poll loop, discovery must
+        // converge once the manifest lands. No .jsonl is ever created
+        // here, so this only passes if tier 0 is genuinely polled.
+        let tmp = make_tempdir();
+        let home = tmp.join("home");
+        let sessions = home.join(".claude").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(home.join(".claude").join("projects").join("-tmp-race")).unwrap();
+
+        let manifest = sessions.join("4242.json");
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            std::fs::write(
+                &manifest,
+                r#"{"pid":4242,"sessionId":"raced-into-existence","cwd":"/tmp/race"}"#,
+            )
+            .unwrap();
+        });
+
+        let parent = ParentInfo {
+            pid: 4242,
+            started_at: None,
+            cmdline: Vec::new(),
+        };
+        let got = resolve_under(&home, "/tmp/race", Duration::from_secs(5), move || {
+            Some(clone_parent(&parent))
+        });
+        assert_eq!(
+            got.as_ref().map(|s| s.0.as_ref()),
+            Some("raced-into-existence")
+        );
+    }
+
+    // ── Primary: CLAUDE_CODE_SESSION_ID env var ───────────────────────
+
+    #[test]
+    fn env_var_value_is_used_verbatim_and_trimmed() {
+        assert_eq!(
+            sid_from_env(Some("  abc-123  ".to_string()))
+                .as_ref()
+                .map(|s| s.0.as_ref()),
+            Some("abc-123")
+        );
+        assert_eq!(sid_from_env(None), None);
+        assert_eq!(sid_from_env(Some("   ".to_string())), None);
+        assert_eq!(sid_from_env(Some(String::new())), None);
     }
 
     // ── Tier 1: cmdline parse ────────────────────────────────────────
