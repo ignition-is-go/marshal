@@ -26,3 +26,23 @@ jobs:
       - run: cargo flux run check
       - run: cargo flux run lint
       - run: cargo flux run test
+
+  # marshal-shim ships to Windows (ue_plugindev) as a cross-compiled
+  # x86_64-pc-windows-gnu binary, but its Windows code is `#[cfg(windows)]`
+  # and so is invisible to the Linux `check` job above. #19 silently
+  # dropped the `windows-sys` dependency and broke the Windows build for
+  # weeks because nothing in CI ever cross-compiled it. This job does, on
+  # every PR, so a Windows-only break fails the check instead of the next
+  # manual cross-build.
+  windows-cross-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mingw-w64 cross linker
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Cross-compile the Windows shim
+        run: cargo check -p marshal-shim --target x86_64-pc-windows-gnu

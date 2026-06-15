@@ -31,3 +31,13 @@ gethostname = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Used by session_discovery.rs's #[cfg(windows)] parent-process lookup
+# (toolhelp snapshot for parent PID, GetProcessTimes for start time).
+# Removed by mistake in #19; restored so the Windows build compiles.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
