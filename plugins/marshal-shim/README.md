@@ -1,6 +1,6 @@
 # marshal-shim plugin
 
-Connects this Claude Code session to the [marshal](https://github.com/ignition-is-go/marshal) coordination daemon so it can see and message other live Claude sessions on the same machine.
+Connects this Claude Code session to the [marshal](https://github.com/ignition-is-go/marshal) coordination daemon so it can see and message other live Claude sessions — on the same machine or across a network.
 
 ## Prerequisites
 
@@ -20,18 +20,28 @@ The plugin only registers the stdio MCP entry — it does not spawn the daemon f
 
 ## What you get
 
-After install, every Claude Code session in this directory has four MCP tools:
+Reads are MCP **resources**; writes are MCP **tools**. Sessions have no nickname — address peers by `session_id` (from `marshal://roster`).
 
-- `whoami` — your session id, nickname, pid, cwd
-- `roster` — every live session the daemon currently sees
-- `send_message` — send to a peer by `session_id` (look the id up in `roster` first; nicknames are display-only)
-- `set_status` — set the free-form `current_task` text shown on the roster
+Resources (`resources/read`):
+
+- `marshal://whoami` — your `{ session_id, pid, cwd, operator, host }`
+- `marshal://roster` — every live session the daemon currently sees
+- `marshal://rooms` — every room and its members
+- `marshal://messages` — message history (`inbox`, `sent`, `unread`, `room`, `from`, `to_session`, `since`, `limit`)
+
+Tools (`tools/call`):
+
+- `send_message(to, body)` — send to a peer by `session_id`
+- `broadcast(to_room, body)` — fan-out to every member of a room
+- `join_room(room)` / `leave_room(room)` — create/join or leave an ad-hoc room
+- `set_status(text)` — set the free-form `current_task` text shown on the roster
+- `ack_messages(message_ids)` — mark messages read for this session
 
 Peer messages arrive as `notifications/claude/channel` events that surface in your transcript as `<channel>` blocks.
 
-## Optional: show the nickname in your status line
+## Optional: show the session in your status line
 
-The shim writes its current nickname to a small state file keyed by its parent PID. The `marshal-shim statusline` subcommand reads that file and renders `[user@host dir] nickname` in your Claude Code footer so you can tell sessions apart at a glance.
+The `marshal-shim statusline` subcommand reads Claude Code's status payload from stdin (plus the local host and user) and renders `[user@host dir sid8]` in your footer — where `sid8` is your `session_id[:8]` — so you can tell sessions apart at a glance.
 
 Add this block to any `settings.json` Claude Code reads — user-global (`~/.claude/settings.json` or `%USERPROFILE%\.claude\settings.json`) or project-level (`<project>/.claude/settings.json`):
 
