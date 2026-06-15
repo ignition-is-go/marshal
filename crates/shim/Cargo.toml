@@ -12,10 +12,6 @@ categories = ["network-programming", "command-line-utilities"]
 name = "marshal-shim"
 path = "src/main.rs"
 
-[[bin]]
-name = "marshal-statusline"
-path = "src/bin/marshal-statusline.rs"
-
 [package.metadata.flux]
 tasks = ["check", "build", "test", "lint", "publish"]
 
