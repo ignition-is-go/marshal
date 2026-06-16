@@ -10,6 +10,7 @@
 //! 4. serves stdio MCP with a curated tool surface backed by the MykoClient.
 
 mod activity;
+mod channels;
 mod mcp;
 mod session_discovery;
 mod statusline;
@@ -158,6 +159,16 @@ async fn serve() -> Result<()> {
              (cwd={cwd}); refusing to start under a synthetic id"
         );
     };
+
+    // Record whether this session can actually RECEIVE live peer messages —
+    // i.e. whether claude was launched with the channels flag. There is no
+    // in-band MCP signal for this, so it's read from the parent cmdline and
+    // written to a per-session marker the statusline surfaces as RECV-OFF.
+    // Background + blocking (Windows shells out to Get-CimInstance once).
+    {
+        let sid = session_id.0.to_string();
+        tokio::task::spawn_blocking(move || channels::record(&sid));
+    }
 
     let session = Session {
         id: session_id.clone(),

@@ -515,7 +515,7 @@ fn real_parent_info() -> Option<ParentInfo> {
 }
 
 #[cfg(windows)]
-fn windows_parent_pid() -> Option<u32> {
+pub(crate) fn windows_parent_pid() -> Option<u32> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,

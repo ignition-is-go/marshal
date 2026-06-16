@@ -62,16 +62,27 @@ pub fn render() {
 
     let sid8 = &session_id[..session_id.len().min(8)];
 
-    println!("{}", format_prefix(&user, host, dir, sid8));
+    // Warn when this session can't receive live peer messages (claude launched
+    // without the channels flag). The shim records this per-session; absence of
+    // a marker is treated as "unknown" → no false alarm.
+    let recv_off = !session_id.is_empty() && crate::channels::recv_off(session_id);
+
+    println!("{}", format_prefix(&user, host, dir, sid8, recv_off));
 }
 
 /// Render the statusline prefix. Pure so the formatting contract is
-/// testable without touching stdin / env / gethostname.
-fn format_prefix(user: &str, host: &str, dir: &str, sid8: &str) -> String {
-    if sid8.is_empty() {
+/// testable without touching stdin / env / gethostname. `recv_off` appends a
+/// RECV-OFF warning when this session can't receive live peer messages.
+fn format_prefix(user: &str, host: &str, dir: &str, sid8: &str, recv_off: bool) -> String {
+    let base = if sid8.is_empty() {
         format!("[{user}@{host} {dir}]")
     } else {
         format!("[{user}@{host} {dir} {sid8}]")
+    };
+    if recv_off {
+        format!("{base} ⚠ marshal RECV-OFF")
+    } else {
+        base
     }
 }
 
@@ -90,7 +101,7 @@ mod tests {
     #[test]
     fn prefix_includes_sid_when_present() {
         assert_eq!(
-            format_prefix("max", "pulse-admin", "pulse-deploy", "5846bf98"),
+            format_prefix("max", "pulse-admin", "pulse-deploy", "5846bf98", false),
             "[max@pulse-admin pulse-deploy 5846bf98]"
         );
     }
@@ -98,8 +109,16 @@ mod tests {
     #[test]
     fn prefix_omits_sid_when_empty() {
         assert_eq!(
-            format_prefix("max", "pulse-admin", "pulse-deploy", ""),
+            format_prefix("max", "pulse-admin", "pulse-deploy", "", false),
             "[max@pulse-admin pulse-deploy]"
+        );
+    }
+
+    #[test]
+    fn recv_off_appends_warning() {
+        assert_eq!(
+            format_prefix("max", "pulse-admin", "pulse-deploy", "5846bf98", true),
+            "[max@pulse-admin pulse-deploy 5846bf98] ⚠ marshal RECV-OFF"
         );
     }
 }
