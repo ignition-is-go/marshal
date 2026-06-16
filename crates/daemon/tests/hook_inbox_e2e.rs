@@ -1,0 +1,161 @@
+//! End-to-end test of the `/hook/*` HTTP listener — the flag-independent
+//! inbox-delivery path. A stored message MUST surface in the
+//! `<marshal_inbox>` block returned by `POST /hook/prompt-submit`.
+//!
+//! This guards the daemon side of the path whose *deploy* misconfiguration
+//! (hook listener on the wrong port / bound to loopback) silently broke
+//! message receipt. The command-layer tests cover persistence; this one
+//! drives the actual HTTP listener so a regression in `http_listener` /
+//! `hooks::dispatch` / `surface_unread` fails CI.
+
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use marshal_entities::{SendMessage, Session, SessionId};
+use myko::{
+    command::{CommandContext, CommandHandler},
+    entities::client::ClientId,
+    request::RequestContext,
+    server::{CellServerCtx, Persister},
+    wire::{MEvent, MEventType},
+};
+use myko_server::{BlackholePersister, CellServer};
+use uuid::Uuid;
+
+fn pick_free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("pick free port");
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+fn session(id: &str, client_id: Option<&str>) -> Session {
+    Session {
+        id: SessionId(Arc::from(id)),
+        client_id: client_id.map(|c| ClientId(Arc::from(c))),
+        pid: 0,
+        cwd: "/repo".into(),
+        git_branch: None,
+        current_task: None,
+        connected_at: 100,
+        last_activity_at: None,
+        last_tool: None,
+        last_tool_at: None,
+        operator: None,
+        host: None,
+        project: None,
+    }
+}
+
+fn set_session(ctx: &CellServerCtx, s: &Session) {
+    let event = MEvent::from_item(s, MEventType::SET, &Uuid::new_v4().to_string());
+    ctx.apply_event_batch(vec![event]).expect("apply Session SET");
+}
+
+fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
+    let req = RequestContext::new(
+        Arc::<str>::from(Uuid::new_v4().to_string().as_str()),
+        caller_client_id.map(Arc::<str>::from),
+        vec![Arc::<str>::from("test")],
+        Uuid::new_v4(),
+        chrono::Utc::now().to_rfc3339(),
+    );
+    CommandContext::new(
+        Arc::<str>::from("SendMessage"),
+        Arc::new(req),
+        Arc::new(ctx.clone()),
+    )
+}
+
+/// Raw HTTP/1.1 POST (the listener replies `Connection: close`); returns the
+/// response body.
+fn http_post(addr: SocketAddr, target: &str, body: &str) -> String {
+    let mut s = TcpStream::connect(addr).expect("connect hook listener");
+    let req = format!(
+        "POST {target} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).expect("write request");
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).expect("read response");
+    resp.split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn wait_listening(addr: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("hook listener never came up on {addr}");
+}
+
+#[test]
+fn stored_message_surfaces_via_prompt_submit_hook() {
+    marshal_entities::link();
+    daemon::link();
+
+    let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
+    let server = CellServer::builder()
+        .with_default_persister(blackhole)
+        .build();
+    let ctx = server.ctx();
+    let server: &'static CellServer = Box::leak(Box::new(server));
+    let _ = server;
+
+    // sender + recipient; store a message for the recipient via the real command.
+    set_session(&ctx, &session("sender", Some("c-sender")));
+    set_session(&ctx, &session("recipient", None));
+    SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "HOOK-E2E-PROBE-marker".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists");
+
+    // bring up the real /hook/* HTTP listener on a free port, sharing ctx.
+    let port = pick_free_port();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let listener_ctx = ctx.clone();
+    thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async move {
+            let _ = daemon::http_listener::run(addr, Arc::new(listener_ctx)).await;
+        });
+    });
+    wait_listening(addr);
+
+    // the recipient's prompt-submit hook must surface the stored message.
+    let body = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
+    assert!(
+        body.contains("HOOK-E2E-PROBE-marker"),
+        "message did not surface via /hook/prompt-submit; got: {body:?}"
+    );
+    assert!(
+        body.contains("<marshal_inbox"),
+        "expected a <marshal_inbox> block; got: {body:?}"
+    );
+
+    // a wrong /hook path must 404 (the misroute that caused the outage).
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.write_all(
+        b"POST /hook/does-not-exist HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    )
+    .unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    assert!(raw.starts_with("HTTP/1.1 404"), "unknown hook path must 404; got: {raw:?}");
+}
