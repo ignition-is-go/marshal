@@ -52,7 +52,8 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
 
 fn set_session(ctx: &CellServerCtx, s: &Session) {
     let event = MEvent::from_item(s, MEventType::SET, &Uuid::new_v4().to_string());
-    ctx.apply_event_batch(vec![event]).expect("apply Session SET");
+    ctx.apply_event_batch(vec![event])
+        .expect("apply Session SET");
 }
 
 fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
@@ -157,5 +158,8 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     .unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();
-    assert!(raw.starts_with("HTTP/1.1 404"), "unknown hook path must 404; got: {raw:?}");
+    assert!(
+        raw.starts_with("HTTP/1.1 404"),
+        "unknown hook path must 404; got: {raw:?}"
+    );
 }
