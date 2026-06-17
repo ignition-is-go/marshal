@@ -103,7 +103,9 @@ fn config_dir(home: &Path) -> PathBuf {
 }
 
 fn cache_path(home: &Path, ppid: u32) -> PathBuf {
-    config_dir(home).join("channels-cache").join(ppid.to_string())
+    config_dir(home)
+        .join("channels-cache")
+        .join(ppid.to_string())
 }
 
 /// Read the cached flag for `ppid` iff it was recorded against the same
