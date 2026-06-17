@@ -67,9 +67,12 @@ pub fn render() {
     let branch = git_branch(&cwd);
 
     // Warn when this session can't receive live peer messages (claude launched
-    // without the channels flag). The shim records this per-session; absence of
-    // a marker is treated as "unknown" → no false alarm.
-    let recv_off = !session_id.is_empty() && crate::channels::recv_off(session_id);
+    // without the channels flag). Detected LIVE from the statusline's own
+    // parent at render time — the statusline always renders after a resume's
+    // bg-pty-host relaunch has settled, so the parent carries the real flag
+    // state. This is what makes the warning correct on resumed sessions
+    // without a manual `/mcp reconnect` (see channels.rs module docs).
+    let recv_off = crate::channels::recv_off_live();
 
     println!(
         "{}",
