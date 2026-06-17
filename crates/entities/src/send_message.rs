@@ -56,10 +56,13 @@ pub struct SendMessageResult {
     /// disambiguate by host+cwd in edge cases the client couldn't see).
     pub to_session_id: SessionId,
     pub sent_at: i64,
-    /// `true` if the recipient had a live WS client and the notification
-    /// was pushed into its session right now; `false` if the recipient is
-    /// between turns and will pick the message up via its next hook. Both
-    /// are success — the message is always persisted.
+    /// `true` only if the recipient had a live WS client AND its session can
+    /// actually render channel pushes (claude launched with
+    /// `--dangerously-load-development-channels`). `false` if the recipient is
+    /// offline OR channels-off — in both cases the message was NOT shown live
+    /// and is picked up via the next hook (inbox). Both are success — the
+    /// message is always persisted. (channels-off was previously mis-reported
+    /// as `true`, so a sender thought a dropped push had landed.)
     #[serde(default)]
     pub delivered_live: bool,
 }
@@ -107,11 +110,17 @@ impl CommandHandler for SendMessage {
         // connection right now. Delivery is decoupled from acceptance.
         ctx.emit_set(&msg)?;
 
-        // Best-effort live push: if the recipient is a WS shim with a live
-        // client, surface the message in its session immediately. Offline
-        // recipients simply pull it next turn — not an error.
+        // Best-effort live push: only when the recipient has a live WS client
+        // AND its session can actually render channel pushes. A flag-off
+        // recipient (channels_enabled == Some(false)) has a live client but
+        // Claude silently drops `notifications/claude/channel`, so a push is a
+        // no-op the daemon would otherwise mis-report as delivered_live=true.
+        // Treat it as offline: skip the push, report delivered_live=false, and
+        // let it pull from the inbox next turn. `None` (legacy shim that
+        // doesn't report channel state) keeps prior best-effort behavior.
+        let recipient_can_render = recipient.channels_enabled != Some(false);
         let delivered_live = match recipient.client_id.as_ref() {
-            Some(cid) => push_to_client(
+            Some(cid) if recipient_can_render => push_to_client(
                 cid.0.as_ref(),
                 format!(
                     "marshal: new message from session {}: {}",
@@ -127,7 +136,7 @@ impl CommandHandler for SendMessage {
                     "sent_at": now,
                 }),
             ),
-            None => false,
+            _ => false,
         };
 
         Ok(SendMessageResult {

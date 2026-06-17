@@ -58,6 +58,7 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
         operator: None,
         host: None,
         project: None,
+        channels_enabled: None,
     }
 }
 

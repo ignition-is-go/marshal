@@ -128,6 +128,7 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> S
             operator,
             host,
             project,
+            channels_enabled: None,
         },
     };
     let _ = cmd_ctx.emit_set(&session);
@@ -194,6 +195,7 @@ fn handle_session_end(body: &[u8], ctx: &Arc<CellServerCtx>) -> String {
         operator: None,
         host: None,
         project: None,
+        channels_enabled: None,
     };
     let _ = cmd_ctx.emit_del(&stub);
     String::new()
