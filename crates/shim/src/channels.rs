@@ -35,19 +35,22 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 /// Shim startup: detect this session's receive capability from the parent
-/// cmdline and write the marker. Best-effort; never fatal.
-pub fn record(session_id: &str) {
-    let Some(home) = home_dir() else { return };
+/// cmdline, write the statusline marker, and return it so the caller can
+/// report it to the daemon on the Session. Best-effort; never fatal.
+pub fn record(session_id: &str) -> bool {
     let enabled = channels_enabled_in(&parent_cmdline());
     if !enabled {
         log::warn!(
             "[marshal-shim] channels NOT loaded for this session — live peer \
              messages cannot be received (launch needs \
              --dangerously-load-development-channels server:marshal). statusline \
-             will show RECV-OFF."
+             will show RECV-OFF; SendMessage will queue to inbox, not live."
         );
     }
-    write_marker(&home, session_id, enabled);
+    if let Some(home) = home_dir() {
+        write_marker(&home, session_id, enabled);
+    }
+    enabled
 }
 
 /// statusline: true when this session is confirmed unable to receive live

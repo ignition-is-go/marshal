@@ -63,6 +63,7 @@ mod tests {
             operator: None,
             host: None,
             project: None,
+            channels_enabled: None,
         };
         let json = serde_json::to_value(&s).unwrap();
         // camelCase on the wire (matches the rest of the codebase).
@@ -94,6 +95,7 @@ mod tests {
                 os: "linux".into(),
                 arch: "x86_64".into(),
             }),
+            channels_enabled: None,
         };
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["operator"], "trevor");
@@ -190,6 +192,17 @@ pub struct Session {
     /// isn't inside a git repo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+
+    /// Whether this session can receive LIVE channel pushes — i.e. its
+    /// claude was launched with `--dangerously-load-development-channels
+    /// …marshal`. The shim resolves it from the parent process at startup;
+    /// the daemon can't see it (it's a recipient-host launch detail).
+    /// `None` = unknown (legacy shim that doesn't report it). `SendMessage`
+    /// uses it to report `delivered_live` HONESTLY: a live WS client with
+    /// channels OFF still can't render a push, so the message is queued to
+    /// the inbox (delivered_live = false) rather than claimed as live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels_enabled: Option<bool>,
 }
 
 /// Resolve the session a write command is acting *as*.

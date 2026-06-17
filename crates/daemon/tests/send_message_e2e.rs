@@ -123,6 +123,7 @@ fn make_session(id: &str) -> Session {
         operator: None,
         host: None,
         project: None,
+        channels_enabled: None,
     }
 }
 
@@ -261,6 +262,105 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         message_count(&server.ctx),
         1,
         "Message must be persisted on successful delivery",
+    );
+
+    server.shutdown();
+}
+
+/// Regression guard for the "delivered_live lied" outage: a recipient with a
+/// LIVE WS client but channels OFF (claude launched without
+/// `--dangerously-load-development-channels`) silently drops channel pushes.
+/// SendMessage MUST report `delivered_live == false` (queued to inbox), NOT
+/// claim a live delivery that the recipient never renders — and must NOT emit
+/// a push. The message still persists so the recipient pulls it next turn.
+#[test]
+fn live_client_with_channels_off_is_not_delivered_live() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    marshal_entities::link();
+    daemon::link();
+
+    let port = pick_free_port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let addr = format!("ws://{bind}");
+    let server = spawn_server(bind);
+
+    let client_a = MykoClient::new();
+    client_a.set_protocol(MykoProtocol::JSON);
+    let client_b = MykoClient::new();
+    client_b.set_protocol(MykoProtocol::JSON);
+
+    // B watches for any NotifyChannel push — there must be NONE.
+    let received: Arc<Mutex<Option<NotifyChannel>>> = Arc::new(Mutex::new(None));
+    let received_for_handler = Arc::clone(&received);
+    let notify_guard = client_b.on_command::<NotifyChannel, _>(move |cmd, _responder| {
+        *received_for_handler.lock().expect("notify mutex") = Some(cmd);
+    });
+    Box::leak(Box::new(notify_guard));
+
+    let _b_sessions = client_b.watch_query::<GetAllSessions>(GetAllSessions {});
+    let _a_sessions = client_a.watch_query::<GetAllSessions>(GetAllSessions {});
+
+    client_a.set_address(Some(addr.clone()));
+    client_b.set_address(Some(addr.clone()));
+    {
+        let s = client_a.connection_status();
+        wait_for("A connected", move || {
+            matches!(s.get(), ConnectionStatus::Connected(_))
+        });
+    }
+    {
+        let s = client_b.connection_status();
+        wait_for("B connected", move || {
+            matches!(s.get(), ConnectionStatus::Connected(_))
+        });
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    // B announces a session that is LIVE but channels-OFF.
+    let mut b = make_session("sess-bravo-off");
+    b.channels_enabled = Some(false);
+    send_session_set(&client_a, &make_session("sess-alpha"));
+    send_session_set(&client_b, &b);
+    {
+        let cell = _a_sessions.clone();
+        wait_for("both sessions visible with client_ids", move || {
+            let s = cell.get();
+            let a = s.iter().find(|x| x.id.0.as_ref() == "sess-alpha");
+            let b = s.iter().find(|x| x.id.0.as_ref() == "sess-bravo-off");
+            matches!((a, b), (Some(a), Some(b)) if a.client_id.is_some() && b.client_id.is_some())
+        });
+    }
+
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from("sess-bravo-off")),
+        body: "to a flag-off live client".into(),
+        as_session: None,
+    };
+    let response_cell = client_a.send_command::<SendMessage, SendMessageResult>(&cmd);
+    {
+        let cell = response_cell.clone();
+        wait_for("send_command response", move || {
+            matches!(cell.get(), Some(Ok(_)))
+        });
+    }
+    let result = response_cell.get().expect("response").expect("ok");
+
+    // The point of the fix: a live-but-flag-off client is NOT a live delivery.
+    assert!(
+        !result.delivered_live,
+        "channels-off recipient must report delivered_live=false (queued to inbox), not a phantom live delivery"
+    );
+    // No push should have been emitted (it'd be dropped anyway).
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        received.lock().unwrap().is_none(),
+        "no channel push should be sent to a channels-off recipient"
+    );
+    // But it MUST persist so the recipient pulls it from the inbox next turn.
+    assert_eq!(
+        message_count(&server.ctx),
+        1,
+        "message must persist for inbox pull even when not delivered live",
     );
 
     server.shutdown();

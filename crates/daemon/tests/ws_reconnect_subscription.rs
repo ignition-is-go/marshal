@@ -110,6 +110,7 @@ fn session_set_event(id: &str) -> MEvent {
         operator: None,
         host: None,
         project: None,
+        channels_enabled: None,
     };
     MEvent::from_item(&session, MEventType::SET, &uuid::Uuid::new_v4().to_string())
 }
