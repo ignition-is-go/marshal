@@ -1,37 +1,31 @@
-//! Detect whether a session can actually *receive* live peer messages —
-//! i.e. whether the parent `claude` was launched with
-//! `--dangerously-load-development-channels …marshal…`.
+//! Two concerns live here:
 //!
-//! Why this is needed: there is no in-band MCP signal for it. Claude Code
-//! never advertises a channel capability back to the server, and
-//! `notifications/claude/channel` is fire-and-forget — if the session didn't
-//! load us as a channel, our pushes are dropped silently with no error. So a
-//! `send_message` can report "delivered" while the recipient sees nothing.
+//! 1. [`detect`] — does THIS session have the live channel loaded (parent
+//!    launched with `--dangerously-load-development-channels …marshal…`)?
+//!    Reported to the daemon on the Session so `SendMessage` can set
+//!    `delivered_live` honestly. There is no in-band MCP signal for it, so it
+//!    is read from the parent's command line.
 //!
-//! The one reliable source is the parent's command line (the flag is in its
-//! argv). We read it via supported OS facilities — `/proc/<ppid>/cmdline` on
-//! Linux, `Get-CimInstance Win32_Process` on Windows — NOT by poking process
-//! memory.
-//!
-//! ## Detect LIVE, don't trust a startup marker
-//!
-//! An earlier design had the shim detect once at startup and write a
-//! per-session marker the statusline read back. That raced on **resume**:
-//! when Claude resumes/forks a session it relaunches itself through its
-//! `--bg-pty-host` session manager, and the shim — spawned in the middle of
-//! that relaunch — read a not-yet-settled parent and recorded a false
-//! "channels-off", so the statusline showed `RECV-OFF` even though the flag
-//! was present. A manual `/mcp reconnect marshal` "fixed" it only because the
-//! re-spawned shim detected against the now-settled parent.
-//!
-//! The statusline renders *continuously, after* the relaunch has settled, so
-//! its parent always carries the real flag state. Detecting LIVE off the
-//! statusline's own parent at render time is therefore race-free and needs no
-//! reconnect. On Windows the parent-cmdline read shells out, so the result is
-//! cached per `(ppid, start-time)` — stable for a process's lifetime,
-//! invalidated on pid recycle — to keep the per-render hot path cheap.
+//! 2. [`marshal_reachable`] — can this session receive AT ALL? This is what
+//!    the statusline warns on. Delivery has TWO paths: the live channel (needs
+//!    the flag) and the flag-independent INBOX (the `UserPromptSubmit` hook
+//!    POSTs to the daemon and surfaces `<marshal_inbox>` on the next prompt).
+//!    The inbox works for any session whose host can reach the daemon —
+//!    including VS Code's flagless `claude`. So "communication is not possible"
+//!    means the daemon is UNREACHABLE, NOT merely that the live flag is absent.
+//!    Warning on flag-absence alone false-alarms every VS Code session even
+//!    though inbox delivery is working; keying on reachability is both correct
+//!    and matches "warn when communication is not possible".
 
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How long the statusline's reachability probe waits for a TCP connect. When
+/// the daemon is up (the common case) this returns in a few ms on the mesh;
+/// the timeout only bites when the daemon is actually down — which is exactly
+/// when we want to warn, so a brief render stall then is acceptable.
+const REACHABILITY_TIMEOUT: Duration = Duration::from_millis(600);
 
 /// True iff `parent_cmdline` shows marshal channels were loaded. Pure, so the
 /// matching contract is unit-testable without a parent process.
@@ -40,12 +34,11 @@ pub fn channels_enabled_in(parent_cmdline: &[String]) -> bool {
     joined.contains("--dangerously-load-development-channels") && joined.contains("marshal")
 }
 
-/// Detect this process's channel-receive capability from its PARENT's command
-/// line. `None` = the parent cmdline couldn't be read (treat as unknown — no
-/// warning, and a legacy/None Session.channels_enabled); `Some(true|false)` =
-/// channels confirmed on|off. Called by the shim at startup (to report
-/// `channels_enabled` to the daemon) and, indirectly via [`recv_off_live`], by
-/// the statusline on every render.
+/// Detect this process's LIVE channel capability from its PARENT's command
+/// line. `None` = parent cmdline unreadable (unknown → legacy/None Session);
+/// `Some(true|false)` = live channel on|off. Used by the shim at startup to
+/// report `channels_enabled` to the daemon for `delivered_live` honesty. NOT
+/// used for the statusline warning — see [`marshal_reachable`].
 pub fn detect() -> Option<bool> {
     let cmd = parent_cmdline();
     if cmd.is_empty() {
@@ -54,35 +47,80 @@ pub fn detect() -> Option<bool> {
     Some(channels_enabled_in(&cmd))
 }
 
-/// statusline: true iff this session is CONFIRMED unable to receive live peer
-/// messages, detected LIVE from the parent at render time (see module docs for
-/// why live, not a marker). Unknown (parent unreadable) → `false` so we never
-/// false-alarm. On Windows the cmdline read is cached per parent identity to
-/// keep the per-render path off the PowerShell spawn.
-pub fn recv_off_live() -> bool {
-    matches!(detect_cached(), Some(false))
+/// statusline: true iff this session CANNOT receive peer messages at all —
+/// i.e. the marshal daemon is unreachable, so neither the live channel nor the
+/// inbox can deliver. A flagless-but-daemon-reachable session is NOT warned:
+/// its inbox still works. Unknown (no address configured / unresolvable) →
+/// `false` so we never false-alarm.
+pub fn cannot_receive() -> bool {
+    match daemon_address() {
+        Some(addr) => !is_reachable(&addr),
+        None => false,
+    }
 }
 
-/// [`detect`] with a per-parent cache. The cache key is the parent's
-/// `(ppid, start-time)`: a hit means the same parent process we already
-/// inspected, so its (immutable) cmdline flag state still holds. A miss (new
-/// or recycled pid) re-reads the cmdline and refreshes the cache.
-fn detect_cached() -> Option<bool> {
-    let Some((ppid, token)) = super::session_discovery::parent_identity() else {
-        // No stable parent identity → can't cache; detect live.
-        return detect();
+/// TCP-connect probe of the daemon's `host:port` (parsed from a `ws://…` URL or
+/// bare `host:port`). Any resolved address that accepts a connection within the
+/// timeout counts as reachable. Resolution/parse failure → `true` (treat as
+/// reachable) so a transient DNS hiccup doesn't flash a false warning.
+fn is_reachable(addr: &str) -> bool {
+    let Some((host, port)) = parse_host_port(addr) else {
+        return true;
     };
-    if let Some(home) = home_dir() {
-        if let Some(cached) = read_cache(&home, ppid, token) {
-            return Some(cached);
+    match (host.as_str(), port).to_socket_addrs() {
+        Ok(socket_addrs) => {
+            let mut any = false;
+            for sa in socket_addrs {
+                any = true;
+                if TcpStream::connect_timeout(&sa, REACHABILITY_TIMEOUT).is_ok() {
+                    return true;
+                }
+            }
+            // Resolved but nothing accepted → unreachable. If it didn't resolve
+            // to anything at all, treat as reachable (don't false-warn).
+            !any
         }
-        let detected = detect();
-        if let Some(flag) = detected {
-            write_cache(&home, ppid, token, flag);
-        }
-        return detected;
+        Err(_) => true,
     }
-    detect()
+}
+
+/// Parse `host` and `port` from `ws://host:port[/path]`, `wss://…`, or a bare
+/// `host:port`. Returns `None` if no port is present.
+fn parse_host_port(addr: &str) -> Option<(String, u16)> {
+    let no_scheme = addr
+        .strip_prefix("ws://")
+        .or_else(|| addr.strip_prefix("wss://"))
+        .unwrap_or(addr);
+    let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or(no_scheme);
+    let (host, port) = authority.rsplit_once(':')?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port.parse().ok()?))
+}
+
+/// Resolve the daemon WS address the same way the shim does: env first
+/// (`MARSHAL_DAEMON_ADDRESS`, legacy `MYKO_ADDRESS`), then the
+/// `daemon-address` file the deploy role writes. `None` if nothing is
+/// configured.
+fn daemon_address() -> Option<String> {
+    for var in ["MARSHAL_DAEMON_ADDRESS", "MYKO_ADDRESS"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    let home = home_dir()?;
+    let path = config_dir(&home).join("daemon-address");
+    let contents = std::fs::read_to_string(path).ok()?;
+    let line = contents.lines().next()?.trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_string())
+    }
 }
 
 /// Per-user marshal config dir (mirrors the daemon-address file's resolution).
@@ -100,39 +138,6 @@ fn config_dir(home: &Path) -> PathBuf {
         }
     }
     home.join(".config").join("marshal")
-}
-
-fn cache_path(home: &Path, ppid: u32) -> PathBuf {
-    config_dir(home)
-        .join("channels-cache")
-        .join(ppid.to_string())
-}
-
-/// Read the cached flag for `ppid` iff it was recorded against the same
-/// `token` (start-time). A mismatch means the pid was recycled — ignore it.
-fn read_cache(home: &Path, ppid: u32, token: u128) -> Option<bool> {
-    let s = std::fs::read_to_string(cache_path(home, ppid)).ok()?;
-    let (tok, flag) = s.trim().split_once(':')?;
-    if tok.parse::<u128>().ok()? != token {
-        return None;
-    }
-    match flag {
-        "1" => Some(true),
-        "0" => Some(false),
-        _ => None,
-    }
-}
-
-/// Cache `flag` for `ppid` stamped with `token`. Best-effort; never fatal.
-fn write_cache(home: &Path, ppid: u32, token: u128, flag: bool) {
-    let path = cache_path(home, ppid);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let body = format!("{token}:{}", if flag { "1" } else { "0" });
-    if let Err(e) = std::fs::write(&path, body) {
-        log::warn!("[marshal-shim] could not write channels cache {path:?}: {e}");
-    }
 }
 
 #[cfg(unix)]
@@ -178,9 +183,8 @@ pub fn parent_cmdline() -> Vec<String> {
 }
 
 /// Windows: read the parent's CommandLine via the supported WMI query
-/// (`Get-CimInstance Win32_Process`) rather than PEB memory reads. The
-/// per-parent cache in [`detect_cached`] keeps this off the per-render hot
-/// path — it runs at most once per parent process lifetime.
+/// (`Get-CimInstance Win32_Process`) rather than PEB memory reads. Only called
+/// once, at shim startup, off the hot path.
 #[cfg(windows)]
 fn windows_parent_cmdline() -> Option<Vec<String>> {
     use std::os::windows::process::CommandExt;
@@ -210,7 +214,7 @@ fn windows_parent_cmdline() -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::channels_enabled_in;
+    use super::{channels_enabled_in, parse_host_port};
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
@@ -249,9 +253,23 @@ mod tests {
     }
 
     #[test]
-    fn windows_single_line_cmdline_matches() {
-        assert!(channels_enabled_in(&v(&[
-            "\"C:\\Users\\admin\\.local\\bin\\claude.exe\" --dangerously-load-development-channels server:marshal",
-        ])));
+    fn parses_ws_url_with_port() {
+        assert_eq!(
+            parse_host_port("ws://100.86.142.61:6155"),
+            Some(("100.86.142.61".to_string(), 6155))
+        );
+    }
+
+    #[test]
+    fn parses_bare_host_port_and_strips_path() {
+        assert_eq!(
+            parse_host_port("marshal-01.lucid.host:6156/hook"),
+            Some(("marshal-01.lucid.host".to_string(), 6156))
+        );
+    }
+
+    #[test]
+    fn no_port_is_none() {
+        assert_eq!(parse_host_port("ws://justahost"), None);
     }
 }

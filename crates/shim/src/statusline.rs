@@ -66,17 +66,18 @@ pub fn render() {
     // git-prompt.sh (__git_ps1) convention. None on detached HEAD / non-repo.
     let branch = git_branch(&cwd);
 
-    // Warn when this session can't receive live peer messages (claude launched
-    // without the channels flag). Detected LIVE from the statusline's own
-    // parent at render time — the statusline always renders after a resume's
-    // bg-pty-host relaunch has settled, so the parent carries the real flag
-    // state. This is what makes the warning correct on resumed sessions
-    // without a manual `/mcp reconnect` (see channels.rs module docs).
-    let recv_off = crate::channels::recv_off_live();
+    // Warn ONLY when this session genuinely cannot receive — i.e. the marshal
+    // daemon is unreachable, so neither the live channel nor the inbox can
+    // deliver. We deliberately do NOT warn merely because the live-channel
+    // flag is absent: the flag-independent inbox still delivers for flagless
+    // (e.g. VS Code) sessions whenever the daemon is reachable, so a
+    // flag-based warning false-alarms on perfectly functional sessions. See
+    // channels.rs module docs.
+    let cannot_receive = crate::channels::cannot_receive();
 
     println!(
         "{}",
-        format_prefix(&user, host, dir, branch.as_deref(), sid8, recv_off)
+        format_prefix(&user, host, dir, branch.as_deref(), sid8, cannot_receive)
     );
 }
 
@@ -104,15 +105,16 @@ fn git_branch(cwd: &str) -> Option<String> {
 
 /// Render the statusline prefix. Pure so the formatting contract is
 /// testable without touching stdin / env / gethostname. `branch` is rendered
-/// as ` (branch)` after the path per git-prompt.sh convention; `recv_off`
-/// appends a RECV-OFF warning when this session can't receive peer messages.
+/// as ` (branch)` after the path per git-prompt.sh convention; `cannot_receive`
+/// appends a warning when the marshal daemon is unreachable (no live channel
+/// AND no inbox — genuinely can't receive peer messages).
 fn format_prefix(
     user: &str,
     host: &str,
     dir: &str,
     branch: Option<&str>,
     sid8: &str,
-    recv_off: bool,
+    cannot_receive: bool,
 ) -> String {
     let loc = match branch {
         Some(b) => format!("{dir} ({b})"),
@@ -123,8 +125,8 @@ fn format_prefix(
     } else {
         format!("[{user}@{host} {loc} {sid8}]")
     };
-    if recv_off {
-        format!("{base} ⚠ marshal RECV-OFF")
+    if cannot_receive {
+        format!("{base} ⚠ marshal UNREACHABLE")
     } else {
         base
     }
@@ -181,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_off_appends_warning_after_branch() {
+    fn unreachable_appends_warning_after_branch() {
         assert_eq!(
             format_prefix(
                 "max",
@@ -191,7 +193,7 @@ mod tests {
                 "5846bf98",
                 true
             ),
-            "[max@pulse-admin pulse-deploy (main) 5846bf98] ⚠ marshal RECV-OFF"
+            "[max@pulse-admin pulse-deploy (main) 5846bf98] ⚠ marshal UNREACHABLE"
         );
     }
 }
