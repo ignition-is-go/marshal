@@ -163,17 +163,15 @@ async fn serve() -> Result<()> {
     // Resolve whether this session can actually RECEIVE live peer messages —
     // i.e. whether claude was launched with the channels flag. There is no
     // in-band MCP signal for this, so it's read from the parent cmdline
-    // (blocking; Windows shells out to Get-CimInstance once). The value is
-    // both written to a per-session marker the statusline surfaces as
-    // RECV-OFF, and reported to the daemon on the Session so SendMessage can
-    // report delivered_live HONESTLY (a flag-off recipient is queued to its
-    // inbox, never claimed as live).
-    let channels_enabled = {
-        let sid = session_id.0.to_string();
-        tokio::task::spawn_blocking(move || channels::record(&sid))
-            .await
-            .unwrap_or(false)
-    };
+    // (blocking; Windows shells out to Get-CimInstance once). Reported to the
+    // daemon on the Session so SendMessage can report delivered_live HONESTLY
+    // (a flag-off recipient is queued to its inbox, never claimed as live).
+    // `None` = parent unreadable (legacy/unknown). The user-facing RECV-OFF
+    // warning does NOT depend on this startup read — the statusline detects
+    // live on every render, which is race-free across resume.
+    let channels_enabled = tokio::task::spawn_blocking(channels::detect)
+        .await
+        .unwrap_or(None);
 
     let session = Session {
         id: session_id.clone(),
@@ -189,7 +187,7 @@ async fn serve() -> Result<()> {
         operator: Some(operator.clone()),
         host: Some(host.clone()),
         project: project.clone(),
-        channels_enabled: Some(channels_enabled),
+        channels_enabled,
     };
     let session = Arc::new(Mutex::new(session));
 

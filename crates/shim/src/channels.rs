@@ -1,4 +1,4 @@
-//! Detect whether THIS session can actually *receive* live peer messages —
+//! Detect whether a session can actually *receive* live peer messages —
 //! i.e. whether the parent `claude` was launched with
 //! `--dangerously-load-development-channels …marshal…`.
 //!
@@ -11,9 +11,25 @@
 //! The one reliable source is the parent's command line (the flag is in its
 //! argv). We read it via supported OS facilities — `/proc/<ppid>/cmdline` on
 //! Linux, `Get-CimInstance Win32_Process` on Windows — NOT by poking process
-//! memory. The shim resolves this once at startup and writes a per-session
-//! marker file; the `statusline` subcommand reads the marker and renders a
-//! `RECV-OFF` warning so the operator knows live receive is not possible.
+//! memory.
+//!
+//! ## Detect LIVE, don't trust a startup marker
+//!
+//! An earlier design had the shim detect once at startup and write a
+//! per-session marker the statusline read back. That raced on **resume**:
+//! when Claude resumes/forks a session it relaunches itself through its
+//! `--bg-pty-host` session manager, and the shim — spawned in the middle of
+//! that relaunch — read a not-yet-settled parent and recorded a false
+//! "channels-off", so the statusline showed `RECV-OFF` even though the flag
+//! was present. A manual `/mcp reconnect marshal` "fixed" it only because the
+//! re-spawned shim detected against the now-settled parent.
+//!
+//! The statusline renders *continuously, after* the relaunch has settled, so
+//! its parent always carries the real flag state. Detecting LIVE off the
+//! statusline's own parent at render time is therefore race-free and needs no
+//! reconnect. On Windows the parent-cmdline read shells out, so the result is
+//! cached per `(ppid, start-time)` — stable for a process's lifetime,
+//! invalidated on pid recycle — to keep the per-render hot path cheap.
 
 use std::path::{Path, PathBuf};
 
@@ -24,42 +40,49 @@ pub fn channels_enabled_in(parent_cmdline: &[String]) -> bool {
     joined.contains("--dangerously-load-development-channels") && joined.contains("marshal")
 }
 
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(p) = std::env::var_os("USERPROFILE") {
-            return Some(PathBuf::from(p));
-        }
+/// Detect this process's channel-receive capability from its PARENT's command
+/// line. `None` = the parent cmdline couldn't be read (treat as unknown — no
+/// warning, and a legacy/None Session.channels_enabled); `Some(true|false)` =
+/// channels confirmed on|off. Called by the shim at startup (to report
+/// `channels_enabled` to the daemon) and, indirectly via [`recv_off_live`], by
+/// the statusline on every render.
+pub fn detect() -> Option<bool> {
+    let cmd = parent_cmdline();
+    if cmd.is_empty() {
+        return None;
     }
-    std::env::var_os("HOME").map(PathBuf::from)
+    Some(channels_enabled_in(&cmd))
 }
 
-/// Shim startup: detect this session's receive capability from the parent
-/// cmdline, write the statusline marker, and return it so the caller can
-/// report it to the daemon on the Session. Best-effort; never fatal.
-pub fn record(session_id: &str) -> bool {
-    let enabled = channels_enabled_in(&parent_cmdline());
-    if !enabled {
-        log::warn!(
-            "[marshal-shim] channels NOT loaded for this session — live peer \
-             messages cannot be received (launch needs \
-             --dangerously-load-development-channels server:marshal). statusline \
-             will show RECV-OFF; SendMessage will queue to inbox, not live."
-        );
-    }
+/// statusline: true iff this session is CONFIRMED unable to receive live peer
+/// messages, detected LIVE from the parent at render time (see module docs for
+/// why live, not a marker). Unknown (parent unreadable) → `false` so we never
+/// false-alarm. On Windows the cmdline read is cached per parent identity to
+/// keep the per-render path off the PowerShell spawn.
+pub fn recv_off_live() -> bool {
+    matches!(detect_cached(), Some(false))
+}
+
+/// [`detect`] with a per-parent cache. The cache key is the parent's
+/// `(ppid, start-time)`: a hit means the same parent process we already
+/// inspected, so its (immutable) cmdline flag state still holds. A miss (new
+/// or recycled pid) re-reads the cmdline and refreshes the cache.
+fn detect_cached() -> Option<bool> {
+    let Some((ppid, token)) = super::session_discovery::parent_identity() else {
+        // No stable parent identity → can't cache; detect live.
+        return detect();
+    };
     if let Some(home) = home_dir() {
-        write_marker(&home, session_id, enabled);
+        if let Some(cached) = read_cache(&home, ppid, token) {
+            return Some(cached);
+        }
+        let detected = detect();
+        if let Some(flag) = detected {
+            write_cache(&home, ppid, token, flag);
+        }
+        return detected;
     }
-    enabled
-}
-
-/// statusline: true when this session is confirmed unable to receive live
-/// messages. Unknown (no marker) is treated as not-a-warning to avoid false
-/// alarms on a session whose shim hasn't recorded yet.
-pub fn recv_off(session_id: &str) -> bool {
-    home_dir()
-        .and_then(|h| read_marker(&h, session_id))
-        .is_some_and(|enabled| !enabled)
+    detect()
 }
 
 /// Per-user marshal config dir (mirrors the daemon-address file's resolution).
@@ -79,31 +102,53 @@ fn config_dir(home: &Path) -> PathBuf {
     home.join(".config").join("marshal")
 }
 
-fn marker_path(home: &Path, session_id: &str) -> PathBuf {
-    config_dir(home).join("channels").join(session_id)
+fn cache_path(home: &Path, ppid: u32) -> PathBuf {
+    config_dir(home).join("channels-cache").join(ppid.to_string())
 }
 
-/// Record this session's receive capability where the statusline can read it.
-/// Best-effort: failures are logged, never fatal.
-pub fn write_marker(home: &Path, session_id: &str, enabled: bool) {
-    let path = marker_path(home, session_id);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+/// Read the cached flag for `ppid` iff it was recorded against the same
+/// `token` (start-time). A mismatch means the pid was recycled — ignore it.
+fn read_cache(home: &Path, ppid: u32, token: u128) -> Option<bool> {
+    let s = std::fs::read_to_string(cache_path(home, ppid)).ok()?;
+    let (tok, flag) = s.trim().split_once(':')?;
+    if tok.parse::<u128>().ok()? != token {
+        return None;
     }
-    if let Err(e) = std::fs::write(&path, if enabled { "1" } else { "0" }) {
-        log::warn!("[marshal-shim] could not write channels marker {path:?}: {e}");
-    }
-}
-
-/// Read a session's receive capability. `None` = unknown (no marker yet);
-/// `Some(false)` = channels confirmed off (show the warning).
-pub fn read_marker(home: &Path, session_id: &str) -> Option<bool> {
-    let s = std::fs::read_to_string(marker_path(home, session_id)).ok()?;
-    match s.trim() {
+    match flag {
         "1" => Some(true),
         "0" => Some(false),
         _ => None,
     }
+}
+
+/// Cache `flag` for `ppid` stamped with `token`. Best-effort; never fatal.
+fn write_cache(home: &Path, ppid: u32, token: u128, flag: bool) {
+    let path = cache_path(home, ppid);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = format!("{token}:{}", if flag { "1" } else { "0" });
+    if let Err(e) = std::fs::write(&path, body) {
+        log::warn!("[marshal-shim] could not write channels cache {path:?}: {e}");
+    }
+}
+
+#[cfg(unix)]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn home_dir() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("USERPROFILE") {
+        return Some(PathBuf::from(p));
+    }
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn home_dir() -> Option<PathBuf> {
+    None
 }
 
 /// Read the parent process's command line via supported OS facilities.
@@ -131,8 +176,9 @@ pub fn parent_cmdline() -> Vec<String> {
 }
 
 /// Windows: read the parent's CommandLine via the supported WMI query
-/// (`Get-CimInstance Win32_Process`) rather than PEB memory reads. Run once at
-/// startup, off the hot path, so the PowerShell spawn cost is irrelevant.
+/// (`Get-CimInstance Win32_Process`) rather than PEB memory reads. The
+/// per-parent cache in [`detect_cached`] keeps this off the per-render hot
+/// path — it runs at most once per parent process lifetime.
 #[cfg(windows)]
 fn windows_parent_cmdline() -> Option<Vec<String>> {
     use std::os::windows::process::CommandExt;

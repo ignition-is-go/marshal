@@ -186,6 +186,22 @@ where
     }
 }
 
+/// Parent identity as `(ppid, start-time-nanos)` WITHOUT reading the
+/// (Windows-expensive) command line. Used by the statusline's channel
+/// live-detect to cache the cmdline read per parent process: the pair is
+/// stable for a process's lifetime and changes when a pid is recycled, so a
+/// cache keyed on it is both cheap to check and recycle-safe. `None` when
+/// the platform can't surface a parent pid or start time.
+pub(crate) fn parent_identity() -> Option<(u32, u128)> {
+    let info = real_parent_info()?;
+    let nanos = info
+        .started_at?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((info.pid, nanos))
+}
+
 /// Parent process snapshot — pid, when it started, and its argv.
 /// `started_at` is `None` if the platform can't surface a reliable
 /// process start time (very old kernels, sandboxes).
