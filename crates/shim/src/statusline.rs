@@ -62,22 +62,63 @@ pub fn render() {
 
     let sid8 = &session_id[..session_id.len().min(8)];
 
+    // Current git branch, rendered in parentheses after the path per
+    // git-prompt.sh (__git_ps1) convention. None on detached HEAD / non-repo.
+    let branch = git_branch(&cwd);
+
     // Warn when this session can't receive live peer messages (claude launched
     // without the channels flag). The shim records this per-session; absence of
     // a marker is treated as "unknown" → no false alarm.
     let recv_off = !session_id.is_empty() && crate::channels::recv_off(session_id);
 
-    println!("{}", format_prefix(&user, host, dir, sid8, recv_off));
+    println!(
+        "{}",
+        format_prefix(&user, host, dir, branch.as_deref(), sid8, recv_off)
+    );
+}
+
+/// Current branch of the repo at `cwd`, via the same call the shim uses for
+/// `Session.git_branch`. None when detached (`HEAD`), not a repo, or git fails.
+fn git_branch(cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let out = std::process::Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let b = String::from_utf8(out.stdout).ok()?;
+    let b = b.trim();
+    if b.is_empty() || b == "HEAD" {
+        None
+    } else {
+        Some(b.to_string())
+    }
 }
 
 /// Render the statusline prefix. Pure so the formatting contract is
-/// testable without touching stdin / env / gethostname. `recv_off` appends a
-/// RECV-OFF warning when this session can't receive live peer messages.
-fn format_prefix(user: &str, host: &str, dir: &str, sid8: &str, recv_off: bool) -> String {
+/// testable without touching stdin / env / gethostname. `branch` is rendered
+/// as ` (branch)` after the path per git-prompt.sh convention; `recv_off`
+/// appends a RECV-OFF warning when this session can't receive peer messages.
+fn format_prefix(
+    user: &str,
+    host: &str,
+    dir: &str,
+    branch: Option<&str>,
+    sid8: &str,
+    recv_off: bool,
+) -> String {
+    let loc = match branch {
+        Some(b) => format!("{dir} ({b})"),
+        None => dir.to_string(),
+    };
     let base = if sid8.is_empty() {
-        format!("[{user}@{host} {dir}]")
+        format!("[{user}@{host} {loc}]")
     } else {
-        format!("[{user}@{host} {dir} {sid8}]")
+        format!("[{user}@{host} {loc} {sid8}]")
     };
     if recv_off {
         format!("{base} ⚠ marshal RECV-OFF")
@@ -101,7 +142,7 @@ mod tests {
     #[test]
     fn prefix_includes_sid_when_present() {
         assert_eq!(
-            format_prefix("max", "pulse-admin", "pulse-deploy", "5846bf98", false),
+            format_prefix("max", "pulse-admin", "pulse-deploy", None, "5846bf98", false),
             "[max@pulse-admin pulse-deploy 5846bf98]"
         );
     }
@@ -109,16 +150,38 @@ mod tests {
     #[test]
     fn prefix_omits_sid_when_empty() {
         assert_eq!(
-            format_prefix("max", "pulse-admin", "pulse-deploy", "", false),
+            format_prefix("max", "pulse-admin", "pulse-deploy", None, "", false),
             "[max@pulse-admin pulse-deploy]"
         );
     }
 
     #[test]
-    fn recv_off_appends_warning() {
+    fn branch_rendered_in_parens_after_dir() {
         assert_eq!(
-            format_prefix("max", "pulse-admin", "pulse-deploy", "5846bf98", true),
-            "[max@pulse-admin pulse-deploy 5846bf98] ⚠ marshal RECV-OFF"
+            format_prefix(
+                "max",
+                "pulse-admin",
+                "pulse-deploy",
+                Some("feat/rotunda-mesh-partition-support"),
+                "5846bf98",
+                false
+            ),
+            "[max@pulse-admin pulse-deploy (feat/rotunda-mesh-partition-support) 5846bf98]"
+        );
+    }
+
+    #[test]
+    fn recv_off_appends_warning_after_branch() {
+        assert_eq!(
+            format_prefix(
+                "max",
+                "pulse-admin",
+                "pulse-deploy",
+                Some("main"),
+                "5846bf98",
+                true
+            ),
+            "[max@pulse-admin pulse-deploy (main) 5846bf98] ⚠ marshal RECV-OFF"
         );
     }
 }
