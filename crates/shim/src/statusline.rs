@@ -142,7 +142,14 @@ mod tests {
     #[test]
     fn prefix_includes_sid_when_present() {
         assert_eq!(
-            format_prefix("max", "pulse-admin", "pulse-deploy", None, "5846bf98", false),
+            format_prefix(
+                "max",
+                "pulse-admin",
+                "pulse-deploy",
+                None,
+                "5846bf98",
+                false
+            ),
             "[max@pulse-admin pulse-deploy 5846bf98]"
         );
     }
