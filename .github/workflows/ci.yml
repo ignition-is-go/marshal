@@ -12,6 +12,9 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Backstop so a stuck step (e.g. a flaky apt mirror, a hung runner) fails
+    # in minutes instead of burning to GitHub's 6-hour default.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +39,7 @@ jobs:
   # manual cross-build.
   windows-cross-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,6 +47,13 @@ jobs:
           targets: x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
       - name: Install mingw-w64 cross linker
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+        # Bound apt's network waits (Acquire timeouts + retries) so a flaky
+        # azure.archive.ubuntu.com mirror can't hang the job indefinitely —
+        # this is what stalled a release for ~2h on 2026-06-18.
+        run: |
+          sudo apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          sudo apt-get install -y -o Acquire::Retries=3 mingw-w64
       - name: Cross-compile the Windows shim
         run: cargo check -p marshal-shim --target x86_64-pc-windows-gnu
