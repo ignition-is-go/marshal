@@ -1898,6 +1898,7 @@ dependencies = [
  "log",
  "marshal-entities",
  "myko",
+ "notify-debouncer-mini",
  "serde",
  "serde_json",
  "tokio",
