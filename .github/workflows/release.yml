@@ -14,7 +14,7 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     # Backstop: this single job does crates.io publish + apt + cross-build +
     # upload. A flaky apt mirror hung it ~2h on 2026-06-18; fail in minutes.
     timeout-minutes: 30
