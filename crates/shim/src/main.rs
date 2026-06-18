@@ -233,7 +233,6 @@ async fn serve() -> Result<()> {
 
     let host = Arc::new(tools::ToolHost {
         client: Arc::clone(&client),
-        session_id: session_id.clone(),
         pid,
         cwd: cwd.clone(),
         session: Arc::clone(&session),
@@ -300,7 +299,9 @@ async fn serve() -> Result<()> {
     let activity_for_publish = Arc::clone(&activity);
     let client_for_publish = Arc::clone(&client);
     let session_for_publish = Arc::clone(&session);
-    let session_id_for_publish = session_id.clone();
+    // The parent `claude` pid is stable for this shim's lifetime; we poll its
+    // live per-PID manifest to detect canonical-id drift (compact/clear).
+    let parent_pid_for_publish = session_discovery::parent_pid();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -312,6 +313,43 @@ async fn serve() -> Result<()> {
         let mut pushed_tool_at: Option<i64> = None;
         loop {
             interval.tick().await;
+
+            // Self-heal canonical-id drift. On a compact/clear, Claude re-mints
+            // this session's id but keeps the same process + MCP shim running,
+            // so our inherited CLAUDE_CODE_SESSION_ID env is frozen at the OLD
+            // id. Claude DOES keep its per-PID manifest current, so we poll it:
+            // if the canonical id moved, DEL the stale Session and re-SET under
+            // the new id. The re-SET also refreshes the client_id binding from
+            // the live connection — which is what unblocks send_message without
+            // a manual `/mcp reconnect`.
+            if let Some(current_canonical) =
+                parent_pid_for_publish.and_then(session_discovery::canonical_session_id)
+            {
+                let registered = session_for_publish.lock().unwrap().id.clone();
+                if current_canonical != registered {
+                    log::warn!(
+                        "[marshal-shim] canonical session id drifted {} -> {}; re-registering",
+                        registered.0,
+                        current_canonical.0
+                    );
+                    let stale = session_for_publish.lock().unwrap().clone();
+                    if let Err(e) = emit_session_del(&client_for_publish, &stale) {
+                        log::warn!("[marshal-shim] DEL of stale session failed: {e}");
+                    }
+                    let refreshed = {
+                        let mut sess = session_for_publish.lock().unwrap();
+                        sess.id = current_canonical.clone();
+                        sess.clone()
+                    };
+                    if let Err(e) = emit_session_set(&client_for_publish, &refreshed) {
+                        log::warn!("[marshal-shim] re-SET under new id failed: {e}");
+                    }
+                }
+            }
+
+            // Target the CURRENT id (it may have just been reconciled above) so
+            // liveness setters never write to a stale/dead session row.
+            let session_id_for_publish = session_for_publish.lock().unwrap().id.clone();
 
             let last_activity_at = activity_for_publish.last_activity_ms();
             let last_activity_at = if last_activity_at > 0 {
@@ -395,6 +433,18 @@ fn emit_session_set(client: &MykoClient, session: &Session) -> Result<()> {
     client
         .send_event(event)
         .map_err(|e| anyhow::anyhow!("send_event failed: {e}"))?;
+    Ok(())
+}
+
+/// DEL a Session entity. Used by the canonical-id-drift reconcile to remove the
+/// stale roster row after the session id changes under us (compact/clear), so
+/// peers don't see a ghost under the old id. The daemon's cleanup sweep is a
+/// backstop if this DEL is lost.
+fn emit_session_del(client: &MykoClient, session: &Session) -> Result<()> {
+    let event = MEvent::from_item(session, MEventType::DEL, &Uuid::new_v4().to_string());
+    client
+        .send_event(event)
+        .map_err(|e| anyhow::anyhow!("send_event(DEL) failed: {e}"))?;
     Ok(())
 }
 
