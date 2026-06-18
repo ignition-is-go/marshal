@@ -127,8 +127,11 @@ pub struct Session {
     /// Working directory the client launched from.
     pub cwd: String,
 
-    /// Git branch in `cwd`, if it's a repo.
+    /// Git branch in `cwd`, if it's a repo. Pushed by the shim's HEAD watcher
+    /// on checkout/switch (event-driven, not sampled at startup) so peers see
+    /// branch changes mid-session, matching the operator's own statusline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[myko_setter]
     pub git_branch: Option<String>,
 
     /// Free-form short status text, settable via the `set_status` command.

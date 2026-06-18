@@ -279,6 +279,64 @@ async fn serve() -> Result<()> {
         resources: tools::resources_def(),
     };
 
+    // Event-driven git-branch refresh. A checkout/switch rewrites the repo's
+    // `.git/HEAD`; an OS fs-watch on it pushes the new branch to the roster the
+    // moment it changes — no polling, no per-tick git spawn. The operator's own
+    // statusline already recomputes the branch per render; this keeps PEERS'
+    // roster view current too. The debouncer is leaked to live for the process
+    // lifetime; the callback reads the live session id (so it follows an id
+    // reconcile) and only pushes when the branch actually changed.
+    if let Some(head_dir) = resolve_git_head_dir(&cwd) {
+        use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
+        let client_for_watch = Arc::clone(&client);
+        let session_for_watch = Arc::clone(&session);
+        let cwd_for_watch = cwd.clone();
+        let mut last_branch = git_branch.clone(); // startup value is already SET
+        match new_debouncer(
+            std::time::Duration::from_millis(200),
+            move |result: DebounceEventResult| {
+                let touched_head = matches!(&result, Ok(events)
+                    if events.iter().any(|e| e.path.file_name().is_some_and(|n| n == "HEAD")));
+                if !touched_head {
+                    return;
+                }
+                let current = detect_git_branch(&cwd_for_watch);
+                if current == last_branch {
+                    return;
+                }
+                last_branch = current.clone();
+                let id = session_for_watch.lock().unwrap().id.clone();
+                let arc_branch = current.as_deref().map(Arc::<str>::from);
+                let _ = client_for_watch
+                    .send_command::<marshal_entities::SetSessionGitBranch, ()>(
+                        &marshal_entities::SetSessionGitBranch {
+                            id,
+                            git_branch: arc_branch,
+                        },
+                    );
+                if let Ok(mut s) = session_for_watch.lock() {
+                    s.git_branch = current;
+                }
+                log::info!("[marshal-shim] git branch changed -> {last_branch:?}; pushed to roster");
+            },
+        ) {
+            Ok(mut debouncer) => match debouncer
+                .watcher()
+                .watch(&head_dir, RecursiveMode::NonRecursive)
+            {
+                Ok(()) => {
+                    log::info!(
+                        "[marshal-shim] watching {} for branch changes",
+                        head_dir.display()
+                    );
+                    Box::leak(Box::new(debouncer));
+                }
+                Err(e) => log::warn!("[marshal-shim] HEAD watch failed: {e}"),
+            },
+            Err(e) => log::warn!("[marshal-shim] git watcher init failed: {e}"),
+        }
+    }
+
     // Activity tracker: bumped by the MCP dispatcher on each request and
     // start/end-bracketed around tools/call. The roster-publish loop uses
     // it to keep `Session.last_activity_at` / `last_tool` / `last_tool_at`
@@ -523,6 +581,27 @@ fn init_logging() {
     b.target(env_logger::Target::Stderr).init();
 }
 
+/// Directory containing the repo's `HEAD` file for `cwd`: `<cwd>/.git` for a
+/// normal checkout, or the resolved `gitdir:` target when `.git` is a file
+/// (git worktree / submodule). `None` when `cwd` isn't a git repo. The HEAD
+/// watcher watches this directory (non-recursive) and filters for `HEAD`.
+fn resolve_git_head_dir(cwd: &str) -> Option<std::path::PathBuf> {
+    let dot_git = std::path::Path::new(cwd).join(".git");
+    let meta = std::fs::metadata(&dot_git).ok()?;
+    if meta.is_dir() {
+        return Some(dot_git);
+    }
+    // `.git` is a file: `gitdir: <path>` (absolute, or relative to cwd).
+    let contents = std::fs::read_to_string(&dot_git).ok()?;
+    let target = contents.trim().strip_prefix("gitdir:")?.trim();
+    let gitdir = std::path::Path::new(target);
+    Some(if gitdir.is_absolute() {
+        gitdir.to_path_buf()
+    } else {
+        std::path::Path::new(cwd).join(gitdir)
+    })
+}
+
 fn detect_git_branch(cwd: &str) -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -585,5 +664,55 @@ fn detect_host() -> HostInfo {
         name,
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detect_git_branch, resolve_git_head_dir};
+    use std::process::Command;
+
+    fn git(args: &[&str], cwd: &std::path::Path) {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// The branch the roster shows must track the ACTUAL repo HEAD — this
+    /// exercises the real `git`/`.git` reading the HEAD watcher feeds from
+    /// (the watcher's trigger is an OS fs-event; the value it pushes comes
+    /// from exactly this path), against a real repo across a real checkout.
+    #[test]
+    fn detect_git_branch_follows_a_real_checkout() {
+        let tmp = std::env::temp_dir().join(format!("marshal-shim-gitbranch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cwd = tmp.to_str().unwrap();
+
+        git(&["init", "-q"], &tmp);
+        git(&["config", "user.email", "t@t"], &tmp);
+        git(&["config", "user.name", "t"], &tmp);
+        git(&["commit", "-q", "--allow-empty", "-m", "init"], &tmp);
+        git(&["checkout", "-q", "-b", "feature/x"], &tmp);
+
+        // `.git` is a real directory here → HEAD dir is `<cwd>/.git`.
+        assert_eq!(resolve_git_head_dir(cwd), Some(tmp.join(".git")));
+        assert_eq!(detect_git_branch(cwd).as_deref(), Some("feature/x"));
+
+        // Switch branches — the read must follow HEAD, not stay frozen.
+        git(&["checkout", "-q", "-b", "other"], &tmp);
+        assert_eq!(detect_git_branch(cwd).as_deref(), Some("other"));
+
+        // Not a repo → no HEAD dir, no branch.
+        let bare = tmp.join("nope");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(resolve_git_head_dir(bare.to_str().unwrap()), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
