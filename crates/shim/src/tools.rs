@@ -28,7 +28,6 @@ use std::time::Duration;
 
 pub struct ToolHost {
     pub client: Arc<MykoClient>,
-    pub session_id: SessionId,
     pub pid: u32,
     pub cwd: String,
     /// The shim's local copy of its Session entity. Mutations
@@ -105,7 +104,7 @@ fn read_whoami(host: &ToolHost, uri: &str) -> ResourceContent {
     json_resource(
         uri,
         json!({
-            "session_id": host.session_id.0.as_ref(),
+            "session_id": snapshot.id.0.as_ref(),
             "pid": host.pid,
             "cwd": host.cwd,
             "operator": snapshot.operator,
@@ -117,7 +116,7 @@ fn read_whoami(host: &ToolHost, uri: &str) -> ResourceContent {
 fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
     let sessions: Vec<Arc<Session>> = host.sessions_cell.get();
     let members: Vec<Arc<RoomMember>> = host.members_cell.get();
-    let me = host.session_id.0.as_ref();
+    let me = host.session.lock().unwrap().id.0.to_string();
     let view: Vec<Value> = sessions
         .iter()
         .map(|s| {
@@ -128,7 +127,7 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 .collect();
             json!({
                 "session_id": s.id.0.as_ref(),
-                "is_self": s.id.0.as_ref() == me,
+                "is_self": s.id.0.as_ref() == me.as_str(),
                 "pid": s.pid,
                 "cwd": s.cwd,
                 "git_branch": s.git_branch,
@@ -225,7 +224,7 @@ async fn set_status(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolEr
     let _ = host
         .client
         .send_command::<SetSessionCurrentTask, ()>(&SetSessionCurrentTask {
-            id: host.session_id.clone(),
+            id: host.session.lock().unwrap().id.clone(),
             current_task: new_task,
         });
     {

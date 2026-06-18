@@ -101,6 +101,25 @@ pub fn resolve(cwd: &str) -> Option<SessionId> {
     resolve_under(&home, cwd, MAX_WAIT, real_parent_info)
 }
 
+/// This shim's parent process id (the `claude` that spawned it). `None` if the
+/// platform can't surface it.
+pub(crate) fn parent_pid() -> Option<u32> {
+    real_parent_info().map(|p| p.pid)
+}
+
+/// The session id Claude CURRENTLY considers canonical for process
+/// `parent_pid`, read from its live per-PID manifest
+/// (`~/.claude/sessions/<pid>.json`). Unlike the inherited
+/// `CLAUDE_CODE_SESSION_ID` env — which is frozen at the shim's spawn and goes
+/// STALE after a compact/clear re-mints the id WITHOUT re-spawning the shim —
+/// Claude keeps this file current, so it is the authoritative source for
+/// detecting canonical-id drift in a long-lived shim. `None` if the manifest
+/// is absent (older Claude) or unreadable.
+pub(crate) fn canonical_session_id(parent_pid: u32) -> Option<SessionId> {
+    let home = home_dir()?;
+    sid_from_claude_sessions_file(&home, parent_pid)
+}
+
 /// Test seam: same logic as `resolve()` but takes HOME, max wait, and
 /// the parent-info source explicitly. Lets unit tests exercise both
 /// tiers without forking a child whose parent PID we control.
@@ -663,6 +682,45 @@ mod tests {
         assert_eq!(
             got.as_ref().map(|s| s.0.as_ref()),
             Some("14b684ba-618f-48f4-91d7-422ef99c9e38")
+        );
+    }
+
+    #[test]
+    fn canonical_id_drift_is_observed_when_manifest_rewritten() {
+        // A long-lived shim's parent keeps the SAME pid across a compact/clear,
+        // but Claude re-mints the session id and rewrites the per-PID manifest
+        // in place. Re-reading the manifest must observe the NEW id — the env
+        // var can't (it's frozen at spawn). This is the exact source the
+        // reconcile loop polls to self-heal canonical-id drift.
+        let tmp = make_tempdir();
+        let home = tmp.join("home");
+        let sessions = home.join(".claude").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let manifest = sessions.join("4017.json");
+
+        std::fs::write(
+            &manifest,
+            r#"{"pid":4017,"sessionId":"d77d5f3a-old","cwd":"/x"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            sid_from_claude_sessions_file(&home, 4017)
+                .as_ref()
+                .map(|s| s.0.as_ref()),
+            Some("d77d5f3a-old")
+        );
+
+        // compact re-mints the id; same pid, manifest updated in place.
+        std::fs::write(
+            &manifest,
+            r#"{"pid":4017,"sessionId":"c80daf7d-new","cwd":"/x"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            sid_from_claude_sessions_file(&home, 4017)
+                .as_ref()
+                .map(|s| s.0.as_ref()),
+            Some("c80daf7d-new")
         );
     }
 
