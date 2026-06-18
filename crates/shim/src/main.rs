@@ -307,17 +307,18 @@ async fn serve() -> Result<()> {
                 last_branch = current.clone();
                 let id = session_for_watch.lock().unwrap().id.clone();
                 let arc_branch = current.as_deref().map(Arc::<str>::from);
-                let _ = client_for_watch
-                    .send_command::<marshal_entities::SetSessionGitBranch, ()>(
-                        &marshal_entities::SetSessionGitBranch {
-                            id,
-                            git_branch: arc_branch,
-                        },
-                    );
+                let _ = client_for_watch.send_command::<marshal_entities::SetSessionGitBranch, ()>(
+                    &marshal_entities::SetSessionGitBranch {
+                        id,
+                        git_branch: arc_branch,
+                    },
+                );
                 if let Ok(mut s) = session_for_watch.lock() {
                     s.git_branch = current;
                 }
-                log::info!("[marshal-shim] git branch changed -> {last_branch:?}; pushed to roster");
+                log::info!(
+                    "[marshal-shim] git branch changed -> {last_branch:?}; pushed to roster"
+                );
             },
         ) {
             Ok(mut debouncer) => match debouncer
@@ -689,7 +690,8 @@ mod tests {
     /// from exactly this path), against a real repo across a real checkout.
     #[test]
     fn detect_git_branch_follows_a_real_checkout() {
-        let tmp = std::env::temp_dir().join(format!("marshal-shim-gitbranch-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("marshal-shim-gitbranch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let cwd = tmp.to_str().unwrap();
