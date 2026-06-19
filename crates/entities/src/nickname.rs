@@ -52,10 +52,11 @@ const ADJECTIVES: &[&str] = &[
     "nimble", "noble", "polar", "prime", "proud", "quiet", "quick", "rapid", "regal", "rugged",
     "sleek", "snappy", "solar", "spry", "stellar", "sturdy", "sunny", "tidal", "vivid", "witty",
     "zesty", "amber", "azure", "coral", "crimson", "ivory", "jade", "scarlet", "teal", "violet",
-    "cobalt", "frosty", "ember", "shadow", "silent", "stormy", "misty", "dusky", "autumn", "wintry",
-    "arctic", "alpine", "coastal", "desert", "marble", "granite", "opal", "onyx", "pearl", "ruby",
-    "velvet", "copper", "silver", "brass", "steely", "neon", "atomic", "turbo", "hyper", "mega",
-    "ultra", "super", "lively", "loyal", "patient", "plucky", "radiant", "serene", "spirited", "valiant",
+    "cobalt", "frosty", "ember", "shadow", "silent", "stormy", "misty", "dusky", "autumn",
+    "wintry", "arctic", "alpine", "coastal", "desert", "marble", "granite", "opal", "onyx",
+    "pearl", "ruby", "velvet", "copper", "silver", "brass", "steely", "neon", "atomic", "turbo",
+    "hyper", "mega", "ultra", "super", "lively", "loyal", "patient", "plucky", "radiant", "serene",
+    "spirited", "valiant",
 ];
 
 const NOUNS: &[&str] = &[
@@ -65,10 +66,11 @@ const NOUNS: &[&str] = &[
     "stag", "ibex", "oryx", "gazelle", "antelope", "panther", "jaguar", "leopard", "cougar",
     "ocelot", "serval", "caracal", "cheetah", "tiger", "lion", "cobra", "viper", "python", "gecko",
     "iguana", "newt", "toad", "turtle", "tortoise", "dolphin", "orca", "narwhal", "walrus", "seal",
-    "manta", "marlin", "tuna", "perch", "pike", "trout", "salmon", "koi", "urchin", "prawn", "crab",
-    "lobster", "mantis", "beetle", "cricket", "cicada", "firefly", "moth", "hornet", "comet", "nova",
-    "quasar", "pulsar", "nebula", "meteor", "photon", "proton", "neutron", "ember", "cinder",
-    "pebble", "boulder", "canyon", "summit", "glacier", "fjord", "delta", "reef", "dune", "mesa",
+    "manta", "marlin", "tuna", "perch", "pike", "trout", "salmon", "koi", "urchin", "prawn",
+    "crab", "lobster", "mantis", "beetle", "cricket", "cicada", "firefly", "moth", "hornet",
+    "comet", "nova", "quasar", "pulsar", "nebula", "meteor", "photon", "proton", "neutron",
+    "ember", "cinder", "pebble", "boulder", "canyon", "summit", "glacier", "fjord", "delta",
+    "reef", "dune", "mesa",
 ];
 
 #[cfg(test)]
@@ -103,6 +105,10 @@ mod tests {
         let names: HashSet<String> = (0..100)
             .map(|i| nickname(&format!("00000000-0000-0000-0000-{i:012x}")))
             .collect();
-        assert!(names.len() >= 95, "expected good spread, got {}", names.len());
+        assert!(
+            names.len() >= 95,
+            "expected good spread, got {}",
+            names.len()
+        );
     }
 }

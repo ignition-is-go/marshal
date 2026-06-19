@@ -237,7 +237,11 @@ async fn set_status(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolEr
 }
 
 async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
-    let to = arg_str(args, "to", "send_message: missing `to` (session id or nickname)")?;
+    let to = arg_str(
+        args,
+        "to",
+        "send_message: missing `to` (session id or nickname)",
+    )?;
     let body = arg_str(args, "body", "send_message: missing `body`")?;
     let to_session_id = resolve_recipient(host, &to)?;
     let cmd = SendMessage {
@@ -306,7 +310,13 @@ fn resolve_recipient(host: &ToolHost, to: &str) -> Result<SessionId, ToolError> 
 fn ambiguous_recipient(kind: &str, to: &str, matches: &[&Arc<Session>]) -> String {
     let list = matches
         .iter()
-        .map(|s| format!("{} ({})", marshal_entities::nickname(s.id.0.as_ref()), s.id.0.as_ref()))
+        .map(|s| {
+            format!(
+                "{} ({})",
+                marshal_entities::nickname(s.id.0.as_ref()),
+                s.id.0.as_ref()
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!(
