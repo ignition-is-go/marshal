@@ -15,6 +15,9 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Backstop: this single job does crates.io publish + apt + cross-build +
+    # upload. A flaky apt mirror hung it ~2h on 2026-06-18; fail in minutes.
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -83,7 +86,12 @@ jobs:
           # target/release build for the shims). Triple-suffixed so a fetch
           # can pick the right platform.
           rustup target add x86_64-pc-windows-gnu
-          sudo apt-get update && sudo apt-get install -y mingw-w64
+          # Bounded apt (Acquire timeouts + retries) so a flaky Ubuntu mirror
+          # can't hang the release — the failure mode that stalled v0.16.0 ~2h.
+          sudo apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          sudo apt-get install -y -o Acquire::Retries=3 mingw-w64
           cargo build --release -p marshal-daemon
           cargo build --release -p marshal-shim
           cargo build --release -p marshal-shim --target x86_64-pc-windows-gnu
