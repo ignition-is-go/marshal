@@ -267,9 +267,12 @@ async fn serve() -> Result<()> {
              - set_status         — set this session's free-form status text\n\
              - ack_messages       — mark message ids as read for this session\n\
              \n\
-             Sessions have NO nickname field. Compose any display label \
-             yourself from `host.name` + cwd basename + session_id[:8]. \
-             Address peers ONLY by their session_id.\n\
+             Each session has a memorable `nickname` (e.g. `swift-falcon`) — a \
+             deterministic adjective-noun derived from its session_id, shown in \
+             its statusline and in marshal://roster. Address peers by nickname, \
+             session_id, or session_id prefix (send_message resolves any of \
+             them). The `swift-falcon` after a peer's path is its nickname, NOT \
+             a git branch or commit.\n\
              \n\
              Inbound peer messages arrive as `notifications/claude/channel` \
              events; reply with `send_message` or `broadcast`.",

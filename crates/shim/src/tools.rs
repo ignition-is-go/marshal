@@ -105,6 +105,7 @@ fn read_whoami(host: &ToolHost, uri: &str) -> ResourceContent {
         uri,
         json!({
             "session_id": snapshot.id.0.as_ref(),
+            "nickname": marshal_entities::nickname(snapshot.id.0.as_ref()),
             "pid": host.pid,
             "cwd": host.cwd,
             "operator": snapshot.operator,
@@ -127,6 +128,7 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 .collect();
             json!({
                 "session_id": s.id.0.as_ref(),
+                "nickname": marshal_entities::nickname(s.id.0.as_ref()),
                 "is_self": s.id.0.as_ref() == me.as_str(),
                 "pid": s.pid,
                 "cwd": s.cwd,
@@ -235,10 +237,11 @@ async fn set_status(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolEr
 }
 
 async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
-    let to = arg_str(args, "to", "send_message: missing `to` (session id)")?;
+    let to = arg_str(args, "to", "send_message: missing `to` (session id or nickname)")?;
     let body = arg_str(args, "body", "send_message: missing `body`")?;
+    let to_session_id = resolve_recipient(host, &to)?;
     let cmd = SendMessage {
-        to_session_id: SessionId(Arc::<str>::from(to.as_str())),
+        to_session_id,
         body,
         as_session: None, // WS path: sender resolved from the connection
     };
@@ -254,6 +257,62 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         "sent_at": result.sent_at,
         "delivered_live": result.delivered_live,
     })))
+}
+
+/// Resolve a caller-supplied recipient token to a full session id against the
+/// live roster. Accepts, in order: an exact session id, a unique nickname
+/// (`swift-falcon`, what the statusline shows), or a unique session-id prefix.
+/// Ambiguous or unknown tokens error with the candidates listed, so a caller
+/// can never silently mis-route — the failure mode this whole nickname change
+/// exists to prevent.
+fn resolve_recipient(host: &ToolHost, to: &str) -> Result<SessionId, ToolError> {
+    let sessions: Vec<Arc<Session>> = host.sessions_cell.get();
+
+    // 1. Exact session id.
+    if let Some(s) = sessions.iter().find(|s| s.id.0.as_ref() == to) {
+        return Ok(s.id.clone());
+    }
+    // 2. Unique nickname.
+    let by_nick: Vec<&Arc<Session>> = sessions
+        .iter()
+        .filter(|s| marshal_entities::nickname(s.id.0.as_ref()) == to)
+        .collect();
+    if by_nick.len() == 1 {
+        return Ok(by_nick[0].id.clone());
+    }
+    if by_nick.len() > 1 {
+        return Err(ToolError::invalid_params(ambiguous_recipient(
+            "nickname", to, &by_nick,
+        )));
+    }
+    // 3. Unique session-id prefix.
+    let by_prefix: Vec<&Arc<Session>> = sessions
+        .iter()
+        .filter(|s| s.id.0.as_ref().starts_with(to))
+        .collect();
+    match by_prefix.len() {
+        1 => Ok(by_prefix[0].id.clone()),
+        0 => Err(ToolError::invalid_params(format!(
+            "send_message: no live session matches `{to}` (by id, nickname, or id-prefix) — check marshal://roster"
+        ))),
+        _ => Err(ToolError::invalid_params(ambiguous_recipient(
+            "id-prefix",
+            to,
+            &by_prefix,
+        ))),
+    }
+}
+
+fn ambiguous_recipient(kind: &str, to: &str, matches: &[&Arc<Session>]) -> String {
+    let list = matches
+        .iter()
+        .map(|s| format!("{} ({})", marshal_entities::nickname(s.id.0.as_ref()), s.id.0.as_ref()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "send_message: `{to}` is an ambiguous {kind} matching {} sessions [{list}] — address by the full session_id",
+        matches.len()
+    )
 }
 
 async fn broadcast(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
@@ -356,10 +415,10 @@ pub fn tools_def() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct send to a peer's session_id. Look up the id under marshal://roster first. Daemon validates and returns an error if the session is unknown, offline, or has a stale client binding.".into(),
+            description: "Direct send to a peer. Address by their nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, or a session_id prefix — resolved against the live roster, with an ambiguous/unknown token returning an error listing the candidates.".into(),
             input_schema: schema_object(
                 json!({
-                    "to":   { "type": "string", "description": "Recipient `session_id` (uuid) from marshal://roster." },
+                    "to":   { "type": "string", "description": "Recipient nickname (e.g. `swift-falcon`), full `session_id`, or session_id prefix — from marshal://roster." },
                     "body": { "type": "string", "description": "Message body." }
                 }),
                 &["to", "body"],

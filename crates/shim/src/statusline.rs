@@ -1,7 +1,7 @@
 //! `marshal-shim statusline` — Claude Code `statusLine` renderer.
 //!
 //! Reads Claude Code's JSON status payload from stdin, prints
-//! `[user@host dir sid8]` to stdout, and exits. Dispatched from `main`
+//! `[user@host dir (branch) nickname]` to stdout, and exits. Dispatched from `main`
 //! BEFORE the tokio runtime is built, so this per-render hot path never
 //! pays for async / WS / MCP init — which is why it lives as a
 //! subcommand of the one binary rather than a separate artifact that has
@@ -14,9 +14,9 @@
 //!
 //! Everything in the prefix is derivable from Claude's stdin payload
 //! (`workspace.current_dir`, `session_id`) plus the local environment
-//! (`USER`/`USERNAME`, `gethostname`). The short session id is the first
-//! 8 chars of Claude's canonical session_id, matching the shim's MCP
-//! registration so the same id appears everywhere a human reads it.
+//! (`USER`/`USERNAME`, `gethostname`). The handle is the session's
+//! deterministic `marshal_entities::nickname` of its canonical session_id —
+//! the same name every peer computes, so it's what they address.
 
 use std::io::Read;
 
@@ -60,7 +60,15 @@ pub fn render() {
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
-    let sid8 = &session_id[..session_id.len().min(8)];
+    // Memorable, deterministic session handle (adjective-noun, e.g.
+    // `swift-falcon`) instead of a raw hex id prefix — peers/agents address a
+    // session by this, and it must not read like a git commit hash. Empty when
+    // Claude gave us no session_id (then the handle is omitted).
+    let handle = if session_id.is_empty() {
+        String::new()
+    } else {
+        marshal_entities::nickname(session_id)
+    };
 
     // Current git branch, rendered in parentheses after the path per
     // git-prompt.sh (__git_ps1) convention. None on detached HEAD / non-repo.
@@ -77,7 +85,7 @@ pub fn render() {
 
     println!(
         "{}",
-        format_prefix(&user, host, dir, branch.as_deref(), sid8, cannot_receive)
+        format_prefix(&user, host, dir, branch.as_deref(), &handle, cannot_receive)
     );
 }
 
@@ -105,25 +113,26 @@ fn git_branch(cwd: &str) -> Option<String> {
 
 /// Render the statusline prefix. Pure so the formatting contract is
 /// testable without touching stdin / env / gethostname. `branch` is rendered
-/// as ` (branch)` after the path per git-prompt.sh convention; `cannot_receive`
-/// appends a warning when the marshal daemon is unreachable (no live channel
-/// AND no inbox — genuinely can't receive peer messages).
+/// as ` (branch)` after the path per git-prompt.sh convention; `handle` is the
+/// session's memorable nickname (omitted when empty); `cannot_receive` appends
+/// a warning when the marshal daemon is unreachable (no live channel AND no
+/// inbox — genuinely can't receive peer messages).
 fn format_prefix(
     user: &str,
     host: &str,
     dir: &str,
     branch: Option<&str>,
-    sid8: &str,
+    handle: &str,
     cannot_receive: bool,
 ) -> String {
     let loc = match branch {
         Some(b) => format!("{dir} ({b})"),
         None => dir.to_string(),
     };
-    let base = if sid8.is_empty() {
+    let base = if handle.is_empty() {
         format!("[{user}@{host} {loc}]")
     } else {
-        format!("[{user}@{host} {loc} {sid8}]")
+        format!("[{user}@{host} {loc} {handle}]")
     };
     if cannot_receive {
         format!("{base} ⚠ marshal UNREACHABLE")
@@ -145,22 +154,22 @@ mod tests {
     use super::format_prefix;
 
     #[test]
-    fn prefix_includes_sid_when_present() {
+    fn prefix_includes_handle_when_present() {
         assert_eq!(
             format_prefix(
                 "max",
                 "pulse-admin",
                 "pulse-deploy",
                 None,
-                "5846bf98",
+                "swift-falcon",
                 false
             ),
-            "[max@pulse-admin pulse-deploy 5846bf98]"
+            "[max@pulse-admin pulse-deploy swift-falcon]"
         );
     }
 
     #[test]
-    fn prefix_omits_sid_when_empty() {
+    fn prefix_omits_handle_when_empty() {
         assert_eq!(
             format_prefix("max", "pulse-admin", "pulse-deploy", None, "", false),
             "[max@pulse-admin pulse-deploy]"
@@ -175,10 +184,10 @@ mod tests {
                 "pulse-admin",
                 "pulse-deploy",
                 Some("feat/rotunda-mesh-partition-support"),
-                "5846bf98",
+                "swift-falcon",
                 false
             ),
-            "[max@pulse-admin pulse-deploy (feat/rotunda-mesh-partition-support) 5846bf98]"
+            "[max@pulse-admin pulse-deploy (feat/rotunda-mesh-partition-support) swift-falcon]"
         );
     }
 
@@ -190,10 +199,10 @@ mod tests {
                 "pulse-admin",
                 "pulse-deploy",
                 Some("main"),
-                "5846bf98",
+                "swift-falcon",
                 true
             ),
-            "[max@pulse-admin pulse-deploy (main) 5846bf98] ⚠ marshal UNREACHABLE"
+            "[max@pulse-admin pulse-deploy (main) swift-falcon] ⚠ marshal UNREACHABLE"
         );
     }
 }
