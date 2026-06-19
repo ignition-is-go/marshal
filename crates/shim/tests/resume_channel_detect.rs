@@ -79,9 +79,10 @@ fn silent_when_daemon_reachable() {
         !out.contains(WARNING),
         "reachable daemon must NOT warn; statusline was: {out:?}"
     );
+    // Sanity: a normal prefix rendered (cwd basename present, bracketed).
     assert!(
-        out.contains("itest-se"),
-        "expected the session id prefix; got: {out:?}"
+        out.trim_start().starts_with('[') && out.contains("tmp"),
+        "expected a rendered statusline prefix; got: {out:?}"
     );
     let _ = handle.join();
 }
