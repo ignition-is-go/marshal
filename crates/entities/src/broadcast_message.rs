@@ -135,7 +135,9 @@ impl CommandHandler for BroadcastMessage {
         ctx.emit_set(&msg)?;
 
         // Per-recipient live push. Stale bindings get logged in `failed`
-        // rather than aborting the whole broadcast.
+        // rather than aborting the whole broadcast. Show the sender by its
+        // memorable nickname (raw uuid is unreadable); full id stays in `meta`.
+        let from_nickname = crate::nickname(sender.id.0.as_ref());
         let mut delivered = Vec::new();
         let mut failed = Vec::new();
         for recipient_id in &recipient_ids {
@@ -157,15 +159,14 @@ impl CommandHandler for BroadcastMessage {
             let dispatched = push_to_client(
                 client_id.0.as_ref(),
                 format!(
-                    "marshal: new message from session {} to room '{}': {}",
-                    sender.id.0.as_ref(),
-                    room.name,
-                    self.body,
+                    "marshal: new message from {} to room '{}': {}",
+                    from_nickname, room.name, self.body,
                 ),
                 serde_json::json!({
                     "source": "marshal",
                     "kind": "new_message",
                     "from_session": sender.id.0.as_ref(),
+                    "from_nickname": from_nickname,
                     "to_room": room.id.0.as_ref(),
                     "to_room_name": room.name,
                     "body": self.body,
