@@ -158,10 +158,10 @@ impl CommandHandler for BroadcastMessage {
 
             let dispatched = push_to_client(
                 client_id.0.as_ref(),
-                format!(
-                    "marshal: new message from {} to room '{}': {}",
-                    from_nickname, room.name, self.body,
-                ),
+                // Concise ping only — no leading "marshal:" (Claude prefixes
+                // the channel name) and no body (avoids a truncated banner; the
+                // body is in meta.body / the persisted Message / the inbox).
+                format!("new message from {} in room '{}'", from_nickname, room.name),
                 serde_json::json!({
                     "source": "marshal",
                     "kind": "new_message",

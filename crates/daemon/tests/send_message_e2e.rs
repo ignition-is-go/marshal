@@ -242,11 +242,21 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         });
     }
     let push = received.lock().unwrap().take().expect("push");
-    assert!(
-        push.content.contains("hello bravo"),
-        "channel content should carry the message body, got: {}",
+    // The channel banner is a concise origin ping by the sender's nickname —
+    // NOT the body (which would just be a truncated banner). The full body
+    // travels in meta.body (and the persisted Message / inbox).
+    assert_eq!(
+        push.content,
+        format!("new message from {}", marshal_entities::nickname("sess-alpha")),
+        "content should be a nickname-only origin ping, got: {}",
         push.content,
     );
+    assert!(
+        !push.content.contains("hello bravo"),
+        "content must NOT carry the body, got: {}",
+        push.content,
+    );
+    assert_eq!(push.meta.get("body"), Some(&serde_json::json!("hello bravo")));
     assert_eq!(
         push.meta.get("kind"),
         Some(&serde_json::json!("new_message"))
@@ -254,6 +264,10 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     assert_eq!(
         push.meta.get("from_session"),
         Some(&serde_json::json!("sess-alpha"))
+    );
+    assert_eq!(
+        push.meta.get("from_nickname"),
+        Some(&serde_json::json!(marshal_entities::nickname("sess-alpha")))
     );
 
     // And the server persisted exactly one Message — only after the push

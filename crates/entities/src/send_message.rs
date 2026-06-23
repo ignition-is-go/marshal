@@ -127,7 +127,12 @@ impl CommandHandler for SendMessage {
         let delivered_live = match recipient.client_id.as_ref() {
             Some(cid) if recipient_can_render => push_to_client(
                 cid.0.as_ref(),
-                format!("marshal: new message from {}: {}", from_nickname, self.body),
+                // Concise origin ping only — no leading "marshal:" (Claude
+                // already prefixes the channel name, else it reads "marshal:
+                // marshal:") and no body (it would just be a truncated banner;
+                // the full body is in `meta.body`, the persisted Message, and
+                // the inbox).
+                format!("new message from {from_nickname}"),
                 serde_json::json!({
                     "source": "marshal",
                     "kind": "new_message",
