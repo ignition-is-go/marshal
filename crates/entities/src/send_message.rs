@@ -119,18 +119,20 @@ impl CommandHandler for SendMessage {
         // let it pull from the inbox next turn. `None` (legacy shim that
         // doesn't report channel state) keeps prior best-effort behavior.
         let recipient_can_render = recipient.channels_enabled != Some(false);
+        // Surface the sender by its memorable nickname (deterministic from the
+        // id) so the recipient sees who it's from at a glance — the raw uuid is
+        // unreadable and looks like a commit. The full id stays in `meta` for
+        // exact reply routing; `from_nickname` lets an agent reply by name.
+        let from_nickname = crate::nickname(sender.id.0.as_ref());
         let delivered_live = match recipient.client_id.as_ref() {
             Some(cid) if recipient_can_render => push_to_client(
                 cid.0.as_ref(),
-                format!(
-                    "marshal: new message from session {}: {}",
-                    sender.id.0.as_ref(),
-                    self.body
-                ),
+                format!("marshal: new message from {}: {}", from_nickname, self.body),
                 serde_json::json!({
                     "source": "marshal",
                     "kind": "new_message",
                     "from_session": sender.id.0.as_ref(),
+                    "from_nickname": from_nickname,
                     "to_session": recipient.id.0.as_ref(),
                     "body": self.body,
                     "sent_at": now,
