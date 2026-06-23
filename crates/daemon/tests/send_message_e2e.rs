@@ -247,7 +247,10 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     // travels in meta.body (and the persisted Message / inbox).
     assert_eq!(
         push.content,
-        format!("new message from {}", marshal_entities::nickname("sess-alpha")),
+        format!(
+            "new message from {}",
+            marshal_entities::nickname("sess-alpha")
+        ),
         "content should be a nickname-only origin ping, got: {}",
         push.content,
     );
@@ -256,7 +259,10 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         "content must NOT carry the body, got: {}",
         push.content,
     );
-    assert_eq!(push.meta.get("body"), Some(&serde_json::json!("hello bravo")));
+    assert_eq!(
+        push.meta.get("body"),
+        Some(&serde_json::json!("hello bravo"))
+    );
     assert_eq!(
         push.meta.get("kind"),
         Some(&serde_json::json!("new_message"))
