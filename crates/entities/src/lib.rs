@@ -46,3 +46,26 @@ pub use session::*;
 /// generated `myko_item` code is pulled into a binary that doesn't otherwise
 /// reference these types directly.
 pub fn link() {}
+
+// Register the hand-written wire structs/enums for TypeScript export. The
+// `#[myko_item]`/`#[myko_command]` macros register the entities, commands, and
+// their `Args` types automatically, but NOT a command's hand-written result
+// type or plain helper structs — those need an explicit `register_ts_export!`
+// (the same call the macros emit internally). Without this the daemon's
+// `typegen` would emit `index.ts` imports for these types but never write their
+// files. `register_ts_export!` is a no-op unless `ts-export` is on, so this
+// costs nothing in normal builds.
+myko::register_ts_export!(
+    HostInfo,
+    SendMessageResult,
+    BroadcastMessageResult,
+    DeliveredRecipient,
+    FailedRecipient,
+    JoinRoomResult,
+    LeaveRoomResult,
+    AckMessagesResult,
+    ReadMessagesResult,
+    MessageView,
+    RoomKind,
+    AutoSource,
+);

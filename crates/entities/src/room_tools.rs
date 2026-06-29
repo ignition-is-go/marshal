@@ -44,6 +44,7 @@ pub struct JoinRoom {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct JoinRoomResult {
     pub room_id: RoomId,
     pub name: String,
@@ -147,6 +148,7 @@ pub struct LeaveRoom {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct LeaveRoomResult {
     pub room_id: RoomId,
     /// `true` if the call removed an existing membership; `false`

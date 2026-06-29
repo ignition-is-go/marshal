@@ -39,6 +39,7 @@ pub struct Room {
 /// differently from ad-hoc rooms (icon, dim color, can't-leave).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub enum RoomKind {
     Auto {
         source: AutoSource,
@@ -53,6 +54,7 @@ pub enum RoomKind {
 /// matching auto-rooms.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "anchor", rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub enum AutoSource {
     /// Singleton — every live session is a member. Never DEL'd.
     Everyone,
