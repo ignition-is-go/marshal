@@ -49,6 +49,7 @@ pub struct SendMessage {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct SendMessageResult {
     pub message_id: MessageId,
     /// Recipient's session id, echoed back so callers can confirm what

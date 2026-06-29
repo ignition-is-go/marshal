@@ -1,0 +1,32 @@
+{
+  "name": "marshal-opencode",
+  "version": "0.18.1",
+  "description": "opencode plugin that connects an opencode session to the marshal coordination daemon — roster registration, send_message/broadcast/join_room/leave_room/set_status tools, and real-time + per-turn delivery of sibling-agent messages. The opencode-native counterpart of the Claude Code marshal-shim, built on opencode's plugin hooks instead of a shim binary.",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "marshal",
+    "agent-coordination"
+  ],
+  "dependencies": {
+    "@myko/core": "^4.19.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.3.3"
+  }
+}

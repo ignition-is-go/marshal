@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// builds, the TUI in pure-observer mode) may leave it `None`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct HostInfo {
     /// `gethostname()` result. Anchors the auto-room `host:<name>`.
     pub name: String,

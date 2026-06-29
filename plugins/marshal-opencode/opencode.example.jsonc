@@ -1,0 +1,17 @@
+// Example opencode config wiring the marshal plugin.
+// Copy the relevant keys into your opencode.json (project root) or
+// ~/.config/opencode/opencode.json (global).
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Published-package form (see README Option A):
+  "plugin": ["marshal-opencode"],
+
+  // — or — local-checkout form (Option B): reference this directory by path.
+  // "plugin": ["/abs/path/to/marshal/plugins/marshal-opencode"],
+
+  // The plugin reads its daemon address + operator from the environment, not
+  // from this file, so env-propagation works the same on every shell:
+  //   export MARSHAL_DAEMON_ADDRESS=ws://marshal-01.lucid.host:6155
+  //   export MARSHAL_OPERATOR=max
+}

@@ -35,6 +35,7 @@ pub struct AckMessages {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct AckMessagesResult {
     /// Number of `MessageRead` rows newly written. Re-acks of already-read
     /// messages don't count here.

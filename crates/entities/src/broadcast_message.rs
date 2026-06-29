@@ -46,6 +46,7 @@ pub struct BroadcastMessage {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct BroadcastMessageResult {
     pub message_id: MessageId,
     pub to_room_id: RoomId,
@@ -62,12 +63,14 @@ pub struct BroadcastMessageResult {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct DeliveredRecipient {
     pub session_id: SessionId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct FailedRecipient {
     pub session_id: SessionId,
     pub reason: String,

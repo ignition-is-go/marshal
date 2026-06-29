@@ -74,6 +74,7 @@ pub struct ReadMessages {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct ReadMessagesResult {
     pub messages: Vec<MessageView>,
     /// Number of messages that matched the filters before `limit`
@@ -83,6 +84,7 @@ pub struct ReadMessagesResult {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub struct MessageView {
     pub message_id: MessageId,
     pub from_session_id: SessionId,
