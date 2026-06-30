@@ -24,6 +24,7 @@ import { join } from "node:path";
 
 import { MarshalDaemon } from "../src/daemon.js";
 import type { Identity } from "../src/identity.js";
+import { nickname } from "../src/nickname.js";
 
 function resolveDaemonBin(): string | null {
   const fromEnv = process.env.MARSHAL_DAEMON_BIN;
@@ -169,7 +170,7 @@ suite("marshal-opencode ↔ real marshal-daemon", () => {
 
     const inbox = await daemonB.drainInbox(B);
     expect(inbox).toContain("hello from alice");
-    expect(inbox).toContain(A); // sender id is included for reply routing
+    expect(inbox).toContain(nickname(A)); // sender's nickname is shown (address replies to it)
 
     // Acked on first drain → second drain is empty.
     const again = await daemonB.drainInbox(B);
