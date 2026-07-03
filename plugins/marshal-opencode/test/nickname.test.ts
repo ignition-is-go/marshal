@@ -1,7 +1,7 @@
-// Locks the TS nickname port to the Rust daemon's output. These pairs were
-// captured from a live marshal://roster (the daemon-rendered nickname for each
-// session id), so a regression here means the plugin would show a DIFFERENT
-// handle than peers see — defeating the point.
+// Locks the TS nickname port to the Rust daemon's output. These pairs are
+// pinned against the shared wordlists (crates/entities/src/nickname.rs); a
+// regression here means the plugin would show a DIFFERENT handle than peers
+// see — defeating the point. Regenerate if the wordlists change on both sides.
 //
 // Run: bun test
 
@@ -11,9 +11,9 @@ import { nickname } from "../src/nickname.js";
 
 describe("nickname matches the Rust daemon byte-for-byte", () => {
   test.each([
-    ["0834c23f-94ab-4a39-b344-94d6bc8fdd47", "clever-falcon"],
-    ["ses_0ef1bd4a4ffe36zulNOpPiU7Ll", "ivory-pebble"],
-    ["ses_0ef404a1affe3fi2IhMtYQ9IjL", "coral-python"],
+    ["0834c23f-94ab-4a39-b344-94d6bc8fdd47", "vernal-hedgehog"],
+    ["ses_0ef1bd4a4ffe36zulNOpPiU7Ll", "gleaming-guppy"],
+    ["ses_0ef404a1affe3fi2IhMtYQ9IjL", "windswept-urchin"],
     ["", "anon"],
   ])("%s -> %s", (id, expected) => {
     expect(nickname(id)).toBe(expected);
