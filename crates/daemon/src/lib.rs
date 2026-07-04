@@ -11,8 +11,10 @@ pub mod auto_rooms;
 pub mod cleanup;
 pub mod hooks;
 pub mod http_listener;
+pub mod nickname_assign;
 pub mod persister;
 
 pub fn link() {
     auto_rooms::link();
+    nickname_assign::link();
 }
