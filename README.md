@@ -153,7 +153,7 @@ The daemon's bind address is set with `MARSHAL_BIND` (default `0.0.0.0:6155` —
 | [`marshal-daemon`](crates/daemon/) | Coordination daemon — roster store, event log, sweeper. |
 | [`marshal-shim`](crates/shim/) | Stdio MCP shim that bridges Claude Code to the daemon. |
 | [`marshal-tui`](crates/tui/) | Live terminal dashboard. |
-| [`marshal-web`](crates/web/) | Leptos operator dashboard (build target only — not published). |
+| [`marshal-ui`](crates/ui/) | Leptos operator dashboard (build target only — not published). |
 
 Releases are driven by [`cargo-flux`](https://github.com/ignition-is-go/cargo-flux): conventional-commit `feat:` / `fix:` / breaking changes on `main` cut a stable release; the same on `dev` cuts a prerelease. See `flux.toml` and `.github/workflows/release.yml`.
 
