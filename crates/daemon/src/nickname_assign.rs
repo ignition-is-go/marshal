@@ -16,7 +16,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use marshal_entities::{
-    nickname, GetAllSessionNicknames, GetAllSessions, Session, SessionNickname, SessionNicknameId,
+    GetAllSessionNicknames, GetAllSessions, Session, SessionNickname, SessionNicknameId, nickname,
 };
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
