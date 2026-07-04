@@ -138,6 +138,18 @@ export function getAllRoomMembers(): MarshalQuery<RoomMemberItem> {
   return { queryId: "GetAllRoomMembers", queryItemType: "RoomMember", query: {} };
 }
 
+/** The daemon-assigned, frozen handle for a session (id = the session id). The
+ *  daemon owns the wordlists + assignment now, so the plugin READS this instead
+ *  of recomputing — a wordlist change can never desync it from the roster. */
+export interface SessionNicknameItem {
+  id: string;
+  nickname: string;
+}
+
+export function getAllSessionNicknames(): MarshalQuery<SessionNicknameItem> {
+  return { queryId: "GetAllSessionNicknames", queryItemType: "SessionNickname", query: {} };
+}
+
 // ── Command/query result shapes (the fields the plugin actually reads) ────
 
 export interface SendMessageResult {

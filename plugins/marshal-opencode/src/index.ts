@@ -24,7 +24,6 @@ import type { Event } from "@opencode-ai/sdk";
 
 import { MarshalDaemon } from "./daemon.js";
 import { resolveIdentity } from "./identity.js";
-import { nickname } from "./nickname.js";
 
 const DEFAULT_ADDRESS = "ws://localhost:6155";
 
@@ -230,7 +229,7 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
           "operator, project, git branch, and session id (how peers see and address you).",
         args: {},
         async execute(_args, ctx) {
-          const nick = nickname(ctx.sessionID);
+          const nick = daemon.nicknameFor(ctx.sessionID);
           const host = identity.host.name;
           const branch = identity.gitBranch ? ` (${identity.gitBranch})` : "";
           const oneline = `[${identity.operator}@${host} ${identity.project ?? "-"}${branch} ${nick}]`;

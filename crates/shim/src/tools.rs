@@ -40,6 +40,22 @@ pub struct ToolHost {
     pub sessions_cell: Cell<Vec<Arc<Session>>, CellImmutable>,
     pub rooms_cell: Cell<Vec<Arc<Room>>, CellImmutable>,
     pub members_cell: Cell<Vec<Arc<RoomMember>>, CellImmutable>,
+    /// Daemon-assigned handles, keyed by session id. Read instead of
+    /// recomputing so a wordlist change never desyncs the shim from the roster.
+    pub nicknames_cell: Cell<Vec<Arc<marshal_entities::SessionNickname>>, CellImmutable>,
+}
+
+/// The daemon-assigned handle for `session_id`, read from the SessionNickname
+/// cell. Falls back to the computed candidate for the brief window before the
+/// daemon has assigned one — they agree in the common case, and the assigned
+/// value is authoritative once present.
+fn handle_for(host: &ToolHost, session_id: &str) -> String {
+    host.nicknames_cell
+        .get()
+        .iter()
+        .find(|n| n.id.0.as_ref() == session_id)
+        .map(|n| n.nickname.clone())
+        .unwrap_or_else(|| marshal_entities::nickname(session_id))
 }
 
 pub struct CoordHandler {
@@ -105,7 +121,7 @@ fn read_whoami(host: &ToolHost, uri: &str) -> ResourceContent {
         uri,
         json!({
             "session_id": snapshot.id.0.as_ref(),
-            "nickname": marshal_entities::nickname(snapshot.id.0.as_ref()),
+            "nickname": handle_for(host, snapshot.id.0.as_ref()),
             "pid": host.pid,
             "cwd": host.cwd,
             "operator": snapshot.operator,
@@ -128,7 +144,7 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 .collect();
             json!({
                 "session_id": s.id.0.as_ref(),
-                "nickname": marshal_entities::nickname(s.id.0.as_ref()),
+                "nickname": handle_for(host, s.id.0.as_ref()),
                 "is_self": s.id.0.as_ref() == me.as_str(),
                 "pid": s.pid,
                 "cwd": s.cwd,
@@ -279,14 +295,14 @@ fn resolve_recipient(host: &ToolHost, to: &str) -> Result<SessionId, ToolError> 
     // 2. Unique nickname.
     let by_nick: Vec<&Arc<Session>> = sessions
         .iter()
-        .filter(|s| marshal_entities::nickname(s.id.0.as_ref()) == to)
+        .filter(|s| handle_for(host, s.id.0.as_ref()) == to)
         .collect();
     if by_nick.len() == 1 {
         return Ok(by_nick[0].id.clone());
     }
     if by_nick.len() > 1 {
         return Err(ToolError::invalid_params(ambiguous_recipient(
-            "nickname", to, &by_nick,
+            host, "nickname", to, &by_nick,
         )));
     }
     // 3. Unique session-id prefix.
@@ -300,6 +316,7 @@ fn resolve_recipient(host: &ToolHost, to: &str) -> Result<SessionId, ToolError> 
             "send_message: no live session matches `{to}` (by id, nickname, or id-prefix) — check marshal://roster"
         ))),
         _ => Err(ToolError::invalid_params(ambiguous_recipient(
+            host,
             "id-prefix",
             to,
             &by_prefix,
@@ -307,13 +324,13 @@ fn resolve_recipient(host: &ToolHost, to: &str) -> Result<SessionId, ToolError> 
     }
 }
 
-fn ambiguous_recipient(kind: &str, to: &str, matches: &[&Arc<Session>]) -> String {
+fn ambiguous_recipient(host: &ToolHost, kind: &str, to: &str, matches: &[&Arc<Session>]) -> String {
     let list = matches
         .iter()
         .map(|s| {
             format!(
                 "{} ({})",
-                marshal_entities::nickname(s.id.0.as_ref()),
+                handle_for(host, s.id.0.as_ref()),
                 s.id.0.as_ref()
             )
         })

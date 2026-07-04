@@ -19,12 +19,11 @@
 import { ConnectionStatus, MykoClient } from "@myko/core";
 import type { MEvent } from "@myko/core";
 
-import { nickname } from "./nickname.js";
-
 import {
   ackMessages,
   broadcastMessage,
   getAllSessions,
+  getAllSessionNicknames,
   joinRoom,
   leaveRoom,
   NOTIFY_CHANNEL_COMMAND_ID,
@@ -42,6 +41,7 @@ import {
   type ReadMessagesResult,
   type SendMessageResult,
   type SessionItem,
+  type SessionNicknameItem,
 } from "./entities.js";
 import type { Identity } from "./identity.js";
 
@@ -84,8 +84,12 @@ export class MarshalDaemon {
   private readonly sessions = new Map<string, SessionItem>();
 
   /** Latest roster snapshot, kept warm by a standing query subscription so
-   *  inbox rendering can label senders (`host:cwd`) without a per-turn fetch. */
+   *  inbox rendering can label senders without a per-turn fetch. */
   private roster: SessionItem[] = [];
+
+  /** Daemon-assigned handles, kept warm the same way. Read instead of
+   *  recomputing, so a wordlist change never desyncs us from the roster. */
+  private nicknames: SessionNicknameItem[] = [];
 
   private notifyHandler: NotifyHandler | null = null;
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
@@ -128,6 +132,10 @@ export class MarshalDaemon {
     // Keep a warm roster snapshot for sender labelling.
     this.watch(getAllSessions()).subscribe((items) => {
       this.roster = items;
+    });
+    // …and the daemon-assigned handles, read wherever we show a nickname.
+    this.watch(getAllSessionNicknames()).subscribe((items) => {
+      this.nicknames = items;
     });
 
     this.client.setAddress(withMykoPath(this.cfg.address));
@@ -280,8 +288,15 @@ export class MarshalDaemon {
   /** The sender's friendly handle: `nickname (operator@host)` — the nickname is
    *  how you address them back (send_message resolves it), so the raw session id
    *  is dropped. Falls back to just the nickname when the roster row isn't warm. */
+  /** The session's daemon-assigned handle, from the warm cache. Falls back to
+   *  the raw session id for the brief window before the daemon has assigned one
+   *  (near-instant on a session's first SET). */
+  nicknameFor(sessionId: string): string {
+    return this.nicknames.find((n) => n.id === sessionId)?.nickname ?? sessionId;
+  }
+
   private senderLabel(sessionId: string): string {
-    const nick = nickname(sessionId);
+    const nick = this.nicknameFor(sessionId);
     const s = this.roster.find((r) => r.id === sessionId);
     if (!s) return nick;
     const ctx = [s.operator, s.host?.name].filter(Boolean).join("@");

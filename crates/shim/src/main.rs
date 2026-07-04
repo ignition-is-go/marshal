@@ -200,6 +200,9 @@ async fn serve() -> Result<()> {
         client.watch_query::<marshal_entities::GetAllRooms>(marshal_entities::GetAllRooms {});
     let members_cell = client
         .watch_query::<marshal_entities::GetAllRoomMembers>(marshal_entities::GetAllRoomMembers {});
+    let nicknames_cell = client.watch_query::<marshal_entities::GetAllSessionNicknames>(
+        marshal_entities::GetAllSessionNicknames {},
+    );
 
     // Re-SET our Session on every connect. The daemon holds session state
     // in-memory, so a daemon restart drops every roster entry; we have to
@@ -239,6 +242,7 @@ async fn serve() -> Result<()> {
         sessions_cell,
         rooms_cell,
         members_cell,
+        nicknames_cell,
     });
 
     let handler = Arc::new(tools::CoordHandler { host });

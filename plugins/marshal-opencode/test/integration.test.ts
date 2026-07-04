@@ -24,7 +24,6 @@ import { join } from "node:path";
 
 import { MarshalDaemon } from "../src/daemon.js";
 import type { Identity } from "../src/identity.js";
-import { nickname } from "../src/nickname.js";
 
 function resolveDaemonBin(): string | null {
   const fromEnv = process.env.MARSHAL_DAEMON_BIN;
@@ -168,9 +167,15 @@ suite("marshal-opencode ↔ real marshal-daemon", () => {
     // type so a Rust-side rename/retype of the result is caught here.
     expect(typeof res.deliveredLive).toBe("boolean");
 
+    // The sender is labeled by its daemon-ASSIGNED handle now (the plugin reads
+    // it from the roster, it doesn't recompute). Wait for the assignment to
+    // reach our cache, then assert a real adjective-noun handle shows.
+    await waitFor(() => daemonB.nicknameFor(A) !== A, 5000);
+    const aHandle = daemonB.nicknameFor(A);
     const inbox = await daemonB.drainInbox(B);
     expect(inbox).toContain("hello from alice");
-    expect(inbox).toContain(nickname(A)); // sender's nickname is shown (address replies to it)
+    expect(aHandle).toContain("-");
+    expect(inbox).toContain(aHandle);
 
     // Acked on first drain → second drain is empty.
     const again = await daemonB.drainInbox(B);

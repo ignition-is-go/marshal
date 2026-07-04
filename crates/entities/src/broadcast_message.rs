@@ -139,8 +139,8 @@ impl CommandHandler for BroadcastMessage {
 
         // Per-recipient live push. Stale bindings get logged in `failed`
         // rather than aborting the whole broadcast. Show the sender by its
-        // memorable nickname (raw uuid is unreadable); full id stays in `meta`.
-        let from_nickname = crate::nickname(sender.id.0.as_ref());
+        // daemon-assigned nickname (raw uuid is unreadable); full id in `meta`.
+        let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
         let mut delivered = Vec::new();
         let mut failed = Vec::new();
         for recipient_id in &recipient_ids {
