@@ -86,11 +86,13 @@ impl CommandHandler for JoinRoom {
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
 
-        // Find or create the room. We slugify and append `-N` on
-        // collision so the resulting id is naturally unique without a
-        // separate reconciliation pass.
-        let room_id_str = pick_unique_room_id(&slug, &rooms);
-        let room_id = RoomId(Arc::from(room_id_str.as_str()));
+        // The slug IS the room id, so `join_room("design")` JOINS the
+        // existing "design" room by name (created:false) and only creates it
+        // when none exists — the whole point of a named, shared room. (Reserved
+        // auto-room slugs are rejected above.) Previously this appended `-N` on
+        // any slug collision, which meant two agents naming the same room each
+        // got their OWN suffixed room and never actually shared one.
+        let room_id = RoomId(Arc::from(slug.as_str()));
         let now = Utc::now().timestamp_millis();
 
         let (room, created) = match rooms.iter().find(|r| r.id == room_id) {
@@ -256,22 +258,6 @@ pub fn slugify(name: &str) -> String {
         out.pop();
     }
     out
-}
-
-fn pick_unique_room_id(slug: &str, rooms: &[Arc<Room>]) -> String {
-    use std::collections::HashSet;
-    let taken: HashSet<&str> = rooms.iter().map(|r| r.id.0.as_ref()).collect();
-    if !taken.contains(slug) {
-        return slug.to_string();
-    }
-    let mut n = 2u32;
-    loop {
-        let candidate = format!("{slug}-{n}");
-        if !taken.contains(candidate.as_str()) {
-            return candidate;
-        }
-        n += 1;
-    }
 }
 
 #[cfg(test)]
