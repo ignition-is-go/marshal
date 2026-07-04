@@ -33,3 +33,9 @@ marshal-entities = { workspace = true }
 # the bundle small. Don't inherit from workspace — Cargo can't override
 # the workspace's implicit `default-features = true` from a member.
 chrono = { version = "0.4", default-features = false, features = ["wasmbind", "clock", "serde"] }
+
+# Browser-only: read window.location so the built bundle dials the daemon on
+# whatever host served it (see daemon_address() in lib.rs). WASM target only,
+# so host `cargo check` never pulls it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Location"] }

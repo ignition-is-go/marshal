@@ -16,8 +16,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     # Backstop: this single job does crates.io publish + apt + cross-build +
-    # upload. A flaky apt mirror hung it ~2h on 2026-06-18; fail in minutes.
-    timeout-minutes: 30
+    # the marshal-ui WASM bundle + upload. A flaky apt mirror hung it ~2h on
+    # 2026-06-18; fail in minutes.
+    timeout-minutes: 40
     permissions:
       contents: write
       id-token: write
@@ -30,6 +31,11 @@ jobs:
           fetch-tags: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Prebuilt trunk (fast) — builds the marshal-ui WASM bundle shipped as a
+      # release asset below.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
 
       - run: cargo install cargo-flux
 
@@ -98,7 +104,17 @@ jobs:
           cp target/release/marshal-daemon  marshal-daemon-x86_64-unknown-linux-gnu
           cp target/release/marshal-shim    marshal-shim-x86_64-unknown-linux-gnu
           cp target/x86_64-pc-windows-gnu/release/marshal-shim.exe marshal-shim-x86_64-pc-windows-gnu.exe
+
+          # marshal-ui: build the Leptos/WASM dashboard to a static bundle and
+          # ship it as a release asset, so the pulse-deploy `marshal_ui` role
+          # downloads + serves it (like the daemon binary) — no compiler on the
+          # marshal LXC. Platform-independent, so no triple suffix.
+          rustup target add wasm32-unknown-unknown
+          ( cd crates/ui && trunk build --release )
+          tar -czf marshal-ui-dist.tar.gz -C crates/ui/dist .
+
           gh release upload "v$VERSION" \
             marshal-daemon-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-unknown-linux-gnu \
-            marshal-shim-x86_64-pc-windows-gnu.exe
+            marshal-shim-x86_64-pc-windows-gnu.exe \
+            marshal-ui-dist.tar.gz
