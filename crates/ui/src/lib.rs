@@ -11,13 +11,31 @@ use marshal_entities::{GetAllMessages, GetAllSessions};
 
 const DEFAULT_ADDRESS: &str = "localhost:6155";
 
+/// The daemon WS address to dial. marshal-01 serves both this UI and the
+/// daemon, so in the browser we connect back to the host that served the page
+/// on the daemon's port — keeping the built bundle independent of which host it
+/// lands on. Falls back to the dev default under `trunk serve` (localhost).
+fn daemon_address() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let host = web_sys::window()
+            .and_then(|w| w.location().hostname().ok())
+            .unwrap_or_default();
+        if !host.is_empty() && host != "localhost" && host != "127.0.0.1" {
+            return format!("{host}:6155");
+        }
+    }
+    DEFAULT_ADDRESS.to_string()
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
 
+    let address = daemon_address();
     // Connect immediately. `provide_myko` no-ops on non-wasm targets but in
     // the browser it constructs the MykoClient and stashes it in context.
-    myko_leptos::provide_myko(DEFAULT_ADDRESS);
+    myko_leptos::provide_myko(&address);
 
     let connected = myko_leptos::use_connection_status();
     // myko-leptos 4.17: live_query takes a closure returning the query.
@@ -27,7 +45,7 @@ pub fn App() -> impl IntoView {
     view! {
         <Title text="marshal"/>
         <div class="app">
-            <Header connected=connected.into() address=DEFAULT_ADDRESS />
+            <Header connected=connected.into() address=address.clone() />
             <SessionsCard sessions=sessions />
             <MessagesCard messages=messages />
         </div>
@@ -35,7 +53,7 @@ pub fn App() -> impl IntoView {
 }
 
 #[component]
-fn Header(connected: Signal<bool>, address: &'static str) -> impl IntoView {
+fn Header(connected: Signal<bool>, address: String) -> impl IntoView {
     view! {
         <header class="status-bar">
             <div class=move || {

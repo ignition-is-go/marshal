@@ -2272,6 +2272,7 @@ dependencies = [
  "marshal-entities",
  "myko",
  "myko-leptos",
+ "web-sys",
 ]
 
 [[package]]
