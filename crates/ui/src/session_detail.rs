@@ -15,14 +15,14 @@ use std::sync::Arc;
 
 use crate::nick::{self};
 use crate::time::{self, Now};
-use crate::Selected;
+use crate::use_focus;
 
 /// Recent traffic rows shown for the selected session.
 const TRAFFIC_CAP: usize = 20;
 
 #[component]
 pub fn SessionDetail() -> impl IntoView {
-    let selected = use_context::<Selected>().expect("Selected provided at root");
+    let focus = use_focus();
     let sessions = myko_leptos::live_query::<GetAllSessions>(|| GetAllSessions {});
     let messages = myko_leptos::live_query::<GetAllMessages>(|| GetAllMessages {});
     let members = myko_leptos::live_query::<GetAllRoomMembers>(|| GetAllRoomMembers {});
@@ -43,7 +43,7 @@ pub fn SessionDetail() -> impl IntoView {
     // reactive spans below). The reply box is mounted separately, outside this
     // closure, so it survives data churn.
     let body = move || {
-        let Some(sid) = selected.0.get() else {
+        let Some(sid) = focus.session.get() else {
             return view! {
                 <EmptyState message="Select a session in the Roster to inspect it.".to_string() />
             }
@@ -167,7 +167,7 @@ pub fn SessionDetail() -> impl IntoView {
         {body}
         // Reply box: mounted outside the data closure so typing survives data
         // churn; only re-created when the selection changes.
-        {move || selected.0.get().map(|sid| view! { <crate::console::ReplyBox target=sid /> })}
+        {move || focus.session.get().map(|sid| view! { <crate::console::ReplyBox target=sid /> })}
         <style>{DETAIL_CSS}</style>
     }
 }

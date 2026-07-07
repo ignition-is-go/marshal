@@ -77,6 +77,14 @@ impl Freshness {
     }
 }
 
+/// Absolute local timestamp for a hover title — the browser's locale format.
+pub fn abs_time(ts_ms: i64) -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts_ms as f64));
+    d.to_locale_string("en-US", &wasm_bindgen::JsValue::UNDEFINED)
+        .as_string()
+        .unwrap_or_default()
+}
+
 /// Compact human age: `"12s"`, `"3m"`, `"2h"`, `"4d"`. Sub-second reads as `"0s"`.
 pub fn humanize_age(age_secs: i64) -> String {
     if age_secs < 60 {

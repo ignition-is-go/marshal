@@ -311,6 +311,20 @@ fn Compose(
     let bc_room = RwSignal::new(String::new());
     let bc_body = RwSignal::new(String::new());
 
+    // Pre-target from the global focus: selecting a session (roster) or room
+    // (rooms pane) fills the matching picker here.
+    let focus = crate::use_focus();
+    Effect::new(move |_| {
+        if let Some(s) = focus.session.get() {
+            dm_to.set(s);
+        }
+    });
+    Effect::new(move |_| {
+        if let Some(r) = focus.room.get() {
+            bc_room.set(r);
+        }
+    });
+
     let as_session = console.as_session();
 
     let sink_dm = sink.clone();

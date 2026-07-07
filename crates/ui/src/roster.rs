@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::nick::{self, Nicknames};
 use crate::time::{self, Freshness, Now};
-use crate::Selected;
+use crate::{use_focus, Focus};
 
 /// Effective "last seen" for a session: its most recent activity, or its
 /// connect time before it's ever pushed activity.
@@ -24,10 +24,10 @@ fn last_seen_ms(s: &Session) -> i64 {
 
 #[component]
 pub fn RosterPanel() -> impl IntoView {
-    let sessions = myko_leptos::live_query::<GetAllSessions>(|| GetAllSessions {});
+    let (sessions, loaded) = myko_leptos::live_query_loaded::<GetAllSessions>(|| GetAllSessions {});
     let now = time::use_now();
     let nick = nick::use_nicknames();
-    let selected = use_context::<Selected>().expect("Selected provided at root");
+    let focus = use_focus();
 
     let filter = RwSignal::new(String::new());
 
@@ -99,9 +99,14 @@ pub fn RosterPanel() -> impl IntoView {
         {move || {
             let all = visible.get();
             if all.is_empty() {
-                return view! {
-                    <EmptyState message="No sessions on the roster. Shims and TUIs appear here as they connect.".to_string() />
-                }.into_any();
+                let msg = if sessions.get().len() > 0 {
+                    "No sessions match the filter."
+                } else if loaded.get() {
+                    "No sessions on the roster. Shims and TUIs appear here as they connect."
+                } else {
+                    "Connecting to the marshal daemon…"
+                };
+                return view! { <EmptyState message=msg.to_string() /> }.into_any();
             }
             // Group by host name; sessions without a host fall into "unknown".
             let mut by_host: BTreeMap<String, Vec<Arc<Session>>> = BTreeMap::new();
@@ -132,7 +137,7 @@ pub fn RosterPanel() -> impl IntoView {
                                     </td>
                                 </tr>
                                 {members.into_iter().map(|s| view! {
-                                    <RosterRow session=s now=now nick=nick selected=selected />
+                                    <RosterRow session=s now=now nick=nick focus=focus />
                                 }).collect_view()}
                             </tbody>
                         }
@@ -146,10 +151,16 @@ pub fn RosterPanel() -> impl IntoView {
 }
 
 #[component]
-fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, selected: Selected) -> impl IntoView {
+fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, focus: Focus) -> impl IntoView {
     let id = session.id.0.to_string();
     let sid = nick::short_id(&id);
     let seen_ms = last_seen_ms(&session);
+    let seen_abs = time::abs_time(seen_ms);
+
+    // Is this row the viewer's own operator console? (shown as "you" when online)
+    let console = crate::console::use_console();
+    let is_console = session.id.0.as_ref() == console.session_id.as_ref();
+    let online = console.online;
 
     // The identity columns aren't reactive within a row — the parent `For`
     // re-renders the row when the session Arc changes — so precompute them as
@@ -167,7 +178,7 @@ fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, selected: Selecte
     // Row highlight + freshness recede, live each second.
     let sel_id = id.clone();
     let row_class = move || {
-        let is_sel = selected.0.with(|s| s.as_deref() == Some(sel_id.as_str()));
+        let is_sel = focus.session.with(|s| s.as_deref() == Some(sel_id.as_str()));
         let stale = Freshness::from_age_secs(time::age_secs(seen_ms, now.ms())) == Freshness::Stale;
         let mut c = String::from("roster-row");
         if is_sel {
@@ -182,15 +193,16 @@ fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, selected: Selecte
     let seen = move || {
         let age = time::age_secs(seen_ms, now.ms());
         let cls = format!("c-num seen-{}", Freshness::from_age_secs(age).class());
-        view! { <td class=cls>{format!("{} ago", time::humanize_age(age))}</td> }
+        view! { <td class=cls title=seen_abs.clone()>{format!("{} ago", time::humanize_age(age))}</td> }
     };
 
     let click_id = id.clone();
     view! {
-        <tr class=row_class on:click=move |_| selected.0.set(Some(click_id.clone()))>
+        <tr class=row_class on:click=move |_| focus.toggle_session(click_id.clone())>
             <td class="c-name">
                 <span class="nick">{handle}</span>
                 <span class="sid">{sid}</span>
+                {move || (is_console && online.get()).then(|| view! { <span class="you-badge">"you"</span> })}
             </td>
             <td class=op_dim>{op_str}</td>
             <td class=proj_dim>{proj_str}</td>
@@ -233,4 +245,5 @@ const ROSTER_CSS: &str = r#"
    out the column width; the full text is on the cell's title (hover). */
 .roster-t td.c-status { max-width: 240px; }
 .roster-t td.c-status .ellip { display: block; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roster-t .you-badge { margin-left: 8px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-base-100); background: var(--color-primary); padding: 1px 5px; border-radius: 3px; }
 "#;

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::nick::{self};
+use crate::use_focus;
 
 /// (sort-key, badge variant, label) for a room kind. Auto-rooms sort ahead of
 /// ad-hoc; within auto, everyone → host → operator → project.
@@ -32,6 +33,7 @@ pub fn RoomsPanel() -> impl IntoView {
     let rooms = myko_leptos::live_query::<GetAllRooms>(|| GetAllRooms {});
     let members = myko_leptos::live_query::<GetAllRoomMembers>(|| GetAllRoomMembers {});
     let nick = nick::use_nicknames();
+    let focus = use_focus();
 
     // room id -> member session ids.
     let membership = Memo::new(move |_| {
@@ -95,8 +97,17 @@ pub fn RoomsPanel() -> impl IntoView {
                         let count = handles.len();
                         let desc = r.description.clone();
                         let name = r.name.clone();
+                        let rid = r.id.0.to_string();
+                        let rid_hl = rid.clone();
+                        // Clicking a room focuses the workspace on it (feed scopes,
+                        // console pre-targets); clicking again clears.
+                        let card_class = move || if focus.room.with(|x| x.as_deref() == Some(rid_hl.as_str())) {
+                            "room-card focused"
+                        } else {
+                            "room-card"
+                        };
                         view! {
-                            <div class="room-card">
+                            <div class=card_class on:click=move |_| focus.toggle_room(rid.clone())>
                                 <div class="room-top">
                                     <span class="room-name">"#" {name}</span>
                                     <Badge variant=variant>{label}</Badge>
@@ -125,7 +136,9 @@ pub fn RoomsPanel() -> impl IntoView {
 
 const ROOMS_CSS: &str = r#"
 .room-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
-.room-card { border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-base-200); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.room-card { border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-base-200); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; cursor: pointer; }
+.room-card:hover { border-color: var(--color-border-hover); }
+.room-card.focused { border-color: var(--color-primary); background: color-mix(in oklch, var(--color-primary) 10%, var(--color-base-200)); }
 .room-top { display: flex; align-items: center; gap: 8px; }
 .room-name { font-family: var(--font-mono); font-weight: 600; font-size: 13px; color: var(--color-text-primary); }
 .room-n { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--color-text-secondary); }

@@ -27,6 +27,8 @@ use styleable::Styleable;
 mod console;
 mod messages;
 mod nick;
+mod notify;
+mod palette;
 mod roster;
 mod rooms;
 mod session_detail;
@@ -36,11 +38,50 @@ mod time;
 /// `daemon_address`). Groups with the daemon's :6155 and the hook :6156.
 const DAEMON_PORT: u16 = 6155;
 
-/// Cross-panel selection: the session id an operator clicked in the Roster.
-/// The Session detail panel reads it. One `RwSignal` shared via context is how
-/// two independently-mounted mullion panes coordinate.
+/// The global focus — a lens shared across every pane. Selecting a session (a
+/// roster row) or a room (a rooms card) focuses the whole workspace on it: the
+/// session detail drills in, the message feed scopes to it, the console
+/// pre-targets it. Session and room are mutually exclusive — focusing one clears
+/// the other, so there's always a single subject.
 #[derive(Clone, Copy)]
-pub struct Selected(pub RwSignal<Option<String>>);
+pub struct Focus {
+    pub session: RwSignal<Option<String>>,
+    pub room: RwSignal<Option<String>>,
+}
+
+impl Focus {
+    pub fn set_session(&self, id: String) {
+        self.room.set(None);
+        self.session.set(Some(id));
+    }
+    pub fn set_room(&self, id: String) {
+        self.session.set(None);
+        self.room.set(Some(id));
+    }
+    pub fn toggle_session(&self, id: String) {
+        if self.session.get_untracked().as_deref() == Some(id.as_str()) {
+            self.session.set(None);
+        } else {
+            self.set_session(id);
+        }
+    }
+    pub fn toggle_room(&self, id: String) {
+        if self.room.get_untracked().as_deref() == Some(id.as_str()) {
+            self.room.set(None);
+        } else {
+            self.set_room(id);
+        }
+    }
+    pub fn clear(&self) {
+        self.session.set(None);
+        self.room.set(None);
+    }
+}
+
+/// Read the shared focus from context.
+pub fn use_focus() -> Focus {
+    use_context::<Focus>().expect("Focus provided at root")
+}
 
 /// The daemon WS address to dial. marshal-01 serves both this bundle and the
 /// daemon, so in the browser we connect back to the host that served the page
@@ -75,7 +116,11 @@ pub fn App() -> impl IntoView {
     let connected = myko_leptos::use_connection_status();
     nick::provide_nicknames();
     console::provide_console();
-    provide_context(Selected(RwSignal::new(Option::<String>::None)));
+    provide_context(Focus {
+        session: RwSignal::new(None),
+        room: RwSignal::new(None),
+    });
+    notify::provide_notifications();
 
     // mullion workspace theme — wired straight to the pulse-leptos-ui BaseStyle
     // tokens (injected at root) so the panes use the brand palette. The `--ml-*`
@@ -110,6 +155,8 @@ pub fn App() -> impl IntoView {
                     app_icon=ActivityIcon::Svg(ICON_APP.to_string())
                 />
             </main>
+            <notify::NotificationBell />
+            <palette::CommandK />
         </div>
 
         <style>{SHELL_CSS}</style>

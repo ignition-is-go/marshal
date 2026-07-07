@@ -13,32 +13,36 @@
 //! fall back to its short id.
 
 use leptos::prelude::*;
-use marshal_entities::{GetAllSessionNicknames, SessionNickname};
-use std::sync::Arc;
+use marshal_entities::GetAllSessionNicknames;
+use std::collections::HashMap;
 
-/// Handle to the live nickname map. Cheap to copy; `of()` is a reactive read.
+/// Handle to the live nickname map. Cheap to copy; `of()` is a reactive,
+/// O(1) read against a memoized `session_id → nickname` map.
 #[derive(Clone, Copy)]
-pub struct Nicknames(ReadSignal<Vec<Arc<SessionNickname>>>);
+pub struct Nicknames(Memo<HashMap<String, String>>);
 
 impl Nicknames {
     /// The daemon-assigned handle for `session_id`, or its short id if no
     /// assignment has landed yet. Reactive: re-runs when an assignment arrives.
     pub fn of(&self, session_id: &str) -> String {
         self.0
-            .with(|all| {
-                all.iter()
-                    .find(|n| n.id.0.as_ref() == session_id)
-                    .map(|n| n.nickname.clone())
-            })
+            .with(|map| map.get(session_id).cloned())
             .unwrap_or_else(|| short_id(session_id))
     }
 }
 
-/// Subscribe to the nickname store and stash the handle in context. Call once,
-/// inside `App`, AFTER `provide_myko` (it opens a live query).
+/// Subscribe to the nickname store and stash a memoized map in context. Call
+/// once, inside `App`, AFTER `provide_myko` (it opens a live query).
 pub fn provide_nicknames() {
     let assigned = myko_leptos::live_query::<GetAllSessionNicknames>(|| GetAllSessionNicknames {});
-    provide_context(Nicknames(assigned));
+    let map = Memo::new(move |_| {
+        assigned
+            .get()
+            .iter()
+            .map(|n| (n.id.0.to_string(), n.nickname.clone()))
+            .collect::<HashMap<String, String>>()
+    });
+    provide_context(Nicknames(map));
 }
 
 /// Read the nickname map from context. Panics only if `provide_nicknames()`
