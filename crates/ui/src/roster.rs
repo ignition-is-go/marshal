@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::nick::{self, Nicknames};
 use crate::time::{self, Freshness, Now};
-use crate::{use_focus, Focus};
+use crate::{Focus, use_focus};
 
 /// Effective "last seen" for a session: its most recent activity, or its
 /// connect time before it's ever pushed activity.
@@ -178,7 +178,9 @@ fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, focus: Focus) -> 
     // Row highlight + freshness recede, live each second.
     let sel_id = id.clone();
     let row_class = move || {
-        let is_sel = focus.session.with(|s| s.as_deref() == Some(sel_id.as_str()));
+        let is_sel = focus
+            .session
+            .with(|s| s.as_deref() == Some(sel_id.as_str()));
         let stale = Freshness::from_age_secs(time::age_secs(seen_ms, now.ms())) == Freshness::Stale;
         let mut c = String::from("roster-row");
         if is_sel {

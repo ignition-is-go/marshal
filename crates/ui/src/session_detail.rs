@@ -67,7 +67,10 @@ pub fn SessionDetail() -> impl IntoView {
             .filter(|rm| rm.session_id.0.as_ref() == sid)
             .map(|rm| {
                 let key = rm.room_id.0.to_string();
-                names.get(&key).cloned().unwrap_or_else(|| nick::short_id(&key))
+                names
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| nick::short_id(&key))
             })
             .collect();
 
@@ -76,7 +79,10 @@ pub fn SessionDetail() -> impl IntoView {
             .into_iter()
             .filter(|m| {
                 m.from_session_id.0.as_ref() == sid
-                    || m.to_session_id.as_ref().map(|s| s.0.as_ref() == sid).unwrap_or(false)
+                    || m.to_session_id
+                        .as_ref()
+                        .map(|s| s.0.as_ref() == sid)
+                        .unwrap_or(false)
             })
             .collect();
         traffic.sort_by_key(|m| std::cmp::Reverse(m.sent_at));

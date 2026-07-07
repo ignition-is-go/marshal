@@ -79,16 +79,20 @@ impl Console {
 
     /// SET the roster row (register / heartbeat / self-heal — idempotent).
     fn register(&self) {
-        let _ = self
-            .client
-            .send_event(MEvent::from_item(&self.session(), MEventType::SET, SOURCE_ID));
+        let _ = self.client.send_event(MEvent::from_item(
+            &self.session(),
+            MEventType::SET,
+            SOURCE_ID,
+        ));
     }
 
     /// DEL the roster row (leave the roster).
     fn deregister(&self) {
-        let _ = self
-            .client
-            .send_event(MEvent::from_item(&self.session(), MEventType::DEL, SOURCE_ID));
+        let _ = self.client.send_event(MEvent::from_item(
+            &self.session(),
+            MEventType::DEL,
+            SOURCE_ID,
+        ));
     }
 
     /// Opt in to participate: stamp connect time and go online. The root effect
@@ -344,7 +348,10 @@ fn Compose(
             },
             move |res| match res {
                 Ok(r) => {
-                    note.set(Some(format!("sent ✓ (delivered_live={})", r.delivered_live)));
+                    note.set(Some(format!(
+                        "sent ✓ (delivered_live={})",
+                        r.delivered_live
+                    )));
                     dm_body.set(String::new());
                 }
                 Err(e) => err.set(Some(e)),
@@ -369,7 +376,11 @@ fn Compose(
             },
             move |res| match res {
                 Ok(r) => {
-                    note.set(Some(format!("broadcast ✓ ({} delivered / {} total)", r.delivered.len(), r.total)));
+                    note.set(Some(format!(
+                        "broadcast ✓ ({} delivered / {} total)",
+                        r.delivered.len(),
+                        r.total
+                    )));
                     bc_body.set(String::new());
                 }
                 Err(e) => err.set(Some(e)),
@@ -448,7 +459,11 @@ fn JoinRoomForm(
             },
             move |res| match res {
                 Ok(r) => {
-                    note.set(Some(format!("{} #{}", if r.created { "created" } else { "joined" }, r.name)));
+                    note.set(Some(format!(
+                        "{} #{}",
+                        if r.created { "created" } else { "joined" },
+                        r.name
+                    )));
                     name.set(String::new());
                 }
                 Err(e) => err.set(Some(e)),

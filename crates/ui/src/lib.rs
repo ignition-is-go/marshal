@@ -15,7 +15,7 @@
 //! participant (it creates no `Session`).
 
 use leptos::prelude::*;
-use leptos_meta::{provide_meta_context, Title};
+use leptos_meta::{Title, provide_meta_context};
 use mullion::{
     ActivityDef, ActivityIcon, ActivityId, Category, CategoryId, MullionRoot, MullionTheme,
     PaneEvent, PaneId, PaneNode, SplitDirection,
@@ -29,8 +29,8 @@ mod messages;
 mod nick;
 mod notify;
 mod palette;
-mod roster;
 mod rooms;
+mod roster;
 mod session_detail;
 mod time;
 
@@ -339,7 +339,13 @@ fn Header(connected: Signal<bool>, addr: String) -> impl IntoView {
             StatusVariant::Error
         }
     };
-    let status_label = move || if connected.get() { "connected" } else { "disconnected" };
+    let status_label = move || {
+        if connected.get() {
+            "connected"
+        } else {
+            "disconnected"
+        }
+    };
 
     view! {
         <header class="app-header">

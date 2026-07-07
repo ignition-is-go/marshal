@@ -50,12 +50,22 @@ pub fn CommandK() -> impl IntoView {
                 s.host.as_ref().map(|h| h.name.clone()).unwrap_or_default(),
             );
             if q.is_empty() || hay.to_lowercase().contains(&q) {
-                out.push(("session", handle, s.current_task.clone(), Target::Session(s.id.0.to_string())));
+                out.push((
+                    "session",
+                    handle,
+                    s.current_task.clone(),
+                    Target::Session(s.id.0.to_string()),
+                ));
             }
         }
         for r in rooms.get() {
             if q.is_empty() || r.name.to_lowercase().contains(&q) {
-                out.push(("room", format!("#{}", r.name), None, Target::Room(r.id.0.to_string())));
+                out.push((
+                    "room",
+                    format!("#{}", r.name),
+                    None,
+                    Target::Room(r.id.0.to_string()),
+                ));
             }
         }
         out.truncate(60);

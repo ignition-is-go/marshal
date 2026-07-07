@@ -59,13 +59,21 @@ pub fn MessagesPanel() -> impl IntoView {
             .filter(|m| {
                 if let Some(sid) = &f_session {
                     let hit = m.from_session_id.0.as_ref() == sid
-                        || m.to_session_id.as_ref().map(|s| s.0.as_ref() == sid).unwrap_or(false);
+                        || m.to_session_id
+                            .as_ref()
+                            .map(|s| s.0.as_ref() == sid)
+                            .unwrap_or(false);
                     if !hit {
                         return false;
                     }
                 }
                 if let Some(rid) = &f_room {
-                    if !m.to_room_id.as_ref().map(|r| r.0.as_ref() == rid).unwrap_or(false) {
+                    if !m
+                        .to_room_id
+                        .as_ref()
+                        .map(|r| r.0.as_ref() == rid)
+                        .unwrap_or(false)
+                    {
                         return false;
                     }
                 }
@@ -80,9 +88,16 @@ pub fn MessagesPanel() -> impl IntoView {
                         .to_session_id
                         .as_ref()
                         .map(|s| nick.of(s.0.as_ref()))
-                        .or_else(|| m.to_room_id.as_ref().map(|r| names.get(&r.0.to_string()).cloned().unwrap_or_default()))
+                        .or_else(|| {
+                            m.to_room_id
+                                .as_ref()
+                                .map(|r| names.get(&r.0.to_string()).cloned().unwrap_or_default())
+                        })
                         .unwrap_or_default();
-                    if !format!("{} {from} {to}", m.body).to_lowercase().contains(&q) {
+                    if !format!("{} {from} {to}", m.body)
+                        .to_lowercase()
+                        .contains(&q)
+                    {
                         return false;
                     }
                 }
