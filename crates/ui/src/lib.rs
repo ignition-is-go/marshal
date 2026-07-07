@@ -24,6 +24,7 @@ use pulse_leptos_ui::{BaseStyle, Status, StatusVariant};
 use serde::{Deserialize, Serialize};
 use styleable::Styleable;
 
+mod console;
 mod messages;
 mod nick;
 mod roster;
@@ -73,6 +74,7 @@ pub fn App() -> impl IntoView {
     myko_leptos::provide_myko(&address);
     let connected = myko_leptos::use_connection_status();
     nick::provide_nicknames();
+    console::provide_console();
     provide_context(Selected(RwSignal::new(Option::<String>::None)));
 
     // mullion workspace theme — wired straight to the pulse-leptos-ui BaseStyle
@@ -169,6 +171,15 @@ fn categories() -> Vec<Category<Slot>> {
                         .into_any()
                 },
             },
+            ActivityDef {
+                id: ActivityId::new("console"),
+                name: "Console".into(),
+                icon: ActivityIcon::Svg(ICON_SEND.to_string()),
+                filter: |_| true,
+                render: |_p, _d| {
+                    view! { <div class="pane-scroll"><console::ConsolePanel /></div> }.into_any()
+                },
+            },
         ],
     }]
 }
@@ -230,21 +241,22 @@ fn save_layout(tree: &PaneNode<Slot>) {
 /// ```text
 /// ┌───────────────────────┬───────────────────────┐
 /// │                       │       messages        │
-/// │        roster         ├───────────────────────┤
-/// │        (hero)         │       session         │
-/// ├───────────────────────┤       (detail)        │
-/// │        rooms          │                       │
-/// └───────────────────────┴───────────────────────┘
+/// │        roster         ├───────────┬───────────┤
+/// │        (hero)         │  session  │  console  │
+/// ├───────────────────────┤ (detail)  │ (actions) │
+/// │        rooms          │           │           │
+/// └───────────────────────┴───────────┴───────────┘
 /// ```
 ///
 /// The roster is the hero on the left with rooms beneath it; the message feed
-/// and the click-to-drill session detail stack on the right. Drag/resize/split
-/// to taste, or switch any pane's view from its activity bar.
+/// runs across the top-right, and the click-to-drill session detail sits beside
+/// the operator console below it. Drag/resize/split to taste, or switch any
+/// pane's view from its activity bar.
 fn default_layout() -> PaneNode<Slot> {
     let leaf = |id: &str| PaneNode::leaf_with_activity(PaneId::new(id), ActivityId::new(id), Slot);
     PaneNode::Split {
         direction: SplitDirection::Horizontal,
-        ratio: 0.52,
+        ratio: 0.5,
         first: Box::new(PaneNode::Split {
             direction: SplitDirection::Vertical,
             ratio: 0.64,
@@ -253,9 +265,14 @@ fn default_layout() -> PaneNode<Slot> {
         }),
         second: Box::new(PaneNode::Split {
             direction: SplitDirection::Vertical,
-            ratio: 0.58,
+            ratio: 0.5,
             first: Box::new(leaf("messages")),
-            second: Box::new(leaf("session")),
+            second: Box::new(PaneNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.52,
+                first: Box::new(leaf("session")),
+                second: Box::new(leaf("console")),
+            }),
         }),
     }
 }
@@ -299,6 +316,7 @@ const ICON_USERS: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="current
 const ICON_CHAT: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>"#;
 const ICON_HASH: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>"#;
 const ICON_ID: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M15 8h2M15 12h2M7 16h10"/></svg>"#;
+const ICON_SEND: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>"#;
 
 /// Shell chrome + the shared dense-table / stat-band / nickname grammar every
 /// panel reuses. Panel-specific rules live in each panel's own `<style>`.

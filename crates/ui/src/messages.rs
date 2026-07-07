@@ -63,7 +63,8 @@ pub fn MessagesPanel() -> impl IntoView {
             }
         }}
 
-        // ── the feed ───────────────────────────────────────────────────────────
+        // ── the feed — re-renders on new messages, but per-row ages tick via
+        //    inner closures so the whole list isn't rebuilt every second ───────
         {move || {
             let msgs = sorted.get();
             if msgs.is_empty() {
@@ -72,7 +73,6 @@ pub fn MessagesPanel() -> impl IntoView {
                 }.into_any();
             }
             let names = room_names.get();
-            let now_ms = now.ms();
             view! {
                 <ul class="msg-feed">
                     {msgs.into_iter().map(|m| {
@@ -87,12 +87,13 @@ pub fn MessagesPanel() -> impl IntoView {
                         } else {
                             ("—".to_string(), "to dim")
                         };
-                        let age = time::age_secs(m.sent_at, now_ms);
-                        let when_cls = format!("msg-when seen-{}", time::Freshness::from_age_secs(age).class());
+                        let sent_at = m.sent_at;
                         let body = m.body.clone();
                         view! {
                             <li class="msg">
-                                <span class=when_cls>{format!("{} ago", time::humanize_age(age))}</span>
+                                <span class=move || format!("msg-when seen-{}", time::Freshness::from_age_secs(time::age_secs(sent_at, now.ms())).class())>
+                                    {move || format!("{} ago", time::humanize_age(time::age_secs(sent_at, now.ms())))}
+                                </span>
                                 <span class="nick">{from}</span>
                                 <span class="arrow">"→"</span>
                                 <span class=to_class>{to_label}</span>

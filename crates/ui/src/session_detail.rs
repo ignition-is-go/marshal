@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::nick::{self};
-use crate::time::{self};
+use crate::time::{self, Now};
 use crate::Selected;
 
 /// Recent traffic rows shown for the selected session.
@@ -38,10 +38,13 @@ pub fn SessionDetail() -> impl IntoView {
             .collect::<HashMap<String, String>>()
     });
 
-    move || {
+    // The DATA body — depends on selection + entity queries, but NOT on the
+    // clock, so a freshness tick doesn't re-render it (ages live in inner
+    // reactive spans below). The reply box is mounted separately, outside this
+    // closure, so it survives data churn.
+    let body = move || {
         let Some(sid) = selected.0.get() else {
             return view! {
-                <div class="panel-head"><h2>"session"</h2></div>
                 <EmptyState message="Select a session in the Roster to inspect it.".to_string() />
             }
             .into_any();
@@ -49,17 +52,14 @@ pub fn SessionDetail() -> impl IntoView {
 
         let Some(session) = sessions.get().into_iter().find(|s| s.id.0.as_ref() == sid) else {
             return view! {
-                <div class="panel-head"><h2>"session"</h2></div>
                 <EmptyState message=format!("Session {} is no longer on the roster.", nick::short_id(&sid)) />
             }
             .into_any();
         };
 
-        let now_ms = now.ms();
         let handle = nick.of(&sid);
         let short = nick::short_id(&sid);
 
-        // rooms this session belongs to.
         let names = room_names.get();
         let my_rooms: Vec<String> = members
             .get()
@@ -71,7 +71,6 @@ pub fn SessionDetail() -> impl IntoView {
             })
             .collect();
 
-        // recent traffic to/from this session, newest first.
         let mut traffic: Vec<Arc<Message>> = messages
             .get()
             .into_iter()
@@ -84,7 +83,6 @@ pub fn SessionDetail() -> impl IntoView {
         traffic.truncate(TRAFFIC_CAP);
 
         view! {
-            <div class="panel-head"><h2>"session"</h2></div>
             <div class="sd">
                 <div class="sd-hero">
                     <span class="sd-nick">{handle}</span>
@@ -99,9 +97,9 @@ pub fn SessionDetail() -> impl IntoView {
                     {kv("cwd", session.cwd.clone())}
                     {kv("pid", session.pid.to_string())}
                     {kv("status", session.current_task.clone().unwrap_or_else(|| "—".into()))}
-                    {kv("connected", age_line(session.connected_at, now_ms))}
-                    {kv_fresh("last active", session.last_activity_at, now_ms)}
-                    {kv("last tool", tool_line(&session, now_ms))}
+                    {kv_age("connected", session.connected_at, now)}
+                    {kv_fresh("last active", session.last_activity_at, now)}
+                    {kv_tool("last tool", session.last_tool.clone(), session.last_tool_at, now)}
                     {kv("live channels", channels_line(session.channels_enabled))}
                 </div>
 
@@ -140,7 +138,7 @@ pub fn SessionDetail() -> impl IntoView {
                                     } else {
                                         nick.of(m.from_session_id.0.as_ref())
                                     };
-                                    let age = time::age_secs(m.sent_at, now_ms);
+                                    let sent_at = m.sent_at;
                                     let dir = if outbound { "→" } else { "←" };
                                     let dir_cls = if outbound { "sd-dir out" } else { "sd-dir in" };
                                     let body = m.body.clone();
@@ -148,7 +146,9 @@ pub fn SessionDetail() -> impl IntoView {
                                         <li class="sd-msg">
                                             <span class=dir_cls>{dir}</span>
                                             <span class="nick">{other}</span>
-                                            <span class="sd-when">{format!("{} ago", time::humanize_age(age))}</span>
+                                            <span class="sd-when">
+                                                {move || format!("{} ago", time::humanize_age(time::age_secs(sent_at, now.ms())))}
+                                            </span>
                                             <span class="sd-body">{body}</span>
                                         </li>
                                     }
@@ -158,10 +158,17 @@ pub fn SessionDetail() -> impl IntoView {
                     }}
                 </div>
             </div>
-
-            <style>{DETAIL_CSS}</style>
         }
         .into_any()
+    };
+
+    view! {
+        <div class="panel-head"><h2>"session"</h2></div>
+        {body}
+        // Reply box: mounted outside the data closure so typing survives data
+        // churn; only re-created when the selection changes.
+        {move || selected.0.get().map(|sid| view! { <crate::console::ReplyBox target=sid /> })}
+        <style>{DETAIL_CSS}</style>
     }
 }
 
@@ -171,19 +178,49 @@ fn kv(k: &'static str, v: String) -> impl IntoView {
     }
 }
 
-/// A key/value row whose value is a freshness-coloured age (for `last_active`).
-fn kv_fresh(k: &'static str, ts: Option<i64>, now_ms: f64) -> AnyView {
+/// A key/value row whose value is a live age (re-renders each second via the
+/// inner closure, not the whole pane).
+fn kv_age(k: &'static str, ts: i64, now: Now) -> impl IntoView {
+    view! {
+        <div class="kv"><span class="k">{k}</span>
+            <span class="v">
+                {move || format!("{} ago", time::humanize_age(time::age_secs(ts, now.ms())))}
+            </span>
+        </div>
+    }
+}
+
+/// A key/value row whose value is a live freshness-coloured age (last active).
+fn kv_fresh(k: &'static str, ts: Option<i64>, now: Now) -> AnyView {
     match ts {
-        Some(t) => {
-            let age = time::age_secs(t, now_ms);
-            let cls = format!("v seen-{}", time::Freshness::from_age_secs(age).class());
-            view! {
-                <div class="kv"><span class="k">{k}</span>
-                    <span class=cls>{format!("{} ago", time::humanize_age(age))}</span>
-                </div>
-            }
-            .into_any()
+        Some(t) => view! {
+            <div class="kv"><span class="k">{k}</span>
+                <span class=move || format!("v seen-{}", time::Freshness::from_age_secs(time::age_secs(t, now.ms())).class())>
+                    {move || format!("{} ago", time::humanize_age(time::age_secs(t, now.ms())))}
+                </span>
+            </div>
         }
+        .into_any(),
+        None => kv(k, "—".to_string()).into_any(),
+    }
+}
+
+/// The last-tool row: name plus a live age.
+fn kv_tool(k: &'static str, name: Option<String>, at: Option<i64>, now: Now) -> AnyView {
+    match name {
+        Some(n) => view! {
+            <div class="kv"><span class="k">{k}</span>
+                <span class="v">
+                    {n}
+                    {at.map(|t| view! {
+                        <span class="sd-tool-age">
+                            {move || format!("  ·  {} ago", time::humanize_age(time::age_secs(t, now.ms())))}
+                        </span>
+                    })}
+                </span>
+            </div>
+        }
+        .into_any(),
         None => kv(k, "—".to_string()).into_any(),
     }
 }
@@ -192,20 +229,6 @@ fn host_line(s: &Session) -> String {
     match &s.host {
         Some(h) => format!("{}  ·  {} / {}", h.name, h.os, h.arch),
         None => "—".to_string(),
-    }
-}
-
-fn age_line(ts: i64, now_ms: f64) -> String {
-    format!("{} ago", time::humanize_age(time::age_secs(ts, now_ms)))
-}
-
-fn tool_line(s: &Session, now_ms: f64) -> String {
-    match (&s.last_tool, s.last_tool_at) {
-        (Some(name), Some(at)) => {
-            format!("{name}  ·  {} ago", time::humanize_age(time::age_secs(at, now_ms)))
-        }
-        (Some(name), None) => name.clone(),
-        _ => "—".to_string(),
     }
 }
 
@@ -225,6 +248,7 @@ const DETAIL_CSS: &str = r#"
 .sd-kv .kv { display: contents; }
 .sd-kv .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--color-text-secondary); font-family: var(--font-mono); align-self: baseline; padding-top: 2px; }
 .sd-kv .v { font-family: var(--font-mono); font-size: 12px; color: var(--color-text-primary); word-break: break-word; }
+.sd-tool-age { color: var(--color-text-secondary); }
 .sd-section { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--color-border); padding-top: 14px; }
 .sd-section-h { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-text-secondary); font-weight: 700; }
 .sd-empty { font-family: var(--font-mono); font-size: 11px; color: var(--color-text-secondary); opacity: 0.6; }
