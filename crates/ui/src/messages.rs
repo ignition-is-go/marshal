@@ -92,11 +92,13 @@ pub fn MessagesPanel() -> impl IntoView {
                         view! {
                             <li class="msg">
                                 <span class=move || format!("msg-when seen-{}", time::Freshness::from_age_secs(time::age_secs(sent_at, now.ms())).class())>
-                                    {move || format!("{} ago", time::humanize_age(time::age_secs(sent_at, now.ms())))}
+                                    {move || time::humanize_age(time::age_secs(sent_at, now.ms()))}
                                 </span>
-                                <span class="nick">{from}</span>
-                                <span class="arrow">"→"</span>
-                                <span class=to_class>{to_label}</span>
+                                <span class="msg-party">
+                                    <span class="nick">{from}</span>
+                                    <span class="arrow">"→"</span>
+                                    <span class=to_class>{to_label}</span>
+                                </span>
                                 <span class="body">{body}</span>
                             </li>
                         }
@@ -111,12 +113,16 @@ pub fn MessagesPanel() -> impl IntoView {
 
 const MESSAGES_CSS: &str = r#"
 .msg-feed { list-style: none; display: flex; flex-direction: column; }
-.msg { display: grid; grid-template-columns: 64px minmax(110px, max-content) 14px minmax(110px, max-content) 1fr; gap: 8px; align-items: baseline; padding: 5px 6px; border-bottom: 1px solid var(--color-border); font-family: var(--font-mono); font-size: 12px; }
+/* chat-line row: a narrow age, a content-width sender→recipient tag, then the
+   body flows into ALL the remaining width — no fixed party columns to waste
+   space when the nicknames are short. */
+.msg { display: flex; align-items: baseline; gap: 9px; padding: 4px 8px; border-bottom: 1px solid var(--color-border); font-family: var(--font-mono); font-size: 12px; }
 .msg:hover { background: var(--color-base-300); }
-.msg .msg-when { text-align: right; font-size: 10px; opacity: 0.8; }
-.msg .arrow { color: var(--color-text-secondary); }
+.msg .msg-when { flex: 0 0 auto; width: 34px; text-align: right; font-size: 10px; opacity: 0.75; }
+.msg .msg-party { flex: 0 0 auto; white-space: nowrap; }
+.msg .msg-party .arrow { color: var(--color-text-secondary); margin: 0 5px; }
 .msg .to { color: var(--color-success); font-weight: 600; }
 .msg .to.room { color: var(--color-info); }
 .msg .to.dim { color: var(--color-text-secondary); }
-.msg .body { color: var(--color-text-primary); white-space: normal; word-break: break-word; line-height: 1.4; }
+.msg .body { flex: 1 1 auto; min-width: 0; color: var(--color-text-primary); white-space: normal; word-break: break-word; line-height: 1.4; }
 "#;
