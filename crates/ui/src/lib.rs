@@ -188,7 +188,7 @@ fn categories() -> Vec<Category<Slot>> {
 const LAYOUT_KEY: &str = "marshal-ui-layout";
 /// Bump when `default_layout()` changes — a persisted layout with an older
 /// version is discarded so the new default reaches everyone once.
-const LAYOUT_VERSION: u32 = 1;
+const LAYOUT_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct StoredLayout {
@@ -236,44 +236,50 @@ fn save_layout(tree: &PaneNode<Slot>) {
     }
 }
 
-/// Default arrangement — an IDE-shaped workspace:
+/// Default arrangement — a three-column IDE workspace:
 ///
 /// ```text
-/// ┌───────────────────────┬───────────────────────┐
-/// │                       │       messages        │
-/// │        roster         ├───────────┬───────────┤
-/// │        (hero)         │  session  │  console  │
-/// ├───────────────────────┤ (detail)  │ (actions) │
-/// │        rooms          │           │           │
-/// └───────────────────────┴───────────┴───────────┘
+/// ┌──────────────┬──────────────────┬─────────────┐
+/// │   roster     │                  │   session   │
+/// │   (hero)     │     messages     │  (detail)   │
+/// ├──────────────┤     (feed)       ├─────────────┤
+/// │   rooms      │                  │   console   │
+/// └──────────────┴──────────────────┴─────────────┘
 /// ```
 ///
-/// The roster is the hero on the left with rooms beneath it; the message feed
-/// runs across the top-right, and the click-to-drill session detail sits beside
-/// the operator console below it. Drag/resize/split to taste, or switch any
-/// pane's view from its activity bar.
+/// Two live views get the prime real estate: the roster (hero, top-left, with
+/// rooms tucked beneath) and the message feed (full height in the middle, where
+/// a stream wants the vertical room). The click-to-drill session detail and the
+/// operator console form a right rail — a drill-down over an action pad.
+/// Drag/resize/split to taste, or switch any pane's view from its activity bar.
 fn default_layout() -> PaneNode<Slot> {
     let leaf = |id: &str| PaneNode::leaf_with_activity(PaneId::new(id), ActivityId::new(id), Slot);
+    // Column 1 (left): roster hero over rooms.
+    let left = PaneNode::Split {
+        direction: SplitDirection::Vertical,
+        ratio: 0.64,
+        first: Box::new(leaf("roster")),
+        second: Box::new(leaf("rooms")),
+    };
+    // Column 3 (right rail): session detail over the operator console.
+    let rail = PaneNode::Split {
+        direction: SplitDirection::Vertical,
+        ratio: 0.55,
+        first: Box::new(leaf("session")),
+        second: Box::new(leaf("console")),
+    };
+    // Column 2 (middle): the message feed, full height — beside the rail.
+    let middle_and_rail = PaneNode::Split {
+        direction: SplitDirection::Horizontal,
+        ratio: 0.62,
+        first: Box::new(leaf("messages")),
+        second: Box::new(rail),
+    };
     PaneNode::Split {
         direction: SplitDirection::Horizontal,
-        ratio: 0.5,
-        first: Box::new(PaneNode::Split {
-            direction: SplitDirection::Vertical,
-            ratio: 0.64,
-            first: Box::new(leaf("roster")),
-            second: Box::new(leaf("rooms")),
-        }),
-        second: Box::new(PaneNode::Split {
-            direction: SplitDirection::Vertical,
-            ratio: 0.5,
-            first: Box::new(leaf("messages")),
-            second: Box::new(PaneNode::Split {
-                direction: SplitDirection::Horizontal,
-                ratio: 0.52,
-                first: Box::new(leaf("session")),
-                second: Box::new(leaf("console")),
-            }),
-        }),
+        ratio: 0.38,
+        first: Box::new(left),
+        second: Box::new(middle_and_rail),
     }
 }
 
