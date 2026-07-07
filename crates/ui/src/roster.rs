@@ -158,6 +158,7 @@ fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, selected: Selecte
     let (proj_dim, proj_str) = opt_cell(&session.project);
     let branch_str = session.git_branch.clone().unwrap_or_else(|| "—".into());
     let (task_dim, task_str) = opt_status(&session.current_task);
+    let task_title = task_str.clone();
 
     // nickname is reactive (assignment may arrive after the row mounts).
     let nick_id = id.clone();
@@ -194,7 +195,9 @@ fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, selected: Selecte
             <td class=op_dim>{op_str}</td>
             <td class=proj_dim>{proj_str}</td>
             <td class="dim">{branch_str}</td>
-            <td class=task_dim>{task_str}</td>
+            <td class=format!("c-status {task_dim}")>
+                <span class="ellip" title=task_title>{task_str}</span>
+            </td>
             {seen}
         </tr>
     }
@@ -226,4 +229,8 @@ const ROSTER_CSS: &str = r#"
 .roster-t .roster-row.selected .c-name { box-shadow: inset 3px 0 0 var(--color-primary); }
 .roster-t .roster-row.stale td { opacity: 0.5; }
 .roster-t .roster-row.stale.selected td { opacity: 1; }
+/* status is free-form text — cap it and ellipsize so a long status can't blow
+   out the column width; the full text is on the cell's title (hover). */
+.roster-t td.c-status { max-width: 240px; }
+.roster-t td.c-status .ellip { display: block; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 "#;
