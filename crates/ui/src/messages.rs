@@ -227,7 +227,7 @@ const MESSAGES_CSS: &str = r#"
 .focus-chip .x { color: var(--color-text-secondary); }
 .focus-chip:hover .x { color: var(--color-error); }
 
-.msg-feed { list-style: none; display: flex; flex-direction: column; }
+.msg-feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 /* log block: a compact meta line (age · sender → recipient), then the body on
    its own line spanning the FULL pane width — no indent, no wasted left gutter
    on wrapped lines. */

@@ -122,7 +122,7 @@ const CK_CSS: &str = r#"
 .ck-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; z-index: 100; }
 .ck { width: min(560px, 90vw); background: var(--color-base-200); border: 1px solid var(--color-border-strong); border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-pane-floating); overflow: hidden; display: flex; flex-direction: column; max-height: 62vh; }
 .ck-input { border: none; border-bottom: 1px solid var(--color-border); background: transparent; color: var(--color-text-primary); font-family: var(--font-mono); font-size: 14px; padding: 14px 16px; outline: none; }
-.ck-list { list-style: none; overflow-y: auto; }
+.ck-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
 .ck-item { display: flex; align-items: baseline; gap: 10px; padding: 8px 16px; cursor: pointer; font-family: var(--font-mono); font-size: 12px; border-bottom: 1px solid var(--color-border); }
 .ck-item:hover { background: var(--color-base-300); }
 .ck-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-text-secondary); width: 52px; flex: 0 0 auto; }

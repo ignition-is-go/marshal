@@ -260,7 +260,7 @@ const DETAIL_CSS: &str = r#"
 .sd-empty { font-family: var(--font-mono); font-size: 11px; color: var(--color-text-secondary); opacity: 0.6; }
 .sd-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .sd-chips .chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; border: 1px solid var(--color-border); border-radius: var(--radius-pill, 999px); background: var(--color-base-200); color: var(--color-info); }
-.sd-traffic { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.sd-traffic { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .sd-msg { display: grid; grid-template-columns: 14px minmax(90px, max-content) 56px 1fr; gap: 8px; align-items: baseline; padding: 4px 4px; border-bottom: 1px solid var(--color-border); font-family: var(--font-mono); font-size: 11.5px; }
 .sd-dir { font-weight: 700; }
 .sd-dir.out { color: var(--color-success); }
