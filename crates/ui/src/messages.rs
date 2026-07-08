@@ -196,15 +196,15 @@ pub fn MessagesPanel() -> impl IntoView {
                         let body = m.body.clone();
                         view! {
                             <li class="msg">
-                                <span class=move || format!("msg-when seen-{}", time::Freshness::from_age_secs(time::age_secs(sent_at, now.ms())).class()) title=abs.clone()>
-                                    {move || time::humanize_age(time::age_secs(sent_at, now.ms()))}
-                                </span>
-                                <span class="msg-party">
+                                <div class="msg-meta">
+                                    <span class=move || format!("msg-when seen-{}", time::Freshness::from_age_secs(time::age_secs(sent_at, now.ms())).class()) title=abs.clone()>
+                                        {move || time::humanize_age(time::age_secs(sent_at, now.ms()))}
+                                    </span>
                                     <span class="nick">{from}</span>
                                     <span class="arrow">"→"</span>
                                     <span class=to_class>{to_label}</span>
-                                </span>
-                                <span class="body">{body}</span>
+                                </div>
+                                <div class="body">{body}</div>
                             </li>
                         }
                     }).collect_view()}
@@ -227,16 +227,17 @@ const MESSAGES_CSS: &str = r#"
 .focus-chip .x { color: var(--color-text-secondary); }
 .focus-chip:hover .x { color: var(--color-error); }
 
-.msg-feed { list-style: none; display: flex; flex-direction: column; }
-/* chat-line row: a narrow age, a content-width sender→recipient tag, then the
-   body flows into ALL remaining width. */
-.msg { display: flex; align-items: baseline; gap: 9px; padding: 4px 8px; border-bottom: 1px solid var(--color-border); font-family: var(--font-mono); font-size: 12px; }
+.msg-feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+/* log block: a compact meta line (age · sender → recipient), then the body on
+   its own line spanning the FULL pane width — no indent, no wasted left gutter
+   on wrapped lines. */
+.msg { display: block; padding: 5px 8px; border-bottom: 1px solid var(--color-border); font-family: var(--font-mono); font-size: 12px; }
 .msg:hover { background: var(--color-base-300); }
-.msg .msg-when { flex: 0 0 auto; width: 34px; text-align: right; font-size: 10px; opacity: 0.75; }
-.msg .msg-party { flex: 0 0 auto; white-space: nowrap; }
-.msg .msg-party .arrow { color: var(--color-text-secondary); margin: 0 5px; }
+.msg .msg-meta { display: flex; align-items: baseline; gap: 7px; }
+.msg .msg-meta .msg-when { font-size: 10px; opacity: 0.75; }
+.msg .msg-meta .arrow { color: var(--color-text-secondary); }
 .msg .to { color: var(--color-success); font-weight: 600; }
 .msg .to.room { color: var(--color-info); }
 .msg .to.dim { color: var(--color-text-secondary); }
-.msg .body { flex: 1 1 auto; min-width: 0; color: var(--color-text-primary); white-space: normal; word-break: break-word; line-height: 1.4; }
+.msg .body { display: block; margin-top: 2px; color: var(--color-text-primary); white-space: normal; word-break: break-word; line-height: 1.45; }
 "#;
