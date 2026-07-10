@@ -27,7 +27,6 @@ use uuid::Uuid;
 
 use crate::{
     message::{Message, MessageId},
-    notify::NotifyChannel,
     room::{GetAllRooms, Room, RoomId},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
@@ -137,10 +136,9 @@ impl CommandHandler for BroadcastMessage {
         };
         ctx.emit_set(&msg)?;
 
-        // Per-recipient live push. Stale bindings get logged in `failed`
-        // rather than aborting the whole broadcast. Show the sender by its
-        // daemon-assigned nickname (raw uuid is unreadable); full id in `meta`.
-        let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
+        // Membership accounting only — no live push. A broadcast is delivered
+        // AMBIENTLY (persisted + addressed to the room; seen via the marshal UI
+        // or an explicit room read), never blasted into members' turns.
         let mut delivered = Vec::new();
         let mut failed = Vec::new();
         for recipient_id in &recipient_ids {
@@ -159,36 +157,20 @@ impl CommandHandler for BroadcastMessage {
                 continue;
             };
 
-            let dispatched = push_to_client(
-                client_id.0.as_ref(),
-                // Concise ping only — no leading "marshal:" (Claude prefixes
-                // the channel name) and no body (avoids a truncated banner; the
-                // body is in meta.body / the persisted Message / the inbox).
-                format!("new message from {} in room '{}'", from_nickname, room.name),
-                serde_json::json!({
-                    "source": "marshal",
-                    "kind": "new_message",
-                    "from_session": sender.id.0.as_ref(),
-                    "from_nickname": from_nickname,
-                    "to_room": room.id.0.as_ref(),
-                    "to_room_name": room.name,
-                    "body": self.body,
-                    "sent_at": now,
-                }),
-            );
-            if dispatched {
-                delivered.push(DeliveredRecipient {
-                    session_id: recipient.id.clone(),
-                });
-            } else {
-                failed.push(FailedRecipient {
-                    session_id: recipient.id.clone(),
-                    reason: format!(
-                        "stale client binding ({}); recipient bounced and hasn't re-SET",
-                        client_id.0.as_ref(),
-                    ),
-                });
-            }
+            // AMBIENT delivery — a broadcast is NOT real-time-pushed. Unlike a
+            // direct message (which auto-injects into the recipient's turn), a
+            // room broadcast is persisted + addressed to the room and surfaced
+            // ambiently (the marshal UI's room view + an explicit
+            // `marshal://messages room=…` read) — never blasted into every
+            // member's active context. This is the fix for broadcasts hijacking
+            // whole workspaces with unrelated context. `delivered` here means
+            // "on the roster + will see it in the room", not "live-pushed".
+            // (@mention-driven per-recipient push is the planned opt-in escape
+            // hatch; until then, use a direct message when you need eyes-now.)
+            let _ = client_id;
+            delivered.push(DeliveredRecipient {
+                session_id: recipient.id.clone(),
+            });
         }
 
         Ok(BroadcastMessageResult {
@@ -209,16 +191,4 @@ fn err(ctx: &CommandContext, message: &str) -> CommandError {
         command_id: ctx.command_id.to_string(),
         message: message.to_string(),
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn push_to_client(client_id: &str, content: String, meta: serde_json::Value) -> bool {
-    use myko::{command::CommandRequest, server::try_client_registry};
-    let Some(registry) = try_client_registry() else {
-        log::warn!("[broadcast] client_registry not initialized; cannot deliver");
-        return false;
-    };
-    let cmd = NotifyChannel { content, meta };
-    let request = CommandRequest::new(cmd);
-    registry.send_command_request_to(client_id, &request)
 }
