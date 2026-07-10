@@ -247,8 +247,12 @@ export class MarshalDaemon {
   async drainInbox(sessionId: string): Promise<string | null> {
     let result: ReadMessagesResult;
     try {
+      // DIRECT-ONLY auto-inject: `toSession` (messages addressed to me
+      // directly), NOT room broadcasts. A broadcast is ambient — surfaced in
+      // the marshal UI / an explicit `read_messages room=…`, never auto-injected
+      // into the turn. Mirrors the daemon hook's surface_unread change.
       result = await this.send(
-        readMessages({ asSession: sessionId, inbox: true, sent: false, unread: true, limit: INBOX_PULL_LIMIT }),
+        readMessages({ asSession: sessionId, toSession: sessionId, inbox: false, sent: false, unread: true, limit: INBOX_PULL_LIMIT }),
       );
     } catch (e) {
       this.log(`inbox pull failed: ${String(e)}`);

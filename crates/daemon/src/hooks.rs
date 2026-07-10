@@ -206,11 +206,16 @@ fn handle_session_end(body: &[u8], ctx: &Arc<CellServerCtx>) -> String {
 /// there's nothing — curl then prints nothing and no context is added.
 fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> String {
     let sid_typed = SessionId(Arc::from(sid));
+    // DIRECT-ONLY auto-inject. The per-turn inbox surfaces messages addressed
+    // to me *directly* (`to_session`), NOT room broadcasts — a broadcast is
+    // ambient (read via `marshal://messages room=…` or the marshal UI), so it
+    // never hijacks the turn with unrelated context. `inbox: true` (direct +
+    // room) stays available for explicit reads; auto-inject is direct-only.
     let read = ReadMessages {
         room: None,
         from: None,
-        to_session: None,
-        inbox: true,
+        to_session: Some(sid_typed.clone()),
+        inbox: false,
         sent: false,
         unread: true,
         since: None,
