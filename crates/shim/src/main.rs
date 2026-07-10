@@ -679,7 +679,11 @@ fn detect_operator(cwd: &str) -> String {
     std::env::var("USER")
         .ok()
         .filter(|u| !u.trim().is_empty())
-        .or_else(|| std::env::var("USERNAME").ok().filter(|u| !u.trim().is_empty()))
+        .or_else(|| {
+            std::env::var("USERNAME")
+                .ok()
+                .filter(|u| !u.trim().is_empty())
+        })
         .unwrap_or_else(|| "anonymous".to_string())
 }
 
