@@ -145,7 +145,7 @@ async fn serve() -> Result<()> {
     let pid = std::process::id();
     let git_branch = detect_git_branch(&cwd);
     let project = detect_project_basename(&cwd);
-    let operator = detect_operator();
+    let operator = detect_operator(&cwd);
     let host = detect_host();
 
     // Claude Code's canonical session_id is the filename of its per-session
@@ -649,16 +649,71 @@ fn detect_project_basename(cwd: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Resolve which human this session belongs to. `MARSHAL_OPERATOR`
-/// wins (the explicit override for service users / shared boxes),
-/// then `$USER` (cross-platform unix), then `$USERNAME` (Windows
-/// fallback), then `"anonymous"` so we never fail to set an operator
-/// at all.
-fn detect_operator() -> String {
-    std::env::var("MARSHAL_OPERATOR")
-        .or_else(|_| std::env::var("USER"))
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "anonymous".to_string())
+/// Resolve which HUMAN drives this session, as an email — the canonical id
+/// that links the same person across harnesses and machines. Layered,
+/// strongest → weakest:
+///   1. `MARSHAL_OPERATOR` — explicit override (service users / odd launches).
+///   2. **Claude account email** — `~/.claude.json` `oauthAccount.emailAddress`,
+///      i.e. who is *driving* this Claude Code session. Stable regardless of the
+///      OS user, so it disambiguates the humans behind shared-infra `root`.
+///   3. **Git `user.email`** in the workspace — who *owns* the repo (fallback
+///      when there's no Claude account signal).
+///   4. `$USER` / `$USERNAME` — weak; often a shared/service login (`root`).
+///   5. `"anonymous"` — never fail to set an operator.
+///
+/// opencode sessions resolve their own account in the plugin's identity.ts;
+/// this is the Claude Code path.
+fn detect_operator(cwd: &str) -> String {
+    if let Ok(op) = std::env::var("MARSHAL_OPERATOR") {
+        let op = op.trim();
+        if !op.is_empty() {
+            return op.to_string();
+        }
+    }
+    if let Some(email) = claude_account_email() {
+        return email;
+    }
+    if let Some(email) = git_user_email(cwd) {
+        return email;
+    }
+    std::env::var("USER")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| std::env::var("USERNAME").ok().filter(|u| !u.trim().is_empty()))
+        .unwrap_or_else(|| "anonymous".to_string())
+}
+
+/// Claude account email for the human running this Claude Code session, from
+/// `~/.claude.json` `oauthAccount.emailAddress`. `None` off Claude Code
+/// (opencode/other) or if the file is missing/unreadable.
+fn claude_account_email() -> Option<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let raw = std::fs::read_to_string(std::path::Path::new(&home).join(".claude.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    json.get("oauthAccount")?
+        .get("emailAddress")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The workspace's git identity — `git config user.email` (effective
+/// repo-or-global) run in `cwd`, i.e. who owns/configured this repo. `None`
+/// when git is absent or the value is unset.
+fn git_user_email(cwd: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["config", "user.email"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let email = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!email.is_empty()).then_some(email)
 }
 
 /// Build a `HostInfo` from `gethostname` + `std::env::consts`. Hostname
@@ -689,6 +744,33 @@ mod tests {
             .status
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn git_user_email_reads_the_repo_identity() {
+        let tmp = std::env::temp_dir().join(format!("marshal-op-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        git(&["init", "-q"], &tmp);
+        git(&["config", "user.email", "artist@studio.test"], &tmp);
+        assert_eq!(
+            super::git_user_email(tmp.to_str().unwrap()).as_deref(),
+            Some("artist@studio.test"),
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Demonstration on the running host: the layered resolver must NOT collapse
+    /// to the OS user when a Claude account / git email is present. Tolerant so
+    /// CI (no account/git identity) still passes; asserts an email when a signal
+    /// exists — and prints the resolved operator so it can be eyeballed.
+    #[test]
+    fn operator_resolves_to_a_human_not_the_os_user() {
+        let op = super::detect_operator(".");
+        eprintln!("detect_operator(\".\") -> {op}");
+        if super::claude_account_email().is_some() || super::git_user_email(".").is_some() {
+            assert!(op.contains('@'), "expected an email address, got {op:?}");
+        }
     }
 
     /// The branch the roster shows must track the ACTUAL repo HEAD — this
