@@ -264,7 +264,7 @@ async fn serve() -> Result<()> {
                                        since=MILLIS, limit=N\n\
              \n\
              WRITE paths are tools (use `tools/call`):\n\
-             - send_message       — direct send to a peer's session_id\n\
+             - send_message       — direct send to a peer (agent), or to a human via their agent\n\
              - broadcast          — fan-out to all members of a room\n\
              - join_room          — create or join an ad-hoc room\n\
              - leave_room         — leave an ad-hoc room\n\
@@ -275,8 +275,12 @@ async fn serve() -> Result<()> {
              deterministic adjective-noun derived from its session_id, shown in \
              its statusline and in marshal://roster. Address peers by nickname, \
              session_id, or session_id prefix (send_message resolves any of \
-             them). The `swift-falcon` after a peer's path is its nickname, NOT \
-             a git branch or commit.\n\
+             them). To reach a HUMAN rather than one specific agent, address \
+             their operator identity — the email on their roster row, e.g. \
+             `max@lucid.rocks` (or `op:`/`human:`-prefixed) — and it routes to \
+             whichever of their agents is currently most active. The \
+             `swift-falcon` after a peer's path is its nickname, NOT a git \
+             branch or commit.\n\
              \n\
              Inbound peer messages arrive as `notifications/claude/channel` \
              events; reply with `send_message` or `broadcast`.",
