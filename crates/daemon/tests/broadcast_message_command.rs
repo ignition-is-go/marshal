@@ -84,7 +84,8 @@ fn set_member(ctx: &CellServerCtx, room: &str, sess: &str) {
         joined_at: 0,
     };
     let ev = MEvent::from_item(&m, MEventType::SET, &Uuid::new_v4().to_string());
-    ctx.apply_event_batch(vec![ev]).expect("apply RoomMember SET");
+    ctx.apply_event_batch(vec![ev])
+        .expect("apply RoomMember SET");
 }
 
 fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
@@ -141,7 +142,10 @@ fn plain_broadcast_persists_one_ambient_room_message() {
     let msgs = messages(&ctx);
     assert_eq!(msgs.len(), 1, "only the ambient room message");
     assert_eq!(msgs[0].to_room_id, Some(RoomId(Arc::from("everyone"))));
-    assert!(msgs[0].to_session_id.is_none(), "room message, not directed");
+    assert!(
+        msgs[0].to_session_id.is_none(),
+        "room message, not directed"
+    );
 }
 
 #[test]
@@ -170,8 +174,14 @@ fn mention_delivers_a_direct_ping_to_the_named_member() {
         .find(|m| m.to_session_id.is_some())
         .expect("a direct ping exists");
     assert_eq!(direct.to_session_id, Some(SessionId(Arc::from("alice"))));
-    assert!(direct.body.starts_with("[@mention in"), "carries room context");
-    assert!(direct.body.contains("redeploying"), "carries the broadcast body");
+    assert!(
+        direct.body.starts_with("[@mention in"),
+        "carries room context"
+    );
+    assert!(
+        direct.body.contains("redeploying"),
+        "carries the broadcast body"
+    );
 }
 
 #[test]
