@@ -265,7 +265,7 @@ async fn serve() -> Result<()> {
              \n\
              WRITE paths are tools (use `tools/call`):\n\
              - send_message       — direct send to a peer (agent), or to a human via their agent\n\
-             - broadcast          — fan-out to all members of a room\n\
+             - broadcast          — ambient fan-out to a room (@mention a peer in the body to also ping them directly)\n\
              - join_room          — create or join an ad-hoc room\n\
              - leave_room         — leave an ad-hoc room\n\
              - set_status         — set this session's free-form status text\n\

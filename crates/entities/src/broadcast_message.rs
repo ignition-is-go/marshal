@@ -58,6 +58,12 @@ pub struct BroadcastMessageResult {
     pub total: u32,
     pub delivered: Vec<DeliveredRecipient>,
     pub failed: Vec<FailedRecipient>,
+    /// Sessions that an `@mention` in the body resolved to and got a direct
+    /// ping (see the @mention escape hatch in `execute`). Empty for an
+    /// un-mentioned broadcast. Lets the sender confirm a handle resolved — a
+    /// typo'd `@name` simply won't appear here.
+    #[serde(default)]
+    pub mentioned: Vec<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +179,61 @@ impl CommandHandler for BroadcastMessage {
             });
         }
 
+        // ── @mention escape hatch ────────────────────────────────────────
+        // A broadcast is ambient, but naming a peer with `@<handle>` in the
+        // body is an OPT-IN directed ping. Resolve each @token and deliver it
+        // as a real DIRECT message (inbox pull + best-effort live push — the
+        // same path as SendMessage) so a mention is never missed, and it works
+        // even if the mentioned peer isn't a member of the room. Unresolvable
+        // @tokens are just prose and ignored. This is the escape hatch the
+        // ambient-broadcast change (#47) left a TODO for.
+        let mut mentioned: Vec<SessionId> = Vec::new();
+        let mut pinged: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
+        for token in parse_mentions(&self.body) {
+            let Some(target) = crate::send_message::resolve_mention(&ctx, &sessions, &token)? else {
+                continue;
+            };
+            // Never ping the sender; ping each resolved peer at most once even
+            // if it was named twice (e.g. by nickname and by operator).
+            if target.id == sender.id || !pinged.insert(target.id.0.clone()) {
+                continue;
+            }
+            let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
+            // Persist a direct Message so it lands in the target's inbox and is
+            // pulled next turn regardless of live state. The body carries the
+            // room context so the recipient knows it came from a broadcast.
+            let ping = Message {
+                id: MessageId(Arc::from(Uuid::new_v4().to_string())),
+                from_session_id: sender.id.clone(),
+                to_session_id: Some(target.id.clone()),
+                to_room_id: None,
+                body: format!("[@mention in {}] {}", room.name, self.body),
+                sent_at: now,
+            };
+            ctx.emit_set(&ping)?;
+            // Best-effort live push, honest about render capability (same rule
+            // as SendMessage: a flag-off recipient is inbox-only).
+            if target.channels_enabled != Some(false)
+                && let Some(cid) = target.client_id.as_ref()
+            {
+                crate::send_message::push_to_client(
+                    cid.0.as_ref(),
+                    format!("{from_nickname} mentioned you in {}", room.name),
+                    serde_json::json!({
+                        "source": "marshal",
+                        "kind": "mention",
+                        "from_session": sender.id.0.as_ref(),
+                        "from_nickname": from_nickname,
+                        "to_session": target.id.0.as_ref(),
+                        "room": room.id.0.as_ref(),
+                        "body": self.body,
+                        "sent_at": now,
+                    }),
+                );
+            }
+            mentioned.push(target.id.clone());
+        }
+
         Ok(BroadcastMessageResult {
             message_id: msg.id,
             to_room_id: room.id.clone(),
@@ -181,6 +242,7 @@ impl CommandHandler for BroadcastMessage {
             total: recipient_ids.len() as u32,
             delivered,
             failed,
+            mentioned,
         })
     }
 }
@@ -190,5 +252,76 @@ fn err(ctx: &CommandContext, message: &str) -> CommandError {
         tx: ctx.tx().to_string(),
         command_id: ctx.command_id.to_string(),
         message: message.to_string(),
+    }
+}
+
+/// Extract `@mention` handles from a broadcast body. A mention is an `@` at a
+/// word boundary (start of string or after whitespace) followed by a handle
+/// run: alphanumerics plus `. _ - + : @` — covering nicknames (`swift-falcon`),
+/// operator emails (`max@lucid.rocks`), and `op:`/`human:` prefixes. Trailing
+/// sentence punctuation is trimmed. The word-boundary rule means a bare email
+/// in prose (`ping max@x.com`) is NOT a mention; address the human as
+/// `@max@x.com`.
+fn parse_mentions(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let at_boundary = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        if bytes[i] == b'@' && at_boundary {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if c.is_ascii_alphanumeric()
+                    || matches!(c, b'.' | b'_' | b'-' | b'+' | b':' | b'@')
+                {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            let tok = body[start..j].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            if !tok.is_empty() {
+                out.push(tok.to_string());
+            }
+            i = j.max(start);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mentions;
+
+    #[test]
+    fn parses_nickname_email_and_prefixed_mentions() {
+        assert_eq!(parse_mentions("hey @swift-falcon look"), vec!["swift-falcon"]);
+        assert_eq!(
+            parse_mentions("@max@lucid.rocks your call on the redeploy"),
+            vec!["max@lucid.rocks"]
+        );
+        assert_eq!(
+            parse_mentions("cc @op:trevor and @human:max"),
+            vec!["op:trevor", "human:max"]
+        );
+        // Trailing sentence punctuation is trimmed off the handle.
+        assert_eq!(
+            parse_mentions("@swift-falcon, @teal-wolf!"),
+            vec!["swift-falcon", "teal-wolf"]
+        );
+    }
+
+    #[test]
+    fn ignores_bare_emails_and_stray_ats() {
+        // A bare email in prose is NOT a mention — the '@' isn't at a word
+        // boundary. To reach the human you write `@max@x.com`.
+        assert!(parse_mentions("ping max@x.com when ready").is_empty());
+        assert!(parse_mentions("no mentions here").is_empty());
+        assert!(parse_mentions("look @ this").is_empty());
+        assert!(parse_mentions("").is_empty());
     }
 }

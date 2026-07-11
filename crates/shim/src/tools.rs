@@ -393,10 +393,10 @@ pub fn tools_def() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "broadcast".into(),
-            description: "Fan-out send to every member of a room except yourself. Returns delivered + failed lists. Errors loudly if the room has no other members.".into(),
+            description: "Ambient fan-out to a room — the message is addressed to the room and surfaced there (marshal UI / `marshal://messages room=…`), NOT injected into members' turns, so it never hijacks anyone's context. To pull a specific peer in, @mention them in the body (`@swift-falcon`, or `@max@lucid.rocks` to reach a human): each resolved handle ALSO gets a real direct message (inbox + live push), even if they aren't in the room. Returns delivered + the resolved `mentioned` list; errors if the room has no other members.".into(),
             input_schema: schema_object(
                 json!({
-                    "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `host:*`, `op:*`, `project:*`, or any ad-hoc room id." },
+                    "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },
                     "body":    { "type": "string", "description": "Message body." }
                 }),
                 &["to_room", "body"],
