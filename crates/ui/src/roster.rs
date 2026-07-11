@@ -55,7 +55,7 @@ pub fn RosterPanel() -> impl IntoView {
             })
             .collect();
         // Most-recently-active first within a host group.
-        v.sort_by(|a, b| last_seen_ms(b).cmp(&last_seen_ms(a)));
+        v.sort_by_key(|s| std::cmp::Reverse(last_seen_ms(s)));
         v
     });
 
@@ -99,7 +99,7 @@ pub fn RosterPanel() -> impl IntoView {
         {move || {
             let all = visible.get();
             if all.is_empty() {
-                let msg = if sessions.get().len() > 0 {
+                let msg = if !sessions.get().is_empty() {
                     "No sessions match the filter."
                 } else if loaded.get() {
                     "No sessions on the roster. Shims and TUIs appear here as they connect."

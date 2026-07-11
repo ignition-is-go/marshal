@@ -67,15 +67,14 @@ pub fn MessagesPanel() -> impl IntoView {
                         return false;
                     }
                 }
-                if let Some(rid) = &f_room {
-                    if !m
+                if let Some(rid) = &f_room
+                    && !m
                         .to_room_id
                         .as_ref()
                         .map(|r| r.0.as_ref() == rid)
                         .unwrap_or(false)
-                    {
-                        return false;
-                    }
+                {
+                    return false;
                 }
                 match k {
                     Kind::Direct if m.to_session_id.is_none() => return false,
@@ -168,7 +167,7 @@ pub fn MessagesPanel() -> impl IntoView {
         {move || {
             let msgs = visible.get();
             if msgs.is_empty() {
-                let msg = if messages.get().len() > 0 {
+                let msg = if !messages.get().is_empty() {
                     "No messages match the filter."
                 } else if loaded.get() {
                     "No messages yet. Sends and broadcasts stream in here live."
