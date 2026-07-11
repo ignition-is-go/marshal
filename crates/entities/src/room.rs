@@ -6,10 +6,12 @@
 //!
 //! Rooms come in two kinds:
 //! - `Auto`: derived from a session's identity. The daemon's
-//!   `AutoRoomSaga` keeps the four anchor rooms (`everyone`, `host:*`,
-//!   `op:*`, `project:*`) in sync as sessions arrive/leave.
+//!   `AutoRoomSaga` keeps the anchor rooms (`everyone`, `op:*`,
+//!   `project:*`) in sync as sessions arrive/leave. (`host:*` was
+//!   retired — a per-node singleton with no coordination value; the
+//!   `AutoSource::Host` variant is kept only so older persisted host
+//!   rooms still deserialize until the cleanup GC reaps them.)
 //! - `Adhoc`: anything a user creates with `join_room("anything")`.
-//!   Cleanup-swept when the last member leaves.
 
 use myko::myko_item;
 use serde::{Deserialize, Serialize};
