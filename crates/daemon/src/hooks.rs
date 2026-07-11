@@ -36,10 +36,39 @@ use marshal_entities::{
     AckMessages, GetAllSessions, HostInfo, MessageId, ReadMessages, Session, SessionId,
 };
 
-/// Dispatch a POST to a `/hook/*` path. Returns `Some(text)` (possibly
-/// empty) for a known hook route — the listener writes it as the
-/// `text/plain` body — or `None` for an unknown path (→ 404).
-pub fn dispatch(path: &str, query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> Option<String> {
+/// A hook's HTTP response body, plus any inbox ack that must be deferred
+/// until the response is confirmed written back to the caller.
+///
+/// Acking is what marks a surfaced message "delivered". Doing it inside the
+/// hook — before the `<marshal_inbox>` bytes reach the agent — is at-most-once:
+/// a response that times out (`curl --max-time 5`) or drops mid-write would
+/// leave the messages marked read but never seen. So `surface_unread` returns
+/// the surfaced ids here and the listener acks them ONLY after a successful
+/// `write_all`+flush (see `ack_surfaced`), making inbox delivery at-least-once:
+/// a failed write leaves them unread to re-surface next turn.
+pub struct HookOutcome {
+    pub body: String,
+    pub deferred_ack: Option<(SessionId, Vec<MessageId>)>,
+}
+
+impl HookOutcome {
+    fn text(body: String) -> Self {
+        Self {
+            body,
+            deferred_ack: None,
+        }
+    }
+}
+
+/// Dispatch a POST to a `/hook/*` path. Returns `Some(outcome)` for a known
+/// hook route — the listener writes `outcome.body` as the `text/plain` body,
+/// then runs `outcome.deferred_ack` — or `None` for an unknown path (→ 404).
+pub fn dispatch(
+    path: &str,
+    query: &str,
+    body: &[u8],
+    ctx: &Arc<CellServerCtx>,
+) -> Option<HookOutcome> {
     match path {
         "/hook/session-start" => Some(handle_session_start(query, body, ctx)),
         "/hook/prompt-submit" => Some(handle_prompt_submit(body, ctx)),
@@ -48,12 +77,34 @@ pub fn dispatch(path: &str, query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) 
     }
 }
 
-fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> String {
+/// Ack the messages a hook surfaced, AFTER its response was written. Called by
+/// the listener on write success so a lost/timed-out response can't lose
+/// messages (they stay unread and re-surface). Fail-loud: a failed ack is
+/// logged, not silently swallowed.
+pub fn ack_surfaced(ctx: &Arc<CellServerCtx>, session: &SessionId, ids: Vec<MessageId>) {
+    if ids.is_empty() {
+        return;
+    }
+    let cmd_ctx = internal_cmd_ctx(ctx);
+    if let Err(e) = (AckMessages {
+        message_ids: ids,
+        as_session: Some(session.clone()),
+    })
+    .execute(cmd_ctx)
+    {
+        log::warn!(
+            "[hook] deferred inbox ack failed for {}: {e:?}",
+            session.0.as_ref()
+        );
+    }
+}
+
+fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
     let Some(body) = parse_body(body) else {
-        return String::new();
+        return HookOutcome::text(String::new());
     };
     let Some(sid) = body.get("session_id").and_then(|v| v.as_str()) else {
-        return String::new();
+        return HookOutcome::text(String::new());
     };
     let q = parse_query(query);
     let cwd = body
@@ -131,7 +182,9 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> S
             channels_enabled: None,
         },
     };
-    let _ = cmd_ctx.emit_set(&session);
+    if let Err(e) = cmd_ctx.emit_set(&session) {
+        log::warn!("[hook] session-start SET failed for {sid}: {e:?}");
+    }
 
     // Inject the agent's own marshal identity so it can self-identify on
     // tool calls. Stock myko's HTTP-MCP transport carries no per-connection
@@ -144,16 +197,20 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> S
          command_LeaveRoom), pass this id as the `asSession` argument so peers know \
          who sent it.</marshal_session>\n"
     );
-    out.push_str(&surface_unread(&cmd_ctx, sid));
-    out
+    let (inbox, ids) = surface_unread(&cmd_ctx, sid);
+    out.push_str(&inbox);
+    HookOutcome {
+        body: out,
+        deferred_ack: (!ids.is_empty()).then(|| (SessionId(Arc::from(sid)), ids)),
+    }
 }
 
-fn handle_prompt_submit(body: &[u8], ctx: &Arc<CellServerCtx>) -> String {
+fn handle_prompt_submit(body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
     let Some(body) = parse_body(body) else {
-        return String::new();
+        return HookOutcome::text(String::new());
     };
     let Some(sid) = body.get("session_id").and_then(|v| v.as_str()) else {
-        return String::new();
+        return HookOutcome::text(String::new());
     };
     let cmd_ctx = internal_cmd_ctx(ctx);
 
@@ -167,18 +224,24 @@ fn handle_prompt_submit(body: &[u8], ctx: &Arc<CellServerCtx>) -> String {
     if let Some(prior) = existing.iter().find(|s| s.id == sid_typed) {
         let mut bumped = (**prior).clone();
         bumped.last_activity_at = Some(chrono::Utc::now().timestamp_millis());
-        let _ = cmd_ctx.emit_set(&bumped);
+        if let Err(e) = cmd_ctx.emit_set(&bumped) {
+            log::warn!("[hook] prompt-submit liveness bump failed for {sid}: {e:?}");
+        }
     }
 
-    surface_unread(&cmd_ctx, sid)
+    let (inbox, ids) = surface_unread(&cmd_ctx, sid);
+    HookOutcome {
+        body: inbox,
+        deferred_ack: (!ids.is_empty()).then(|| (SessionId(Arc::from(sid)), ids)),
+    }
 }
 
-fn handle_session_end(body: &[u8], ctx: &Arc<CellServerCtx>) -> String {
+fn handle_session_end(body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
     let Some(body) = parse_body(body) else {
-        return String::new();
+        return HookOutcome::text(String::new());
     };
     let Some(sid) = body.get("session_id").and_then(|v| v.as_str()) else {
-        return String::new();
+        return HookOutcome::text(String::new());
     };
     let cmd_ctx = internal_cmd_ctx(ctx);
     let stub = Session {
@@ -197,14 +260,16 @@ fn handle_session_end(body: &[u8], ctx: &Arc<CellServerCtx>) -> String {
         project: None,
         channels_enabled: None,
     };
-    let _ = cmd_ctx.emit_del(&stub);
-    String::new()
+    if let Err(e) = cmd_ctx.emit_del(&stub) {
+        log::warn!("[hook] session-end DEL failed for {sid}: {e:?}");
+    }
+    HookOutcome::text(String::new())
 }
 
 /// Fetch unread messages addressed to `sid`, format them framed as
 /// untrusted context, ack them, and return the text. Empty string when
 /// there's nothing — curl then prints nothing and no context is added.
-fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> String {
+fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId>) {
     let sid_typed = SessionId(Arc::from(sid));
     // DIRECT-ONLY auto-inject. The per-turn inbox surfaces messages addressed
     // to me *directly* (`to_session`), NOT room broadcasts — a broadcast is
@@ -224,10 +289,10 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> String {
     };
     let result = match read.execute(cmd_ctx.clone()) {
         Ok(r) => r,
-        Err(_) => return String::new(),
+        Err(_) => return (String::new(), Vec::new()),
     };
     if result.messages.is_empty() {
-        return String::new();
+        return (String::new(), Vec::new());
     }
 
     // Sender display is composed at render time from the live Session
@@ -261,19 +326,17 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> String {
     }
     out.push_str("</marshal_inbox>\n");
 
-    // Ack so they aren't re-surfaced next turn.
+    // Return the surfaced ids for the listener to ack AFTER the response is
+    // written (see `HookOutcome` / `ack_surfaced`). Acking here — before the
+    // `<marshal_inbox>` bytes reach the agent — would lose messages on a
+    // dropped or timed-out response.
     let ids: Vec<MessageId> = result
         .messages
         .iter()
         .map(|m| m.message_id.clone())
         .collect();
-    let _ = AckMessages {
-        message_ids: ids,
-        as_session: Some(sid_typed),
-    }
-    .execute(cmd_ctx.clone());
 
-    out
+    (out, ids)
 }
 
 /// Build an internal (clientless) `CommandContext`. Commands run through
