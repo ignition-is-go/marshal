@@ -190,7 +190,8 @@ impl CommandHandler for BroadcastMessage {
         let mut mentioned: Vec<SessionId> = Vec::new();
         let mut pinged: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
         for token in parse_mentions(&self.body) {
-            let Some(target) = crate::send_message::resolve_mention(&ctx, &sessions, &token)? else {
+            let Some(target) = crate::send_message::resolve_mention(&ctx, &sessions, &token)?
+            else {
                 continue;
             };
             // Never ping the sender; ping each resolved peer at most once even
@@ -273,8 +274,7 @@ fn parse_mentions(body: &str) -> Vec<String> {
             let mut j = start;
             while j < bytes.len() {
                 let c = bytes[j];
-                if c.is_ascii_alphanumeric()
-                    || matches!(c, b'.' | b'_' | b'-' | b'+' | b':' | b'@')
+                if c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-' | b'+' | b':' | b'@')
                 {
                     j += 1;
                 } else {
@@ -299,7 +299,10 @@ mod tests {
 
     #[test]
     fn parses_nickname_email_and_prefixed_mentions() {
-        assert_eq!(parse_mentions("hey @swift-falcon look"), vec!["swift-falcon"]);
+        assert_eq!(
+            parse_mentions("hey @swift-falcon look"),
+            vec!["swift-falcon"]
+        );
         assert_eq!(
             parse_mentions("@max@lucid.rocks your call on the redeploy"),
             vec!["max@lucid.rocks"]

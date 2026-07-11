@@ -213,15 +213,14 @@ mod tests {
 
     fn set_member(ctx: &CellServerCtx, room_id: &str, session_id: &str) {
         let member = RoomMember {
-            id: RoomMemberId(Arc::from(
-                RoomMember::make_id(room_id, session_id).as_str(),
-            )),
+            id: RoomMemberId(Arc::from(RoomMember::make_id(room_id, session_id).as_str())),
             room_id: RoomId(Arc::from(room_id)),
             session_id: SessionId(Arc::from(session_id)),
             joined_at: 0,
         };
         let ev = MEvent::from_item(&member, MEventType::SET, &Uuid::new_v4().to_string());
-        ctx.apply_event_batch(vec![ev]).expect("apply RoomMember SET");
+        ctx.apply_event_batch(vec![ev])
+            .expect("apply RoomMember SET");
     }
 
     fn room_ids(ctx: &CellServerCtx) -> HashSet<String> {
@@ -242,27 +241,45 @@ mod tests {
         let ctx = setup();
 
         // Survives: the global room, always.
-        set_room(&ctx, "everyone", RoomKind::Auto { source: AutoSource::Everyone });
+        set_room(
+            &ctx,
+            "everyone",
+            RoomKind::Auto {
+                source: AutoSource::Everyone,
+            },
+        );
         set_member(&ctx, "everyone", "sess-a");
         // Reaped: a host room, even with a live member (anchor retired).
         set_room(
             &ctx,
             "host:node1",
-            RoomKind::Auto { source: AutoSource::Host { name: "node1".into() } },
+            RoomKind::Auto {
+                source: AutoSource::Host {
+                    name: "node1".into(),
+                },
+            },
         );
         set_member(&ctx, "host:node1", "sess-a");
         // Survives: a project room with members.
         set_room(
             &ctx,
             "project:live",
-            RoomKind::Auto { source: AutoSource::Project { basename: "live".into() } },
+            RoomKind::Auto {
+                source: AutoSource::Project {
+                    basename: "live".into(),
+                },
+            },
         );
         set_member(&ctx, "project:live", "sess-a");
         // Reaped: a project room whose sessions were all reaped (0 members).
         set_room(
             &ctx,
             "project:stale",
-            RoomKind::Auto { source: AutoSource::Project { basename: "stale".into() } },
+            RoomKind::Auto {
+                source: AutoSource::Project {
+                    basename: "stale".into(),
+                },
+            },
         );
         // Survives: an adhoc room even when empty — user-owned lifecycle.
         set_room(&ctx, "design-sync", RoomKind::Adhoc);
@@ -271,10 +288,15 @@ mod tests {
 
         let ids = room_ids(&ctx);
         assert!(ids.contains("everyone"), "global room must survive");
-        assert!(ids.contains("project:live"), "populated project room must survive");
+        assert!(
+            ids.contains("project:live"),
+            "populated project room must survive"
+        );
         assert!(ids.contains("design-sync"), "empty adhoc room must survive");
         assert!(!ids.contains("host:node1"), "host room must be reaped");
-        assert!(!ids.contains("project:stale"), "empty auto-room must be reaped");
+        assert!(
+            !ids.contains("project:stale"),
+            "empty auto-room must be reaped"
+        );
     }
 }
-
