@@ -227,13 +227,51 @@ fn resolve_recipient(
     }
 }
 
+/// Best-effort recipient resolution for `@mentions` in a broadcast body:
+/// exact id, unique nickname, or operator identity (human-via-agent,
+/// most-active). Returns `None` for unknown / ambiguous tokens — a mention is
+/// an explicit handle, so we never guess or error on it; an unresolvable
+/// `@token` is just prose. Shared with `BroadcastMessage`'s @mention escape
+/// hatch. Mirrors tiers 1–3 of `resolve_recipient` minus the prefix tier and
+/// the hard errors.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn resolve_mention(
+    ctx: &CommandContext,
+    sessions: &[Arc<Session>],
+    token: &str,
+) -> Result<Option<Arc<Session>>, CommandError> {
+    // 1. Exact session id.
+    if let Some(s) = sessions.iter().find(|s| s.id.0.as_ref() == token) {
+        return Ok(Some(s.clone()));
+    }
+    // 2. Unique nickname (ambiguous → treat as prose, not a hard error).
+    let mut by_nick: Vec<Arc<Session>> = Vec::new();
+    for s in sessions {
+        if crate::nickname_for(ctx, s.id.0.as_ref())? == token {
+            by_nick.push(s.clone());
+        }
+    }
+    if by_nick.len() == 1 {
+        return Ok(Some(by_nick.remove(0)));
+    }
+    if by_nick.len() > 1 {
+        return Ok(None);
+    }
+    // 3. Operator identity — human-via-agent.
+    let op = token
+        .strip_prefix("op:")
+        .or_else(|| token.strip_prefix("human:"))
+        .unwrap_or(token);
+    Ok(pick_operator_session(sessions, op))
+}
+
 /// Choose which of an operator's sessions receives a human-via-agent message:
 /// the most-recently-active one, with live + render-capable sessions ranked
 /// above idle/disconnected ones (the human's current focus). `None` when the
 /// operator has no session on the roster. Pure over the roster so the routing
 /// policy is unit-testable without a live command context.
 #[cfg(not(target_arch = "wasm32"))]
-fn pick_operator_session(sessions: &[Arc<Session>], op: &str) -> Option<Arc<Session>> {
+pub(crate) fn pick_operator_session(sessions: &[Arc<Session>], op: &str) -> Option<Arc<Session>> {
     sessions
         .iter()
         .filter(|s| {
@@ -265,7 +303,7 @@ fn ambiguous(ctx: &CommandContext, kind: &str, token: &str, matches: &[Arc<Sessi
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn push_to_client(client_id: &str, content: String, meta: serde_json::Value) -> bool {
+pub(crate) fn push_to_client(client_id: &str, content: String, meta: serde_json::Value) -> bool {
     use myko::{command::CommandRequest, server::try_client_registry};
     let Some(registry) = try_client_registry() else {
         log::warn!("[send_message] client_registry not initialized; cannot deliver");
