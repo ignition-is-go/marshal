@@ -2,13 +2,18 @@
 //!
 //! Every `Session` SET fires this saga, which ensures that the
 //! anchor-rooms derived from the session's identity exist and that
-//! the session is a member of them. The four anchor kinds:
+//! the session is a member of them. The anchor kinds:
 //!
 //! - `everyone`              — singleton, every session always a member.
-//! - `host:<name>`           — when `Session.host.name` is populated.
 //! - `op:<operator>`         — when `Session.operator` is populated.
 //! - `project:<basename>`    — when `Session.project` is populated
 //!   (the shim resolves it from `git rev-parse --show-toplevel`).
+//!
+//! `host:<name>` is intentionally NOT an anchor. One agent per node made
+//! it a singleton in almost every case, host isn't a coordination axis
+//! (it's already on each session's roster row), and it dominated the
+//! auto-room count with dead weight. The GC in `cleanup.rs` reaps any
+//! host rooms left over from older daemons.
 //!
 //! Idempotent: re-emitting a Room SET that's identical to the existing
 //! row is a no-op for the registry, and the composite-id RoomMember
@@ -89,18 +94,6 @@ impl CommandHandler for DispatchAutoRooms {
             "everyone".to_string(),
             AutoSource::Everyone,
         )];
-        if let Some(host) = session.host.as_ref()
-            && !host.name.is_empty()
-        {
-            let id = format!("host:{}", host.name);
-            anchors.push((
-                RoomId(Arc::from(id.as_str())),
-                id,
-                AutoSource::Host {
-                    name: host.name.clone(),
-                },
-            ));
-        }
         if let Some(op) = session.operator.as_ref()
             && !op.is_empty()
         {

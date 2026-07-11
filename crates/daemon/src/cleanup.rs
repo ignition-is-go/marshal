@@ -25,7 +25,7 @@ use std::{
 
 use chrono::Utc;
 use hyphae::Gettable;
-use marshal_entities::Session;
+use marshal_entities::{AutoSource, Room, RoomKind, RoomMember, Session};
 use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 
 /// How long a WS-shim session must be without a live client before DEL.
@@ -52,6 +52,58 @@ pub async fn run_sweeper(ctx: CellServerCtx) {
     loop {
         interval.tick().await;
         sweep_once(&ctx, &mut disconnected_since);
+        sweep_rooms(&ctx);
+    }
+}
+
+/// GC pass: DEL auto-rooms that no longer earn their place — any `host:`
+/// room (that anchor is retired; see `auto_rooms.rs`) and any auto-room that
+/// has dropped to zero members (its anchoring sessions were all reaped, e.g.
+/// the ~35 stale empties that accreted because room GC never existed).
+/// `everyone` is permanent; adhoc rooms are user-owned and left alone.
+/// DELing a Room cascades its RoomMember rows via `belongs_to(Room)`, so
+/// live memberships never orphan.
+fn sweep_rooms(ctx: &CellServerCtx) {
+    let Some(room_store) = ctx.registry.get(Room::ENTITY_NAME_STATIC) else {
+        return;
+    };
+    let Some(member_store) = ctx.registry.get(RoomMember::ENTITY_NAME_STATIC) else {
+        return;
+    };
+
+    // Live member count per room id.
+    let mut member_counts: HashMap<Arc<str>, usize> = HashMap::new();
+    for (_id, item) in member_store.entries().get() {
+        if let Some(m) = downcast_item::<RoomMember>(&item) {
+            *member_counts.entry(m.room_id.0.clone()).or_default() += 1;
+        }
+    }
+
+    let mut to_delete: Vec<Arc<str>> = Vec::new();
+    for (id, item) in room_store.entries().get() {
+        let Some(room) = downcast_item::<Room>(&item) else {
+            continue;
+        };
+        // Only auto-rooms are GC'd; adhoc rooms are user-owned.
+        let RoomKind::Auto { source } = &room.kind else {
+            continue;
+        };
+        // The global room is permanent.
+        if matches!(source, AutoSource::Everyone) {
+            continue;
+        }
+        let is_host = matches!(source, AutoSource::Host { .. });
+        let empty = member_counts.get(&room.id.0).copied().unwrap_or(0) == 0;
+        if is_host || empty {
+            to_delete.push(id);
+        }
+    }
+
+    for id in to_delete {
+        log::info!("[cleanup] DELing stale auto-room {}", id);
+        if let Err(e) = ctx.del_by_id(Room::ENTITY_NAME_STATIC, &id) {
+            log::warn!("[cleanup] del room {} failed: {}", id, e);
+        }
     }
 }
 
@@ -122,3 +174,107 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
         disconnected_since.remove(&id);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marshal_entities::{RoomId, RoomMemberId, SessionId};
+    use myko::{
+        server::Persister,
+        wire::{MEvent, MEventType},
+    };
+    use myko_server::{BlackholePersister, CellServer};
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    fn setup() -> CellServerCtx {
+        marshal_entities::link();
+        crate::link();
+        let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
+        let server = CellServer::builder()
+            .with_default_persister(blackhole)
+            .build();
+        let ctx = server.ctx();
+        Box::leak(Box::new(server));
+        ctx
+    }
+
+    fn set_room(ctx: &CellServerCtx, id: &str, kind: RoomKind) {
+        let room = Room {
+            id: RoomId(Arc::from(id)),
+            name: id.to_string(),
+            description: None,
+            kind,
+            created_at: 0,
+        };
+        let ev = MEvent::from_item(&room, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![ev]).expect("apply Room SET");
+    }
+
+    fn set_member(ctx: &CellServerCtx, room_id: &str, session_id: &str) {
+        let member = RoomMember {
+            id: RoomMemberId(Arc::from(
+                RoomMember::make_id(room_id, session_id).as_str(),
+            )),
+            room_id: RoomId(Arc::from(room_id)),
+            session_id: SessionId(Arc::from(session_id)),
+            joined_at: 0,
+        };
+        let ev = MEvent::from_item(&member, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![ev]).expect("apply RoomMember SET");
+    }
+
+    fn room_ids(ctx: &CellServerCtx) -> HashSet<String> {
+        ctx.registry
+            .get(Room::ENTITY_NAME_STATIC)
+            .map(|s| {
+                s.entries()
+                    .get()
+                    .into_iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sweep_reaps_host_and_empty_auto_rooms_and_spares_the_rest() {
+        let ctx = setup();
+
+        // Survives: the global room, always.
+        set_room(&ctx, "everyone", RoomKind::Auto { source: AutoSource::Everyone });
+        set_member(&ctx, "everyone", "sess-a");
+        // Reaped: a host room, even with a live member (anchor retired).
+        set_room(
+            &ctx,
+            "host:node1",
+            RoomKind::Auto { source: AutoSource::Host { name: "node1".into() } },
+        );
+        set_member(&ctx, "host:node1", "sess-a");
+        // Survives: a project room with members.
+        set_room(
+            &ctx,
+            "project:live",
+            RoomKind::Auto { source: AutoSource::Project { basename: "live".into() } },
+        );
+        set_member(&ctx, "project:live", "sess-a");
+        // Reaped: a project room whose sessions were all reaped (0 members).
+        set_room(
+            &ctx,
+            "project:stale",
+            RoomKind::Auto { source: AutoSource::Project { basename: "stale".into() } },
+        );
+        // Survives: an adhoc room even when empty — user-owned lifecycle.
+        set_room(&ctx, "design-sync", RoomKind::Adhoc);
+
+        sweep_rooms(&ctx);
+
+        let ids = room_ids(&ctx);
+        assert!(ids.contains("everyone"), "global room must survive");
+        assert!(ids.contains("project:live"), "populated project room must survive");
+        assert!(ids.contains("design-sync"), "empty adhoc room must survive");
+        assert!(!ids.contains("host:node1"), "host room must be reaped");
+        assert!(!ids.contains("project:stale"), "empty auto-room must be reaped");
+    }
+}
+
