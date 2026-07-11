@@ -198,6 +198,104 @@ fn unknown_recipient_errors_and_does_not_persist() {
 }
 
 #[test]
+fn nickname_resolves_server_side() {
+    // Resolution moved into the command (was shim-only) so EVERY harness —
+    // opencode plugin, raw HTTP-MCP, shim — can address by nickname. No
+    // SessionNickname is assigned here, so `nickname_for` falls back to the
+    // deterministic handle; address by that and it must route to the session.
+    let ctx = setup();
+    set_session(&ctx, &session("sender", Some("c-sender")));
+    set_session(&ctx, &session("recipient-xyz", None));
+
+    let nick = marshal_entities::nickname("recipient-xyz");
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from(nick.as_str())),
+        body: "hi".into(),
+        as_session: None,
+    };
+    let result = cmd
+        .execute(cmd_ctx(&ctx, Some("c-sender")))
+        .expect("a unique nickname resolves");
+
+    assert_eq!(
+        result.to_session_id,
+        SessionId(Arc::from("recipient-xyz")),
+        "nickname `{nick}` should resolve to its session id",
+    );
+    assert_eq!(message_count(&ctx), 1);
+}
+
+#[test]
+fn operator_token_routes_to_the_humans_most_recently_active_agent() {
+    // Human-via-agent routing: address the PERSON by their operator identity
+    // and the daemon picks which of their agents currently has the floor —
+    // the most-recently-active one.
+    let ctx = setup();
+    set_session(&ctx, &session("sender", Some("c-sender")));
+
+    let mut idle = session("max-idle", Some("c-idle"));
+    idle.operator = Some("max@lucid.rocks".into());
+    idle.last_activity_at = Some(1_000);
+    let mut active = session("max-active", Some("c-active"));
+    active.operator = Some("max@lucid.rocks".into());
+    active.last_activity_at = Some(9_000);
+    set_session(&ctx, &idle);
+    set_session(&ctx, &active);
+
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from("max@lucid.rocks")),
+        body: "your call on the redeploy".into(),
+        as_session: None,
+    };
+    let result = cmd
+        .execute(cmd_ctx(&ctx, Some("c-sender")))
+        .expect("operator identity resolves to the human's agent");
+
+    assert_eq!(
+        result.to_session_id,
+        SessionId(Arc::from("max-active")),
+        "should route to the most-recently-active of the operator's sessions",
+    );
+    assert_eq!(
+        only_message(&ctx).to_session_id,
+        Some(SessionId(Arc::from("max-active"))),
+    );
+}
+
+#[test]
+fn operator_routing_prefers_a_live_agent_and_accepts_the_op_prefix() {
+    // A disconnected session active more recently vs a live one active less
+    // recently — the LIVE agent wins (that's where a push can land now). Also
+    // exercises the explicit `op:` disambiguation prefix.
+    let ctx = setup();
+    set_session(&ctx, &session("sender", Some("c-sender")));
+
+    let mut disconnected = session("max-disc", None); // client_id None ⇒ not live
+    disconnected.operator = Some("max@lucid.rocks".into());
+    disconnected.last_activity_at = Some(9_000);
+    let mut live = session("max-live", Some("c-live"));
+    live.operator = Some("max@lucid.rocks".into());
+    live.last_activity_at = Some(5_000);
+    set_session(&ctx, &disconnected);
+    set_session(&ctx, &live);
+
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from("op:max@lucid.rocks")),
+        body: "ping".into(),
+        as_session: None,
+    };
+    let result = cmd
+        .execute(cmd_ctx(&ctx, Some("c-sender")))
+        .expect("op:-prefixed operator identity resolves");
+
+    assert_eq!(
+        result.to_session_id,
+        SessionId(Arc::from("max-live")),
+        "a live agent outranks a more-recently-active disconnected one",
+    );
+}
+
+#[test]
 fn caller_without_session_errors() {
     // Caller's client_id maps to no session and no `as_session` was given.
     let ctx = setup();

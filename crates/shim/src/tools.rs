@@ -259,7 +259,10 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         "send_message: missing `to` (session id or nickname)",
     )?;
     let body = arg_str(args, "body", "send_message: missing `body`")?;
-    let to_session_id = resolve_recipient(host, &to)?;
+    // Recipient resolution is authoritative in the daemon's SendMessage command
+    // now (so every harness shares one policy AND operator / human-via-agent
+    // addressing works from the shim too) — pass the raw token straight through.
+    let to_session_id = SessionId(std::sync::Arc::from(to.as_str()));
     let cmd = SendMessage {
         to_session_id,
         body,
@@ -277,69 +280,6 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         "sent_at": result.sent_at,
         "delivered_live": result.delivered_live,
     })))
-}
-
-/// Resolve a caller-supplied recipient token to a full session id against the
-/// live roster. Accepts, in order: an exact session id, a unique nickname
-/// (`swift-falcon`, what the statusline shows), or a unique session-id prefix.
-/// Ambiguous or unknown tokens error with the candidates listed, so a caller
-/// can never silently mis-route — the failure mode this whole nickname change
-/// exists to prevent.
-fn resolve_recipient(host: &ToolHost, to: &str) -> Result<SessionId, ToolError> {
-    let sessions: Vec<Arc<Session>> = host.sessions_cell.get();
-
-    // 1. Exact session id.
-    if let Some(s) = sessions.iter().find(|s| s.id.0.as_ref() == to) {
-        return Ok(s.id.clone());
-    }
-    // 2. Unique nickname.
-    let by_nick: Vec<&Arc<Session>> = sessions
-        .iter()
-        .filter(|s| handle_for(host, s.id.0.as_ref()) == to)
-        .collect();
-    if by_nick.len() == 1 {
-        return Ok(by_nick[0].id.clone());
-    }
-    if by_nick.len() > 1 {
-        return Err(ToolError::invalid_params(ambiguous_recipient(
-            host, "nickname", to, &by_nick,
-        )));
-    }
-    // 3. Unique session-id prefix.
-    let by_prefix: Vec<&Arc<Session>> = sessions
-        .iter()
-        .filter(|s| s.id.0.as_ref().starts_with(to))
-        .collect();
-    match by_prefix.len() {
-        1 => Ok(by_prefix[0].id.clone()),
-        0 => Err(ToolError::invalid_params(format!(
-            "send_message: no live session matches `{to}` (by id, nickname, or id-prefix) — check marshal://roster"
-        ))),
-        _ => Err(ToolError::invalid_params(ambiguous_recipient(
-            host,
-            "id-prefix",
-            to,
-            &by_prefix,
-        ))),
-    }
-}
-
-fn ambiguous_recipient(host: &ToolHost, kind: &str, to: &str, matches: &[&Arc<Session>]) -> String {
-    let list = matches
-        .iter()
-        .map(|s| {
-            format!(
-                "{} ({})",
-                handle_for(host, s.id.0.as_ref()),
-                s.id.0.as_ref()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "send_message: `{to}` is an ambiguous {kind} matching {} sessions [{list}] — address by the full session_id",
-        matches.len()
-    )
 }
 
 async fn broadcast(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
@@ -442,10 +382,10 @@ pub fn tools_def() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct send to a peer. Address by their nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, or a session_id prefix — resolved against the live roster, with an ambiguous/unknown token returning an error listing the candidates.".into(),
+            description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates.".into(),
             input_schema: schema_object(
                 json!({
-                    "to":   { "type": "string", "description": "Recipient nickname (e.g. `swift-falcon`), full `session_id`, or session_id prefix — from marshal://roster." },
+                    "to":   { "type": "string", "description": "Recipient: a nickname (e.g. `swift-falcon`), full `session_id`, session_id prefix, or an operator identity/email (e.g. `max@lucid.rocks`) to reach the human via their most-active agent — all from marshal://roster." },
                     "body": { "type": "string", "description": "Message body." }
                 }),
                 &["to", "body"],

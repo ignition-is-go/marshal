@@ -83,18 +83,12 @@ impl CommandHandler for SendMessage {
 
         let sender = resolve_caller(&ctx, &sessions, self.as_session.as_ref())?;
 
-        let recipient = sessions
-            .iter()
-            .find(|s| s.id == self.to_session_id)
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "no session with id '{}' on the roster",
-                        self.to_session_id.0.as_ref(),
-                    ),
-                )
-            })?;
+        // Resolve the recipient token server-side so every harness (Claude via
+        // the shim, the opencode plugin, raw HTTP-MCP) shares ONE resolution
+        // policy — resolution used to live only in the shim, so plugin/HTTP
+        // callers could address by exact id alone. Accepts id / nickname /
+        // operator (human-via-agent) / id-prefix; see `resolve_recipient`.
+        let recipient = resolve_recipient(&ctx, &sessions, self.to_session_id.0.as_ref())?;
 
         let now = Utc::now().timestamp_millis();
         let msg = Message {
@@ -163,6 +157,111 @@ fn err(ctx: &CommandContext, message: &str) -> CommandError {
         command_id: ctx.command_id.to_string(),
         message: message.to_string(),
     }
+}
+
+/// Resolve a caller-supplied recipient token against the live roster. Runs
+/// server-side (inside the command) rather than in each client, so the shim,
+/// the opencode plugin, and raw HTTP-MCP callers all share one policy.
+///
+/// Priority order:
+///   1. exact session id;
+///   2. a unique nickname (`swift-falcon`, what the statusline shows);
+///   3. an OPERATOR identity — the human, addressed by their resolved operator
+///      string (an email like `max@lucid.rocks`, optionally `op:`/`human:`
+///      prefixed). This is human-via-agent routing: it delivers to that
+///      operator's most-recently-active session, preferring one with a live,
+///      render-capable client, so the sender addresses the *person* and the
+///      daemon picks which of their agents currently has the floor. If none of
+///      the operator's sessions is live the freshest still takes it and reads
+///      from its inbox next turn — delivery is decoupled from liveness;
+///   4. a unique session-id prefix.
+///
+/// Ambiguous or unknown tokens error with the candidates listed, so a caller
+/// can never silently mis-route.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_recipient(
+    ctx: &CommandContext,
+    sessions: &[Arc<Session>],
+    token: &str,
+) -> Result<Arc<Session>, CommandError> {
+    // 1. Exact session id.
+    if let Some(s) = sessions.iter().find(|s| s.id.0.as_ref() == token) {
+        return Ok(s.clone());
+    }
+    // 2. Unique nickname.
+    let mut by_nick: Vec<Arc<Session>> = Vec::new();
+    for s in sessions {
+        if crate::nickname_for(ctx, s.id.0.as_ref())? == token {
+            by_nick.push(s.clone());
+        }
+    }
+    if by_nick.len() == 1 {
+        return Ok(by_nick.remove(0));
+    }
+    if by_nick.len() > 1 {
+        return Err(err(ctx, &ambiguous(ctx, "nickname", token, &by_nick)));
+    }
+    // 3. Operator identity — human-via-agent routing.
+    let op = token
+        .strip_prefix("op:")
+        .or_else(|| token.strip_prefix("human:"))
+        .unwrap_or(token);
+    if let Some(best) = pick_operator_session(sessions, op) {
+        return Ok(best);
+    }
+    // 4. Unique session-id prefix.
+    let by_prefix: Vec<Arc<Session>> = sessions
+        .iter()
+        .filter(|s| s.id.0.as_ref().starts_with(token))
+        .cloned()
+        .collect();
+    match by_prefix.len() {
+        1 => Ok(by_prefix.into_iter().next().unwrap()),
+        0 => Err(err(
+            ctx,
+            &format!(
+                "no session matches '{token}' (by id, nickname, operator, or id-prefix) — check marshal://roster"
+            ),
+        )),
+        _ => Err(err(ctx, &ambiguous(ctx, "id-prefix", token, &by_prefix))),
+    }
+}
+
+/// Choose which of an operator's sessions receives a human-via-agent message:
+/// the most-recently-active one, with live + render-capable sessions ranked
+/// above idle/disconnected ones (the human's current focus). `None` when the
+/// operator has no session on the roster. Pure over the roster so the routing
+/// policy is unit-testable without a live command context.
+#[cfg(not(target_arch = "wasm32"))]
+fn pick_operator_session(sessions: &[Arc<Session>], op: &str) -> Option<Arc<Session>> {
+    sessions
+        .iter()
+        .filter(|s| {
+            s.operator
+                .as_deref()
+                .is_some_and(|o| o.eq_ignore_ascii_case(op))
+        })
+        .cloned()
+        .max_by_key(|s| {
+            let live = s.client_id.is_some() && s.channels_enabled != Some(false);
+            (live as i64, s.last_activity_at.unwrap_or(s.connected_at))
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ambiguous(ctx: &CommandContext, kind: &str, token: &str, matches: &[Arc<Session>]) -> String {
+    let list = matches
+        .iter()
+        .map(|s| {
+            let nick = crate::nickname_for(ctx, s.id.0.as_ref()).unwrap_or_default();
+            format!("{nick} ({})", s.id.0.as_ref())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "'{token}' is an ambiguous {kind} matching {} sessions [{list}] — address by full session_id",
+        matches.len()
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]

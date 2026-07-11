@@ -32,10 +32,10 @@ pub fn CommandK() -> impl IntoView {
 
     // Focus the input whenever the palette opens.
     Effect::new(move |_| {
-        if open.get() {
-            if let Some(el) = input_ref.get() {
-                let _ = el.focus();
-            }
+        if open.get()
+            && let Some(el) = input_ref.get()
+        {
+            let _ = el.focus();
         }
     });
 
@@ -99,7 +99,6 @@ pub fn CommandK() -> impl IntoView {
                                 return view! { <li class="ck-empty">"no matches"</li> }.into_any();
                             }
                             rs.into_iter().map(|(kind, disp, sub, target)| {
-                                let pick = pick.clone();
                                 view! {
                                     <li class="ck-item" on:click=move |_| pick(target.clone())>
                                         <span class="ck-kind">{kind}</span>
