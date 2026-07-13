@@ -151,6 +151,18 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         "expected a <marshal_inbox> block; got: {body:?}"
     );
 
+    // At-least-once contract: the listener acks the surfaced message only
+    // AFTER successfully writing the response (not inside dispatch). Since the
+    // first POST above completed its write, the message is now read — a second
+    // prompt-submit must NOT re-surface it. (A dropped write would skip the
+    // ack and this would still contain the marker — that's the at-least-once
+    // guarantee, verified here by its positive consequence.)
+    let body2 = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
+    assert!(
+        !body2.contains("HOOK-E2E-PROBE-marker"),
+        "message re-surfaced after a successful hook write — the post-write ack didn't run; got: {body2:?}"
+    );
+
     // a wrong /hook path must 404 (the misroute that caused the outage).
     let mut s = TcpStream::connect(addr).unwrap();
     s.write_all(

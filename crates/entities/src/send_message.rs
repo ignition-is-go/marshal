@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use crate::{
     message::{Message, MessageId},
+    message_read::{MessageRead, MessageReadId},
     notify::NotifyChannel,
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
@@ -141,6 +142,25 @@ impl CommandHandler for SendMessage {
             ),
             _ => false,
         };
+
+        // Dedup the pull inbox against a landed live push. A channels-ON
+        // recipient already rendered this message via the NotifyChannel, so
+        // mark it read for them — the per-turn `<marshal_inbox>` reads only
+        // UNREAD direct messages, so it won't re-surface it. Without this the
+        // recipient sees every direct message TWICE (once live, once in the
+        // inbox). Best-effort: a failed write just falls back to that harmless
+        // double-surface.
+        if delivered_live {
+            let read_id = MessageRead::make_id(msg.id.0.as_ref(), recipient.id.0.as_ref());
+            if let Err(e) = ctx.emit_set(&MessageRead {
+                id: MessageReadId(Arc::from(read_id.as_str())),
+                message_id: msg.id.clone(),
+                session_id: recipient.id.clone(),
+                read_at: now,
+            }) {
+                log::warn!("[send_message] live-push inbox dedup write failed: {e:?}");
+            }
+        }
 
         Ok(SendMessageResult {
             message_id: msg.id,

@@ -109,7 +109,18 @@ async fn handle_conn(mut stream: TcpStream, ctx: Arc<CellServerCtx>) -> std::io:
     }
 
     match hooks::dispatch(path, query, &body, &ctx) {
-        Some(text) => write_response(&mut stream, 200, &text).await,
+        Some(outcome) => {
+            write_response(&mut stream, 200, &outcome.body).await?;
+            // At-least-once inbox: ack the surfaced messages ONLY after the
+            // response was successfully written + flushed above. If that write
+            // failed (curl gone / `--max-time` elapsed), the `?` bailed and we
+            // never reach here, so the messages stay unread and re-surface next
+            // turn — never acked-but-unseen.
+            if let Some((session, ids)) = outcome.deferred_ack {
+                hooks::ack_surfaced(&ctx, &session, ids);
+            }
+            Ok(())
+        }
         None => write_response(&mut stream, 404, "not found").await,
     }
 }
