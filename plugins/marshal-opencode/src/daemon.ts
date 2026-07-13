@@ -249,6 +249,42 @@ export class MarshalDaemon {
    *  This is the per-turn delivery path, byte-for-byte the same daemon
    *  semantics as Claude Code's UserPromptSubmit hook (ReadMessages →
    *  AckMessages), just driven from opencode's chat hook instead of curl. */
+  /** Read message history — the caller's inbox (direct messages + the rooms
+   *  they're in), or a specific room with `room`. Unlike `drainInbox` this
+   *  returns ALL matching messages (read + unread) and does NOT ack, so an
+   *  agent can catch up on ambient broadcasts (which are never auto-injected)
+   *  and past DMs. This is what un-blinds broadcasts for opencode. */
+  async readHistory(
+    asSession: string,
+    opts: { room?: string; since?: number; limit?: number },
+  ): Promise<MessageView[]> {
+    const result = await this.send(
+      readMessages({
+        asSession,
+        room: opts.room,
+        // With a room, read that room; otherwise the full inbox (direct + rooms).
+        inbox: opts.room ? false : true,
+        sent: false,
+        unread: false,
+        since: opts.since,
+        limit: opts.limit ?? 50,
+      }),
+    );
+    return result.messages ?? [];
+  }
+
+  /** Mark messages read so they stop surfacing in the inbox. */
+  async ackMessages(asSession: string, messageIds: string[]): Promise<number> {
+    await this.send(ackMessages(asSession, messageIds));
+    return messageIds.length;
+  }
+
+  /** One-line render of a message for the read-history tool, with its id so the
+   *  caller can ack it. */
+  formatMessageLine(m: MessageView): string {
+    return `- [${m.messageId}] ${this.senderLabel(m.fromSessionId)}: ${m.body}`;
+  }
+
   drainInbox(sessionId: string): Promise<string | null> {
     // Serialize concurrent drains of the SAME session (see `draining`): each
     // waits for the prior read→ack to finish, so two pushes can't both read the
