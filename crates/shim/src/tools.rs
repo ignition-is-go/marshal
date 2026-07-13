@@ -134,6 +134,7 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
     let sessions: Vec<Arc<Session>> = host.sessions_cell.get();
     let members: Vec<Arc<RoomMember>> = host.members_cell.get();
     let me = host.session.lock().unwrap().id.0.to_string();
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let view: Vec<Value> = sessions
         .iter()
         .map(|s| {
@@ -154,6 +155,14 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 "host": s.host,
                 "project": s.project,
                 "connected_at": s.connected_at,
+                // Liveness — so an AGENT reading the roster (not just the human
+                // UI) can tell an actively-working peer from an idle one or a
+                // ghost pending sweep. Raw activity timestamps + a derived
+                // "how long since last seen" (falls back to connected_at).
+                "last_activity_at": s.last_activity_at,
+                "last_tool": s.last_tool,
+                "last_tool_at": s.last_tool_at,
+                "last_seen_ms_ago": now_ms - s.last_activity_at.unwrap_or(s.connected_at),
                 "rooms": rooms,
             })
         })

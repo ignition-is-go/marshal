@@ -91,6 +91,11 @@ export class MarshalDaemon {
    *  recomputing, so a wordlist change never desyncs us from the roster. */
   private nicknames: SessionNicknameItem[] = [];
 
+  /** Per-session serialization for `drainInbox`. Two `onNotify` pushes for the
+   *  same session would each read the unread set before either acks, then
+   *  render + inject the same messages twice. Chain drains so read→ack is
+   *  atomic per session. */
+  private readonly draining = new Map<string, Promise<string | null>>();
   private notifyHandler: NotifyHandler | null = null;
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private started = false;
@@ -244,7 +249,20 @@ export class MarshalDaemon {
    *  This is the per-turn delivery path, byte-for-byte the same daemon
    *  semantics as Claude Code's UserPromptSubmit hook (ReadMessages →
    *  AckMessages), just driven from opencode's chat hook instead of curl. */
-  async drainInbox(sessionId: string): Promise<string | null> {
+  drainInbox(sessionId: string): Promise<string | null> {
+    // Serialize concurrent drains of the SAME session (see `draining`): each
+    // waits for the prior read→ack to finish, so two pushes can't both read the
+    // same unread set and double-inject the same messages.
+    const prev = this.draining.get(sessionId) ?? Promise.resolve<string | null>(null);
+    const next = prev.catch(() => null).then(() => this.drainInboxInner(sessionId));
+    this.draining.set(sessionId, next);
+    void next.finally(() => {
+      if (this.draining.get(sessionId) === next) this.draining.delete(sessionId);
+    });
+    return next;
+  }
+
+  private async drainInboxInner(sessionId: string): Promise<string | null> {
     let result: ReadMessagesResult;
     try {
       // DIRECT-ONLY auto-inject: `toSession` (messages addressed to me
