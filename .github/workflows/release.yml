@@ -12,6 +12,18 @@ on:
   push:
     branches: [main, dev]
 
+# Serialize release runs. This job commits a version bump back onto the branch
+# and pushes it, which cannot be done concurrently: two runs from back-to-back
+# merges race the `git push` and all but one fail non-fast-forward (leaving
+# tags with no built artifacts). `cancel-in-progress: false` QUEUES runs so each
+# starts only after the previous has pushed. Paired with the `git pull --ff-only`
+# in the stamp step (which re-syncs a queued run's now-stale checkout to the
+# just-pushed release commit), a batch of merges yields one successful release
+# per merge instead of failed, artifact-less runs.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -63,6 +75,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          # Re-sync to the branch tip before stamping. With runs serialized
+          # (see `concurrency` above), a queued run's checkout is the SHA that
+          # triggered it — now behind the prior run's pushed release commit.
+          # Fast-forward to latest so the version-bump commit below pushes
+          # cleanly instead of being rejected non-fast-forward.
+          git pull --ff-only origin "$GITHUB_REF_NAME"
           VERSION=$(cargo flux version)
           cargo flux stamp "$VERSION"
           # Keep Claude Code plugin manifests in lockstep with the workspace
