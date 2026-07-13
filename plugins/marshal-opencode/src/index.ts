@@ -267,6 +267,46 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
           return rows.join("\n");
         },
       }),
+
+      marshal_messages: tool({
+        description:
+          "Read marshal message history — your inbox (direct messages + the rooms you're in), " +
+          "or a specific room's messages with room=. This is how you SEE broadcasts: they're " +
+          "ambient (not injected into your turn), so read them here. Filter with since= (unix " +
+          "millis) and limit=.",
+        args: {
+          room: tool.schema
+            .string()
+            .optional()
+            .describe("room id to read (e.g. project:foo, everyone); omit for your inbox"),
+          since: tool.schema
+            .number()
+            .optional()
+            .describe("only messages after this unix-millis timestamp"),
+          limit: tool.schema.number().optional().describe("max messages (default 50)"),
+        },
+        async execute(args, ctx) {
+          daemon.registerSession(ctx.sessionID);
+          const msgs = await daemon.readHistory(ctx.sessionID, args);
+          if (msgs.length === 0) return "no messages";
+          return msgs.map((m) => daemon.formatMessageLine(m)).join("\n");
+        },
+      }),
+
+      marshal_ack: tool({
+        description:
+          "Mark messages read (stop them surfacing in your inbox). Pass the message ids shown by marshal_messages.",
+        args: {
+          message_ids: tool.schema
+            .array(tool.schema.string())
+            .describe("message ids to mark read"),
+        },
+        async execute(args, ctx) {
+          daemon.registerSession(ctx.sessionID);
+          const n = await daemon.ackMessages(ctx.sessionID, args.message_ids);
+          return `acked ${n} message(s)`;
+        },
+      }),
     },
   };
 
