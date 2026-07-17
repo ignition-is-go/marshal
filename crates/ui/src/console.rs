@@ -348,10 +348,7 @@ fn Compose(
             },
             move |res| match res {
                 Ok(r) => {
-                    note.set(Some(format!(
-                        "sent ✓ (delivered_live={})",
-                        r.delivered_live
-                    )));
+                    note.set(Some(delivered_note(r.delivered_live)));
                     dm_body.set(String::new());
                 }
                 Err(e) => err.set(Some(e)),
@@ -519,8 +516,8 @@ pub fn ReplyBox(target: String) -> impl IntoView {
                 as_session: Some(as_session.clone()),
             },
             move |res| match res {
-                Ok(_) => {
-                    note.set(Some("sent ✓".to_string()));
+                Ok(r) => {
+                    note.set(Some(delivered_note(r.delivered_live)));
                     body.set(String::new());
                 }
                 Err(e) => err.set(Some(e)),
@@ -581,3 +578,15 @@ const CONSOLE_CSS: &str = r#"
 .reply-link { appearance: none; background: none; border: none; color: var(--color-primary); font-family: var(--font-mono); font-size: 11.5px; cursor: pointer; padding: 0; text-decoration: underline; }
 .reply-live { display: flex; flex-direction: column; gap: 8px; }
 "#;
+
+/// Human-legible send outcome: did the message wake the agent NOW (a live
+/// channel push landed) or is it queued in the agent's inbox until it next
+/// takes a turn? `delivered_live=false` is normal for a flagless/idle recipient
+/// — the inbox still delivers — so say that instead of a bare boolean.
+fn delivered_note(delivered_live: bool) -> String {
+    if delivered_live {
+        "delivered live ✓ — the agent saw it now".to_string()
+    } else {
+        "queued ✓ — the agent will see it on its next turn (inbox)".to_string()
+    }
+}
