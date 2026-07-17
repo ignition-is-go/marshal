@@ -25,11 +25,31 @@ use std::{
 
 use chrono::Utc;
 use hyphae::Gettable;
-use marshal_entities::{AutoSource, Room, RoomKind, RoomMember, Session};
+use marshal_entities::{AutoSource, Message, Room, RoomKind, RoomMember, Session};
 use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 
-/// How long a WS-shim session must be without a live client before DEL.
-pub const STALE_AFTER: Duration = Duration::from_secs(10);
+/// How long a WS-shim session must be without a live client before DEL. Sized
+/// to survive a WHOLE-FLEET reconnect after a daemon restart: on restart every
+/// session replays from disk carrying a stale `client_id`, and the in-memory
+/// `disconnected_since` map is empty, so all sessions enter the grace at once.
+/// Too short and a slow-to-redial shim gets reaped — cascading its UNREAD
+/// direct messages away (belongs_to(Session), review R5) — before it
+/// reconnects to read them. 60s gives the fleet room to re-dial; a genuinely
+/// dead session just lingers that long (and the roster's liveness fields show
+/// it going stale).
+pub const STALE_AFTER: Duration = Duration::from_secs(60);
+
+/// Messages older than this are pruned by `sweep_messages`, regardless of
+/// recipient. Direct messages already cascade away with a DEL'd recipient
+/// session; this bounds the ones that DON'T — broadcasts addressed to the
+/// never-DEL'd `everyone`/`op:`/`project:` rooms, which otherwise accumulate
+/// forever (review R6/D). DELing a Message cascades its `MessageRead` rows.
+pub const MESSAGE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// Run the message-retention sweep every N session-sweeper ticks. The scan is
+/// O(all messages); at one tick per `TICK_INTERVAL`, every 100 ticks (~5 min)
+/// bounds growth without paying the scan each tick.
+const MESSAGE_SWEEP_EVERY: u64 = 100;
 
 /// How long a pull/hook session (no WS client) may go without any hook
 /// activity before the backstop DELs it. Generous: merely-idle sessions
@@ -48,11 +68,51 @@ pub async fn run_sweeper(ctx: CellServerCtx) {
     let mut disconnected_since: HashMap<Arc<str>, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(TICK_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut tick: u64 = 0;
 
     loop {
         interval.tick().await;
         sweep_once(&ctx, &mut disconnected_since);
         sweep_rooms(&ctx);
+        // Prune old messages on the first tick (boot cleanup) and every
+        // MESSAGE_SWEEP_EVERY ticks thereafter — not every tick (the scan is
+        // O(all messages)).
+        if tick.is_multiple_of(MESSAGE_SWEEP_EVERY) {
+            sweep_messages(&ctx);
+        }
+        tick = tick.wrapping_add(1);
+    }
+}
+
+/// Prune messages older than `MESSAGE_TTL`. Bounds the never-cascaded
+/// broadcasts (to `everyone`/`op:`/`project:`, which are never DEL'd) that
+/// would otherwise grow the store without limit. DELing a Message cascades its
+/// `MessageRead` rows via `belongs_to(Message)`, so read-state is cleaned too.
+fn sweep_messages(ctx: &CellServerCtx) {
+    let Some(store) = ctx.registry.get(Message::ENTITY_NAME_STATIC) else {
+        return;
+    };
+    let cutoff = Utc::now().timestamp_millis() - MESSAGE_TTL.as_millis() as i64;
+    let mut to_delete: Vec<Arc<str>> = Vec::new();
+    for (id, item) in store.entries().get() {
+        if let Some(m) = downcast_item::<Message>(&item)
+            && m.sent_at < cutoff
+        {
+            to_delete.push(id);
+        }
+    }
+    if to_delete.is_empty() {
+        return;
+    }
+    log::info!(
+        "[cleanup] pruning {} message(s) older than {} days",
+        to_delete.len(),
+        MESSAGE_TTL.as_secs() / 86_400,
+    );
+    for id in to_delete {
+        if let Err(e) = ctx.del_by_id(Message::ENTITY_NAME_STATIC, &id) {
+            log::warn!("[cleanup] prune message {} failed: {}", id, e);
+        }
     }
 }
 
@@ -178,7 +238,7 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marshal_entities::{RoomId, RoomMemberId, SessionId};
+    use marshal_entities::{Message, MessageId, RoomId, RoomMemberId, SessionId};
     use myko::{
         server::Persister,
         wire::{MEvent, MEventType},
@@ -298,5 +358,50 @@ mod tests {
             !ids.contains("project:stale"),
             "empty auto-room must be reaped"
         );
+    }
+
+    fn set_message(ctx: &CellServerCtx, id: &str, sent_at: i64) {
+        let msg = Message {
+            id: MessageId(Arc::from(id)),
+            from_session_id: SessionId(Arc::from("sender")),
+            to_session_id: Some(SessionId(Arc::from("recipient"))),
+            to_room_id: None,
+            body: "hi".into(),
+            sent_at,
+        };
+        let ev = MEvent::from_item(&msg, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![ev]).expect("apply Message SET");
+    }
+
+    fn message_ids(ctx: &CellServerCtx) -> HashSet<String> {
+        ctx.registry
+            .get(Message::ENTITY_NAME_STATIC)
+            .map(|s| {
+                s.entries()
+                    .get()
+                    .into_iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sweep_messages_prunes_old_and_keeps_recent() {
+        let ctx = setup();
+        let now = chrono::Utc::now().timestamp_millis();
+        // Older than the TTL → pruned.
+        set_message(&ctx, "old", now - MESSAGE_TTL.as_millis() as i64 - 1);
+        // Well within the TTL → kept.
+        set_message(&ctx, "recent", now - 1_000);
+
+        sweep_messages(&ctx);
+
+        let ids = message_ids(&ctx);
+        assert!(
+            !ids.contains("old"),
+            "message older than the TTL must be pruned"
+        );
+        assert!(ids.contains("recent"), "recent message must survive");
     }
 }
