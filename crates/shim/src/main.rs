@@ -18,7 +18,7 @@ mod tools;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use hyphae::Watchable;
+use hyphae::{Gettable, Watchable};
 use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session};
 use mcp::ServerConfig;
 use myko::{
@@ -203,6 +203,34 @@ async fn serve() -> Result<()> {
     let nicknames_cell = client.watch_query::<marshal_entities::GetAllSessionNicknames>(
         marshal_entities::GetAllSessionNicknames {},
     );
+
+    // Mirror this session's daemon-ASSIGNED nickname to a per-session config
+    // file so the runtime-free statusline (a daemon-less subcommand) shows the
+    // SAME handle peers address — the daemon salts a nickname on collision, so
+    // the statusline's local `nickname()` would otherwise mis-route. Re-reads
+    // the id each tick so it follows a canonical-id drift (compact/clear).
+    let nicknames_for_mirror = nicknames_cell.clone();
+    let session_for_mirror = Arc::clone(&session);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut written: Option<String> = None;
+        loop {
+            interval.tick().await;
+            let sid = session_for_mirror.lock().unwrap().id.clone();
+            let assigned = nicknames_for_mirror
+                .get()
+                .iter()
+                .find(|n| n.id.0.as_ref() == sid.0.as_ref())
+                .map(|n| n.nickname.clone());
+            if let Some(nick) = assigned
+                && written.as_deref() != Some(nick.as_str())
+            {
+                write_assigned_nickname(sid.0.as_ref(), &nick);
+                written = Some(nick);
+            }
+        }
+    });
 
     // Re-SET our Session on every connect. The daemon holds session state
     // in-memory, so a daemon restart drops every roster entry; we have to
@@ -523,7 +551,7 @@ fn emit_session_del(client: &MykoClient, session: &Session) -> Result<()> {
 /// and surrounding whitespace are stripped so an operator can `echo URL >
 /// daemon-address` without worrying about formatting.
 fn read_address_from_config_file() -> Option<String> {
-    for path in address_file_candidates() {
+    for path in config_file_candidates(ADDRESS_FILE) {
         if let Ok(contents) = std::fs::read_to_string(&path) {
             let line = contents.lines().next().unwrap_or("").trim();
             if !line.is_empty() {
@@ -539,49 +567,80 @@ fn read_address_from_config_file() -> Option<String> {
     None
 }
 
+/// The per-session config filename the shim mirrors its daemon-ASSIGNED
+/// nickname into.
+fn nickname_file_name(session_id: &str) -> String {
+    format!("nickname-{session_id}")
+}
+
+/// Read the daemon-assigned nickname the shim mirrored for `session_id` (first
+/// existing config-dir candidate). `None` → the caller (statusline) falls back
+/// to the deterministic `marshal_entities::nickname`. This is why the
+/// statusline shows the SAME handle peers address even when the daemon salted
+/// this session's nickname on a collision.
+pub(crate) fn read_assigned_nickname(session_id: &str) -> Option<String> {
+    for path in config_file_candidates(&nickname_file_name(session_id)) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let line = contents.lines().next().unwrap_or("").trim();
+            if !line.is_empty() {
+                return Some(line.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Mirror `nickname` for `session_id` to the first writable config-dir
+/// candidate. Best-effort: a failure just leaves the statusline on its
+/// deterministic fallback.
+fn write_assigned_nickname(session_id: &str, nickname: &str) {
+    let Some(path) = config_file_candidates(&nickname_file_name(session_id))
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, nickname);
+}
+
 #[cfg(unix)]
-fn address_file_candidates() -> Vec<std::path::PathBuf> {
+pub(crate) fn config_file_candidates(filename: &str) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        out.push(
-            std::path::PathBuf::from(xdg)
-                .join("marshal")
-                .join(ADDRESS_FILE),
-        );
+        out.push(std::path::PathBuf::from(xdg).join("marshal").join(filename));
     }
     if let Some(home) = std::env::var_os("HOME") {
         out.push(
             std::path::PathBuf::from(home)
                 .join(".config")
                 .join("marshal")
-                .join(ADDRESS_FILE),
+                .join(filename),
         );
     }
     out
 }
 
 #[cfg(windows)]
-fn address_file_candidates() -> Vec<std::path::PathBuf> {
+pub(crate) fn config_file_candidates(filename: &str) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Some(appdata) = std::env::var_os("APPDATA") {
         out.push(
             std::path::PathBuf::from(appdata)
                 .join("marshal")
-                .join(ADDRESS_FILE),
+                .join(filename),
         );
     }
     if let Some(pd) = std::env::var_os("PROGRAMDATA") {
-        out.push(
-            std::path::PathBuf::from(pd)
-                .join("marshal")
-                .join(ADDRESS_FILE),
-        );
+        out.push(std::path::PathBuf::from(pd).join("marshal").join(filename));
     }
     out
 }
 
 #[cfg(not(any(unix, windows)))]
-fn address_file_candidates() -> Vec<std::path::PathBuf> {
+pub(crate) fn config_file_candidates(_filename: &str) -> Vec<std::path::PathBuf> {
     Vec::new()
 }
 

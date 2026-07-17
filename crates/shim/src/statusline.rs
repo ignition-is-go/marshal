@@ -67,7 +67,13 @@ pub fn render() {
     let handle = if session_id.is_empty() {
         String::new()
     } else {
-        marshal_entities::nickname(session_id)
+        // Prefer the daemon-ASSIGNED handle the shim mirrored to a per-session
+        // file (what peers actually address) over the local deterministic
+        // computation, which mis-routes when the daemon salted this session's
+        // nickname on a collision. Falls back to the computed name if the shim
+        // hasn't written it yet.
+        crate::read_assigned_nickname(session_id)
+            .unwrap_or_else(|| marshal_entities::nickname(session_id))
     };
 
     // Current git branch, rendered in parentheses after the path per
