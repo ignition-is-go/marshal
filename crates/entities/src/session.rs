@@ -214,10 +214,10 @@ pub struct Session {
 /// Two caller-identity paths converge here:
 ///
 /// 1. **Self-identify** (`as_session = Some`): the HTTP-MCP and hook
-///    paths have no connection `client_id` — an agent calling
-///    `command_SendMessage` over stock myko's HTTP transport, or the
-///    daemon's `/hook/*` handlers acting on a session's behalf, name
-///    the acting session explicitly. The id is the one the agent learned
+///    paths have no connection `client_id` — an agent invoking the
+///    `SendMessage` command (via 4.24 `execute`) over stock myko's HTTP
+///    transport, or the daemon's `/hook/*` handlers acting on a session's
+///    behalf, name the acting session explicitly. The id is the one the agent learned
 ///    from its SessionStart hook output (its own `session_id`).
 ///    Trust note: this is self-asserted — a caller can name any session
 ///    id. On a trusted sibling-agent mesh that's acceptable (the WS shim

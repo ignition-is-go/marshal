@@ -186,16 +186,15 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> H
         log::warn!("[hook] session-start SET failed for {sid}: {e:?}");
     }
 
-    // Inject the agent's own marshal identity so it can self-identify on
-    // tool calls. Stock myko's HTTP-MCP transport carries no per-connection
-    // identity, so marshal write tools take an explicit `asSession` arg —
-    // the agent reads its id from here. Persists in context across the
-    // session; re-injected on resume.
+    // Inject the agent's own marshal identity for context — recognising
+    // itself in the roster, addressing self-sends. Claude agents reach
+    // marshal through the shim, which resolves the sender from its WS
+    // connection, so — unlike a raw HTTP-MCP client — the agent does NOT
+    // pass `asSession`; the shim attaches identity. Persists in context
+    // across the session; re-injected on resume.
     let mut out = format!(
-        "<marshal_session>You are marshal session_id {sid}. When calling marshal write \
-         tools (command_SendMessage, command_BroadcastMessage, command_JoinRoom, \
-         command_LeaveRoom), pass this id as the `asSession` argument so peers know \
-         who sent it.</marshal_session>\n"
+        "<marshal_session>You are marshal session_id {sid}. Your marshal tools attach \
+         this identity automatically — you never pass it yourself.</marshal_session>\n"
     );
     let (inbox, ids) = surface_unread(&cmd_ctx, sid);
     out.push_str(&inbox);
