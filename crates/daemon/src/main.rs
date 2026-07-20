@@ -1,16 +1,15 @@
 //! marshal-daemon — myko coordination server.
 //!
 //! Single binary: spins up a myko `CellServer` over WebSocket and registers
-//! the entities defined in the `entities` crate. Events are persisted to an
-//! append-only JSONL log under `$MARSHAL_STATE_DIR`
-//! (default `~/.local/state/marshal/events.jsonl`); on startup the log
-//! is replayed into the registry so sessions and messages survive daemon
-//! restarts. Bind address is configurable so the server can be hosted
-//! remotely; clients (shims, TUIs, web UIs) point their `MykoClient` at it.
+//! the entities defined in the `entities` crate. Persistence is Postgres via
+//! myko when `MYKO_POSTGRES_URL` is set (durable, latest-state-per-entity —
+//! like pulse-cluster / pulse-ctx); otherwise the daemon runs ephemeral. Bind
+//! address is configurable so the server can be hosted remotely; clients
+//! (shims, TUIs, web UIs) point their `MykoClient` at it.
 
 use anyhow::{Context, Result};
-use daemon::persister::{DiskPersister, default_state_dir, migrate_from_claude_coord};
 use myko_server::mcp::dispatch::ServerInfo;
+use myko_server::postgres::PostgresConfig;
 use myko_server::{BlackholePersister, CellServer};
 use std::{
     net::{SocketAddr, ToSocketAddrs},
@@ -44,49 +43,41 @@ async fn main() -> Result<()> {
     marshal_entities::link();
     daemon::link();
 
-    let state_dir = default_state_dir();
-    let log_path = state_dir.join("events.jsonl");
-    if let Err(e) = migrate_from_claude_coord(&log_path) {
-        log::warn!(
-            "[migrate] legacy claude-coord log migration failed: {e} \
-             (continuing with empty {})",
-            log_path.display(),
-        );
-    }
-    let persister = Arc::new(
-        DiskPersister::new(&log_path)
-            .with_context(|| format!("opening event log at {}", log_path.display()))?,
-    );
-    log::info!("marshal-daemon event log: {}", log_path.display());
-
-    // Default = persist to disk. Client/Server entities are WS-bound and
-    // intentionally transient — overriding them to Blackhole keeps the log
-    // free of connection bookkeeping that would only confuse a restart
-    // (replayed Clients reference WS connections that no longer exist).
+    // Client/Server entities are WS-bound and always transient — blackhole them
+    // so connection bookkeeping never lands in durable storage (a replayed
+    // Client would reference a WS connection that no longer exists).
     let blackhole: Arc<dyn myko::server::Persister> = Arc::new(BlackholePersister);
-    let server = CellServer::builder()
+    let mut builder = CellServer::builder()
         .with_bind_addr(bind_addr)
-        .with_default_persister(persister.clone() as Arc<dyn myko::server::Persister>)
         .with_persister_override("Client", blackhole.clone())
-        .with_persister_override("Server", blackhole)
-        .with_server_info(marshal_server_info())
-        .build();
+        .with_persister_override("Server", blackhole.clone())
+        .with_server_info(marshal_server_info());
 
-    // Replay the log into the just-built server before we accept any
-    // connection — sagas and entity stores must reflect the on-disk
-    // history before clients can race against it.
-    let ctx = server.ctx();
-    let restored = persister
-        .replay(&ctx)
-        .with_context(|| format!("replaying event log {}", log_path.display()))?;
-    log::info!("marshal-daemon restored {restored} entities from disk");
+    // Persistence: Postgres via myko when `MYKO_POSTGRES_URL` is set — durable,
+    // latest-state-per-entity (no append-forever event log and no full-file
+    // replay on boot, which the old bespoke JSONL persister had), matching
+    // pulse-cluster / pulse-ctx. Without it, run EPHEMERAL (blackhole): the
+    // daemon is still usable in dev / CI without a database, and the roster,
+    // rooms, and messages regenerate as sessions reconnect. myko-server handles
+    // Postgres replay + live-notify internally — no manual replay/watcher here.
+    builder = match PostgresConfig::from_env() {
+        Some(pg) => {
+            log::info!(
+                "marshal-daemon persistence: postgres (events table `{}`)",
+                pg.table
+            );
+            builder.with_postgres(pg)
+        }
+        None => {
+            log::warn!(
+                "marshal-daemon persistence: EPHEMERAL — no MYKO_POSTGRES_URL set; \
+                 roster/rooms/messages will NOT survive a restart"
+            );
+            builder.with_default_persister(blackhole)
+        }
+    };
 
-    // Tail the log so external appends / migrations against a running
-    // daemon get picked up live. `_watcher` must be held for the lifetime
-    // of the daemon — dropping it stops the notify thread.
-    let _watcher = persister
-        .start_watcher(server.ctx())
-        .with_context(|| format!("starting watcher on {}", log_path.display()))?;
+    let server = builder.build();
 
     // Spawn the periodic sweeper. WS-shim sessions reap on client loss +
     // grace; pull/hook sessions reap on the activity backstop. See cleanup.
@@ -164,6 +155,9 @@ fn marshal_server_info() -> ServerInfo {
              session_id."
                 .to_string(),
         ),
+        // 4.24 tool-search index — built from the registered operations
+        // (no I/O); powers the `search` MCP tool.
+        operation_index: Arc::new(myko::operation_index::build_operation_index()),
     }
 }
 
