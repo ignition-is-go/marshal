@@ -21,10 +21,10 @@ notify-debouncer-mini = "0.7"
 # Myko stack — pulled from crates.io. Stock (no fork patch): ships the
 # HTTP MCP router (POST /myko/mcp request/response + SSE) and the
 # `mcp::filter` tool-visibility allowlist the pull model relies on.
-myko = "^4.19.0"
-myko-macros = "^4.19.0"
-myko-server = "^4.19.0"
-myko-leptos = "^4.19.0"
+myko = "4.24.2"
+myko-macros = "4.24.2"
+myko-server = "4.24.2"
+myko-leptos = "4.24.2"
 hyphae = "^1.0.0"
 
 # Local crates. `version` is required so `cargo publish` accepts the

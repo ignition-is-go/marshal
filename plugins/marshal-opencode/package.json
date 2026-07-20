@@ -19,7 +19,7 @@
     "agent-coordination"
   ],
   "dependencies": {
-    "@myko/core": "^4.19.0"
+    "@myko/core": "^4.24.2"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "*"
