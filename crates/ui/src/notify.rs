@@ -33,6 +33,7 @@ pub fn provide_notifications() {
         let msgs = messages.get();
         let me = console.session_id.to_string();
         let online = console.online.get();
+        let my_operator = console.operator.get();
         seen.update_value(|state| match state {
             None => {
                 *state = Some(msgs.iter().map(|m| m.id.0.to_string()).collect());
@@ -51,7 +52,17 @@ pub fn provide_notifications() {
                         .as_ref()
                         .map(|s| s.0.as_ref() == me)
                         .unwrap_or(false);
-                    if to_me && m.from_session_id.0.as_ref() != me {
+                    // Also toast mail addressed to this operator identity
+                    // (human-via-agent): it routed to one of the operator's
+                    // agents, not this console, but the human watching the
+                    // console should still catch it — that's the whole point
+                    // of addressing a person rather than one agent.
+                    let to_my_operator = !my_operator.is_empty()
+                        && m.to_operator
+                            .as_deref()
+                            .map(|o| o.eq_ignore_ascii_case(&my_operator))
+                            .unwrap_or(false);
+                    if (to_me || to_my_operator) && m.from_session_id.0.as_ref() != me {
                         let from = nick.of(m.from_session_id.0.as_ref());
                         notifs.push(NotificationLevel::Info, format!("{from}: {}", m.body));
                     }

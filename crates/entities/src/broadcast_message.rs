@@ -137,6 +137,7 @@ impl CommandHandler for BroadcastMessage {
             from_session_id: sender.id.clone(),
             to_session_id: None,
             to_room_id: Some(room.id.clone()),
+            to_operator: None,
             body: self.body.clone(),
             sent_at: now,
         };
@@ -190,7 +191,8 @@ impl CommandHandler for BroadcastMessage {
         let mut mentioned: Vec<SessionId> = Vec::new();
         let mut pinged: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
         for token in parse_mentions(&self.body) {
-            let Some(target) = crate::send_message::resolve_mention(&ctx, &sessions, &token)?
+            let Some((target, to_operator)) =
+                crate::send_message::resolve_mention(&ctx, &sessions, &token)?
             else {
                 continue;
             };
@@ -202,12 +204,15 @@ impl CommandHandler for BroadcastMessage {
             let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
             // Persist a direct Message so it lands in the target's inbox and is
             // pulled next turn regardless of live state. The body carries the
-            // room context so the recipient knows it came from a broadcast.
+            // room context so the recipient knows it came from a broadcast. A
+            // human @mention (`@max@lucid.rocks`) carries `to_operator` so it's
+            // surfaced to the person, same as a direct human-addressed send.
             let ping = Message {
                 id: MessageId(Arc::from(Uuid::new_v4().to_string())),
                 from_session_id: sender.id.clone(),
                 to_session_id: Some(target.id.clone()),
                 to_room_id: None,
+                to_operator: to_operator.clone(),
                 body: format!("[@mention in {}] {}", room.name, self.body),
                 sent_at: now,
             };
@@ -226,6 +231,7 @@ impl CommandHandler for BroadcastMessage {
                         "from_session": sender.id.0.as_ref(),
                         "from_nickname": from_nickname,
                         "to_session": target.id.0.as_ref(),
+                        "to_operator": to_operator,
                         "room": room.id.0.as_ref(),
                         "body": self.body,
                         "sent_at": now,

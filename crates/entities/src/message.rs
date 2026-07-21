@@ -41,6 +41,18 @@ pub struct Message {
     #[belongs_to(Room, optional)]
     pub to_room_id: Option<crate::room::RoomId>,
 
+    /// When this direct message was addressed to a *human* — via their operator
+    /// identity (the `op:`/`human:`/email tier of recipient resolution) rather
+    /// than to one specific agent — this holds that operator string (e.g.
+    /// `max@lucid.rocks`). The message is still routed to, and cascades on, the
+    /// operator's most-active session via `to_session_id`; this marks it as
+    /// human-addressed so the receiving agent surfaces it to its operator
+    /// instead of treating it as ordinary peer chatter, and the UI console can
+    /// toast it for that operator regardless of which agent it landed on. `None`
+    /// for agent-to-agent mail. serde-default so pre-field payloads replay clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_operator: Option<String>,
+
     pub body: String,
 
     /// Wall-clock millis when the daemon accepted the message.

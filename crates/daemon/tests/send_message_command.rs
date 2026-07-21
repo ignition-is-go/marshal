@@ -223,6 +223,13 @@ fn nickname_resolves_server_side() {
         "nickname `{nick}` should resolve to its session id",
     );
     assert_eq!(message_count(&ctx), 1);
+    // Agent-addressed (id/nickname/prefix) mail must NOT be marked
+    // human-addressed — otherwise the recipient would be told to relay ordinary
+    // peer chatter to a human.
+    assert_eq!(
+        only_message(&ctx).to_operator, None,
+        "nickname-addressed mail is agent-to-agent, not human-addressed",
+    );
 }
 
 #[test]
@@ -256,9 +263,14 @@ fn operator_token_routes_to_the_humans_most_recently_active_agent() {
         SessionId(Arc::from("max-active")),
         "should route to the most-recently-active of the operator's sessions",
     );
+    let msg = only_message(&ctx);
+    assert_eq!(msg.to_session_id, Some(SessionId(Arc::from("max-active"))));
+    // ...and it's marked human-addressed so the receiving agent surfaces it to
+    // its operator rather than treating it as ordinary peer chatter.
     assert_eq!(
-        only_message(&ctx).to_session_id,
-        Some(SessionId(Arc::from("max-active"))),
+        msg.to_operator.as_deref(),
+        Some("max@lucid.rocks"),
+        "operator-tier routing must stamp `to_operator` (human-addressed)",
     );
 }
 

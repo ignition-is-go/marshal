@@ -366,6 +366,7 @@ mod tests {
             from_session_id: SessionId(Arc::from("sender")),
             to_session_id: Some(SessionId(Arc::from("recipient"))),
             to_room_id: None,
+            to_operator: None,
             body: "hi".into(),
             sent_at,
         };

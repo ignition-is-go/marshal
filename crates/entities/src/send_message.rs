@@ -89,7 +89,8 @@ impl CommandHandler for SendMessage {
         // policy — resolution used to live only in the shim, so plugin/HTTP
         // callers could address by exact id alone. Accepts id / nickname /
         // operator (human-via-agent) / id-prefix; see `resolve_recipient`.
-        let recipient = resolve_recipient(&ctx, &sessions, self.to_session_id.0.as_ref())?;
+        let (recipient, to_operator) =
+            resolve_recipient(&ctx, &sessions, self.to_session_id.0.as_ref())?;
 
         let now = Utc::now().timestamp_millis();
         let msg = Message {
@@ -97,6 +98,7 @@ impl CommandHandler for SendMessage {
             from_session_id: sender.id.clone(),
             to_session_id: Some(recipient.id.clone()),
             to_room_id: None,
+            to_operator: to_operator.clone(),
             body: self.body.clone(),
             sent_at: now,
         };
@@ -136,6 +138,10 @@ impl CommandHandler for SendMessage {
                     "from_session": sender.id.0.as_ref(),
                     "from_nickname": from_nickname,
                     "to_session": recipient.id.0.as_ref(),
+                    // Present when addressed to a human via their operator
+                    // identity: the receiving agent should surface it to that
+                    // operator, not treat it as ordinary peer chatter.
+                    "to_operator": to_operator,
                     "body": self.body,
                     "sent_at": now,
                 }),
@@ -198,15 +204,27 @@ fn err(ctx: &CommandContext, message: &str) -> CommandError {
 ///
 /// Ambiguous or unknown tokens error with the candidates listed, so a caller
 /// can never silently mis-route.
+///
+/// A resolved recipient session plus the operator identity it was addressed as:
+/// `Some` only when resolution went through the operator (human-via-agent) tier,
+/// which marks the message human-addressed (`Message::to_operator`); `None` for
+/// id / nickname / prefix resolution (agent-to-agent).
+#[cfg(not(target_arch = "wasm32"))]
+type ResolvedRecipient = (Arc<Session>, Option<String>);
+
+/// Returns the resolved session plus, when resolution went through the operator
+/// tier (3), the operator identity that was addressed — so the caller can mark
+/// the message human-addressed (`Message::to_operator`). `None` for the id /
+/// nickname / prefix tiers (agent-addressed).
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve_recipient(
     ctx: &CommandContext,
     sessions: &[Arc<Session>],
     token: &str,
-) -> Result<Arc<Session>, CommandError> {
+) -> Result<ResolvedRecipient, CommandError> {
     // 1. Exact session id.
     if let Some(s) = sessions.iter().find(|s| s.id.0.as_ref() == token) {
-        return Ok(s.clone());
+        return Ok((s.clone(), None));
     }
     // 2. Unique nickname.
     let mut by_nick: Vec<Arc<Session>> = Vec::new();
@@ -216,18 +234,21 @@ fn resolve_recipient(
         }
     }
     if by_nick.len() == 1 {
-        return Ok(by_nick.remove(0));
+        return Ok((by_nick.remove(0), None));
     }
     if by_nick.len() > 1 {
         return Err(err(ctx, &ambiguous(ctx, "nickname", token, &by_nick)));
     }
-    // 3. Operator identity — human-via-agent routing.
+    // 3. Operator identity — human-via-agent routing. Record the operator we
+    // addressed (the resolved session's canonical operator string, falling back
+    // to the bare token) so the message is marked human-addressed downstream.
     let op = token
         .strip_prefix("op:")
         .or_else(|| token.strip_prefix("human:"))
         .unwrap_or(token);
     if let Some(best) = pick_operator_session(sessions, op) {
-        return Ok(best);
+        let addressed = best.operator.clone().unwrap_or_else(|| op.to_string());
+        return Ok((best, Some(addressed)));
     }
     // 4. Unique session-id prefix.
     let by_prefix: Vec<Arc<Session>> = sessions
@@ -236,7 +257,7 @@ fn resolve_recipient(
         .cloned()
         .collect();
     match by_prefix.len() {
-        1 => Ok(by_prefix.into_iter().next().unwrap()),
+        1 => Ok((by_prefix.into_iter().next().unwrap(), None)),
         0 => Err(err(
             ctx,
             &format!(
@@ -254,15 +275,19 @@ fn resolve_recipient(
 /// `@token` is just prose. Shared with `BroadcastMessage`'s @mention escape
 /// hatch. Mirrors tiers 1–3 of `resolve_recipient` minus the prefix tier and
 /// the hard errors.
+///
+/// Like `resolve_recipient`, the second tuple element is the addressed operator
+/// identity when resolution went through the operator tier (so a human
+/// `@mention` produces a human-addressed DM), else `None`.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn resolve_mention(
     ctx: &CommandContext,
     sessions: &[Arc<Session>],
     token: &str,
-) -> Result<Option<Arc<Session>>, CommandError> {
+) -> Result<Option<ResolvedRecipient>, CommandError> {
     // 1. Exact session id.
     if let Some(s) = sessions.iter().find(|s| s.id.0.as_ref() == token) {
-        return Ok(Some(s.clone()));
+        return Ok(Some((s.clone(), None)));
     }
     // 2. Unique nickname (ambiguous → treat as prose, not a hard error).
     let mut by_nick: Vec<Arc<Session>> = Vec::new();
@@ -272,7 +297,7 @@ pub(crate) fn resolve_mention(
         }
     }
     if by_nick.len() == 1 {
-        return Ok(Some(by_nick.remove(0)));
+        return Ok(Some((by_nick.remove(0), None)));
     }
     if by_nick.len() > 1 {
         return Ok(None);
@@ -282,7 +307,10 @@ pub(crate) fn resolve_mention(
         .strip_prefix("op:")
         .or_else(|| token.strip_prefix("human:"))
         .unwrap_or(token);
-    Ok(pick_operator_session(sessions, op))
+    Ok(pick_operator_session(sessions, op).map(|best| {
+        let addressed = best.operator.clone().unwrap_or_else(|| op.to_string());
+        (best, Some(addressed))
+    }))
 }
 
 /// Choose which of an operator's sessions receives a human-via-agent message:

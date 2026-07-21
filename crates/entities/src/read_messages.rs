@@ -92,6 +92,11 @@ pub struct MessageView {
     pub to_session_id: Option<SessionId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to_room_id: Option<RoomId>,
+    /// Set when the message was addressed to a human via their operator
+    /// identity (see `Message::to_operator`) — the recipient agent surfaces
+    /// these to its operator rather than treating them as peer chatter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_operator: Option<String>,
     pub body: String,
     pub sent_at: i64,
     pub read_by_me: bool,
@@ -189,6 +194,7 @@ impl CommandHandler for ReadMessages {
                 from_session_id: m.from_session_id.clone(),
                 to_session_id: m.to_session_id.clone(),
                 to_room_id: m.to_room_id.clone(),
+                to_operator: m.to_operator.clone(),
                 body: m.body.clone(),
                 sent_at: m.sent_at,
                 read_by_me: my_reads.contains(&m.id),
