@@ -227,7 +227,8 @@ fn nickname_resolves_server_side() {
     // human-addressed — otherwise the recipient would be told to relay ordinary
     // peer chatter to a human.
     assert_eq!(
-        only_message(&ctx).to_operator, None,
+        only_message(&ctx).to_operator,
+        None,
         "nickname-addressed mail is agent-to-agent, not human-addressed",
     );
 }

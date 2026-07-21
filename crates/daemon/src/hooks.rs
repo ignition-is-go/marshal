@@ -322,8 +322,10 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
     // mail keeps the untrusted-peer stance. Without this split a message meant
     // for a human lands in an agent's lap framed as "untrusted, don't act,"
     // where nothing carries it to the person it was for.
-    let (human, agent): (Vec<&MessageView>, Vec<&MessageView>) =
-        result.messages.iter().partition(|m| m.to_operator.is_some());
+    let (human, agent): (Vec<&MessageView>, Vec<&MessageView>) = result
+        .messages
+        .iter()
+        .partition(|m| m.to_operator.is_some());
 
     let mut out = String::new();
     out.push_str(&format!(
