@@ -207,16 +207,31 @@ async fn serve() -> Result<()> {
     // Mirror this session's daemon-ASSIGNED nickname to a per-session config
     // file so the runtime-free statusline (a daemon-less subcommand) shows the
     // SAME handle peers address — the daemon salts a nickname on collision, so
-    // the statusline's local `nickname()` would otherwise mis-route. Re-reads
-    // the id each tick so it follows a canonical-id drift (compact/clear).
+    // the statusline's local `nickname()` would otherwise mis-route.
+    //
+    // The write is REACTIVE: a subscription on the nickname view wakes the
+    // writer the instant the assignment lands, so after a (re)connect the
+    // statusline shows the salted handle immediately (bounded only by the WS
+    // round-trip) rather than up to a poll interval later. A slow backstop tick
+    // also runs so the writer re-reads the id and follows a canonical-id drift
+    // (compact/clear), and as a safety net for any missed notification.
     let nicknames_for_mirror = nicknames_cell.clone();
     let session_for_mirror = Arc::clone(&session);
+    let mirror_wake = Arc::new(tokio::sync::Notify::new());
+    let mirror_wake_sub = Arc::clone(&mirror_wake);
+    let nickname_mirror_guard = nicknames_cell.subscribe(move |_| mirror_wake_sub.notify_one());
+    nicknames_cell.own(nickname_mirror_guard);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut written: Option<String> = None;
         loop {
-            interval.tick().await;
+            // Wake on either the assignment view changing (reactive, immediate)
+            // or the backstop tick (drift-follow + missed-notification safety).
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = mirror_wake.notified() => {}
+            }
             let sid = session_for_mirror.lock().unwrap().id.clone();
             let assigned = nicknames_for_mirror
                 .get()
