@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/entities", "crates/daemon", "crates/shim", "crates/tui", "crates/ui"]
 
 [workspace.package]
-version = "0.35.0"
+version = "0.36.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
@@ -34,4 +34,4 @@ hyphae = "^1.0.0"
 # the cross-crate publish graph on the dep key, not the `package =`
 # alias). Source code uses `use marshal_entities::...` — the auto
 # dash→underscore conversion Rust applies to crate names.
-marshal-entities = { path = "crates/entities", version = "0.35.0" }
+marshal-entities = { path = "crates/entities", version = "0.36.0" }
