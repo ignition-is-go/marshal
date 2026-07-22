@@ -1,11 +1,14 @@
-//! `marshal-shim codex-hook <session-start|prompt-submit> [base-url]` — the
-//! Codex hook bridge, as a shim subcommand.
+//! `marshal-shim codex-hook <session-start|prompt-submit|pre-tool-use|post-tool-use> [base-url]`
+//! — the Codex hook bridge, as a shim subcommand.
 //!
-//! Codex invokes this from `[hooks]` in `~/.codex/config.toml` on SessionStart
-//! and UserPromptSubmit. It reads Codex's hook JSON on stdin, forwards
-//! `session_id` + `cwd` to the marshal daemon's `/hook/*` endpoint, and emits
-//! the daemon's `<marshal_session>` / `<marshal_inbox>` block as
-//! `additionalContext` so Codex injects it into the model's turn.
+//! Codex invokes this from `[hooks]` in `~/.codex/config.toml`. It reads Codex's
+//! hook JSON on stdin, forwards `session_id` + `cwd` to the marshal daemon's
+//! `/hook/*` endpoint, and emits the daemon's `<marshal_session>` /
+//! `<marshal_inbox>` block as `additionalContext` so Codex injects it into the
+//! model's turn. SessionStart surfaces the identity block; UserPromptSubmit AND
+//! the two tool-use events surface the inbox — the tool-use events let an
+//! actively-working agent pick up peer messages between tool calls, the closest
+//! Codex gets to live delivery (it has no server→model push).
 //!
 //! Living as a SUBCOMMAND of the shim binary (rather than a shell script) makes
 //! the integration cross-platform: the same `marshal-shim` / `marshal-shim.exe`
@@ -41,13 +44,24 @@ pub fn run(ep: &str, base_override: Option<&str>) {
     let base = resolve_base(base_override);
     let host = short_host();
     let op = operator();
+    // Map the hook entry point to (daemon endpoint, Codex hook-event name). The
+    // tool-use entry points reuse the prompt-submit INBOX endpoint so an
+    // actively-working agent surfaces peer messages at tool boundaries — not only
+    // on a user prompt (Codex has no server→model push; hooks are the only inbound).
+    let (endpoint, event) = match ep {
+        "session-start" => ("session-start", "SessionStart"),
+        "prompt-submit" => ("prompt-submit", "UserPromptSubmit"),
+        "pre-tool-use" => ("prompt-submit", "PreToolUse"),
+        "post-tool-use" => ("prompt-submit", "PostToolUse"),
+        _ => ("prompt-submit", "UserPromptSubmit"),
+    };
     let body = format!(
         "{{\"session_id\":{},\"cwd\":{}}}",
         json_str(sid),
         json_str(cwd)
     );
     let path = format!(
-        "/hook/{ep}?host={}&operator={}&harness=codex",
+        "/hook/{endpoint}?host={}&operator={}&harness=codex",
         url_q(&host),
         url_q(&op)
     );
@@ -59,11 +73,6 @@ pub fn run(ep: &str, base_override: Option<&str>) {
     if resp.is_empty() {
         return; // empty inbox / no session block → inject nothing
     }
-    let event = if ep == "session-start" {
-        "SessionStart"
-    } else {
-        "UserPromptSubmit"
-    };
     let out = serde_json::json!({
         "hookSpecificOutput": { "hookEventName": event, "additionalContext": resp }
     });

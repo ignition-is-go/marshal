@@ -81,11 +81,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let agents_path = home.join("AGENTS.md");
 
     // The exact command strings Codex will run (and hash). command == command_windows,
-    // so the trust hash is platform-independent.
-    let cmd_ss = format!("{exe} codex-hook session-start {hook_base}");
-    let cmd_ups = format!("{exe} codex-hook prompt-submit {hook_base}");
-    let block =
-        config_block(&exe, &ws, &cmd_ss, &cmd_ups) + &trust_block(&config_path, &cmd_ss, &cmd_ups);
+    // so the trust hash is platform-independent. SessionStart injects identity;
+    // the other three surface the inbox — UserPromptSubmit on a user prompt, and
+    // the two tool-use hooks between tool calls so an actively-working agent picks
+    // up peer messages mid-task (the closest Codex gets to live delivery).
+    let hooks = HookCmds {
+        ss: format!("{exe} codex-hook session-start {hook_base}"),
+        ups: format!("{exe} codex-hook prompt-submit {hook_base}"),
+        pre: format!("{exe} codex-hook pre-tool-use {hook_base}"),
+        post: format!("{exe} codex-hook post-tool-use {hook_base}"),
+    };
+    let block = config_block(&exe, &ws, &hooks) + &trust_block(&config_path, &hooks);
     write_managed(&config_path, CFG_BEGIN, CFG_END, &block)?;
     write_managed(&agents_path, MD_BEGIN, MD_END, AGENTS_BLOCK)?;
 
@@ -238,10 +244,19 @@ fn q(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string()
 }
 
-fn config_block(exe: &str, ws: &str, cmd_ss: &str, cmd_ups: &str) -> String {
+/// The exact command string for each of the four wired hook events.
+struct HookCmds {
+    ss: String,
+    ups: String,
+    pre: String,
+    post: String,
+}
+
+fn config_block(exe: &str, ws: &str, h: &HookCmds) -> String {
     // Windows runs the hook command through cmd.exe; the same argv form works,
     // but declare command_windows explicitly per Codex's Windows hook contract.
     // (command == command_windows keeps the trust hash platform-independent.)
+    // PreToolUse/PostToolUse carry no matcher, so they fire on every tool call.
     format!(
         "[mcp_servers.marshal]\n\
          command = {exe_q}\n\
@@ -258,41 +273,61 @@ fn config_block(exe: &str, ws: &str, cmd_ss: &str, cmd_ups: &str) -> String {
          [[hooks.UserPromptSubmit.hooks]]\n\
          type = \"command\"\n\
          command = {ups_q}\n\
-         command_windows = {ups_q}\n",
+         command_windows = {ups_q}\n\
+         \n\
+         [[hooks.PreToolUse]]\n\
+         [[hooks.PreToolUse.hooks]]\n\
+         type = \"command\"\n\
+         command = {pre_q}\n\
+         command_windows = {pre_q}\n\
+         \n\
+         [[hooks.PostToolUse]]\n\
+         [[hooks.PostToolUse.hooks]]\n\
+         type = \"command\"\n\
+         command = {post_q}\n\
+         command_windows = {post_q}\n",
         exe_q = q(exe),
         ws_q = q(ws),
         matcher_q = q(SS_MATCHER),
-        ss_q = q(cmd_ss),
-        ups_q = q(cmd_ups),
+        ss_q = q(&h.ss),
+        ups_q = q(&h.ups),
+        pre_q = q(&h.pre),
+        post_q = q(&h.post),
     )
 }
 
-/// Pre-trust the two hooks so they fire in the ChatGPT desktop app, which has no
+/// Pre-trust every hook so they fire in the ChatGPT desktop app, which has no
 /// hook-trust bypass. Codex trusts a User-layer command hook when a stored
 /// `trusted_hash` equals the hook's current identity hash; we compute that hash
 /// (verified byte-identical to Codex's own) from the exact commands we just wrote,
 /// and persist it under `[hooks.state."<key>"]` in this same config.toml.
-fn trust_block(config_path: &Path, cmd_ss: &str, cmd_ups: &str) -> String {
+fn trust_block(config_path: &Path, h: &HookCmds) -> String {
     let cp = config_path.display().to_string();
-    let ss_key = format!("{cp}:session_start:0:0");
-    let ups_key = format!("{cp}:user_prompt_submit:0:0");
-    let ss_hash = hook_hash("session_start", Some(SS_MATCHER), cmd_ss);
-    let ups_hash = hook_hash("user_prompt_submit", None, cmd_ups);
-    format!(
+    // (event_label, matcher, command) — labels are Codex's hook_event_key_label;
+    // only SessionStart carries a matcher (the others resolve to None).
+    let entries = [
+        ("session_start", Some(SS_MATCHER), &h.ss),
+        ("user_prompt_submit", None, &h.ups),
+        ("pre_tool_use", None, &h.pre),
+        ("post_tool_use", None, &h.post),
+    ];
+    let mut out = String::from(
         "\n\
-         # Pre-trusts the two hooks above for THIS install so they fire in the ChatGPT\n\
+         # Pre-trusts the hooks above for THIS install so they fire in the ChatGPT\n\
          # desktop app (no trust bypass there). Computed from the commands above; if a\n\
          # future Codex changes the hook-trust hash these fall back to Untrusted (tools\n\
-         # still work) — re-run codex-setup or trust the hooks once in the app.\n\
-         [hooks.state.{ss_k}]\n\
-         trusted_hash = {ss_h}\n\
-         [hooks.state.{ups_k}]\n\
-         trusted_hash = {ups_h}\n",
-        ss_k = q(&ss_key),
-        ss_h = q(&ss_hash),
-        ups_k = q(&ups_key),
-        ups_h = q(&ups_hash),
-    )
+         # still work) — re-run codex-setup or trust the hooks once in the app.\n",
+    );
+    for (label, matcher, cmd) in entries {
+        let key = format!("{cp}:{label}:0:0");
+        let hash = hook_hash(label, matcher, cmd);
+        out.push_str(&format!(
+            "[hooks.state.{}]\ntrusted_hash = {}\n",
+            q(&key),
+            q(&hash)
+        ));
+    }
+    out
 }
 
 /// Reproduce Codex's `command_hook_hash` (`hooks/src/engine/discovery.rs`) +
