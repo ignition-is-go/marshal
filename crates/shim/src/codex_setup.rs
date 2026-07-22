@@ -29,14 +29,21 @@ const SS_MATCHER: &str = "startup|resume|clear|compact";
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut daemon: Option<String> = None;
     let mut home_override: Option<String> = None;
+    let mut no_install = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--daemon" => daemon = it.next().cloned(),
             "--codex-home" => home_override = it.next().cloned(),
+            "--no-install" => no_install = true,
             "-h" | "--help" => {
                 println!(
-                    "usage: marshal-shim codex-setup [--daemon ws://host:6155] [--codex-home DIR]"
+                    "usage: marshal-shim codex-setup [--daemon ws://host:6155] [--codex-home DIR] [--no-install]\n\
+                     \n\
+                     By default the binary installs itself to a stable per-user location\n\
+                     (added to PATH) and the Codex config references that copy, so the\n\
+                     integration survives deleting the download. --no-install wires up the\n\
+                     binary at its current path instead."
                 );
                 return Ok(());
             }
@@ -60,8 +67,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     let home = codex_home(home_override)?;
     std::fs::create_dir_all(&home)?;
-    let exe = std::env::current_exe()?;
-    let exe = exe.display().to_string();
+
+    // Install to a stable per-user location so the config references a durable
+    // path (not wherever the download landed) and `marshal-shim` is on PATH.
+    let src_exe = std::env::current_exe()?;
+    let (exe, install_note) = if no_install {
+        (src_exe.display().to_string(), String::new())
+    } else {
+        install_self(&src_exe)
+    };
 
     let config_path = home.join("config.toml");
     let agents_path = home.join("AGENTS.md");
@@ -78,6 +92,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     println!("marshal wired into Codex:");
     println!("  daemon      {ws}");
     println!("  shim        {exe}");
+    if !install_note.is_empty() {
+        print!("{install_note}");
+    }
     println!("  config      {}", config_path.display());
     println!("  agents      {}", agents_path.display());
     println!();
@@ -105,6 +122,114 @@ fn codex_home(override_: Option<String>) -> anyhow::Result<PathBuf> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("cannot locate home dir (set HOME or --codex-home)"))?;
     Ok(PathBuf::from(home).join(".codex"))
+}
+
+/// Copy this binary to a stable per-user location and best-effort add that dir to
+/// PATH, returning `(exe_path_for_config, summary_note)`. The Codex config then
+/// references a durable path instead of wherever the download ran from. Falls back
+/// to the current path (with a warning) if anything fails — setup still succeeds.
+fn install_self(src: &Path) -> (String, String) {
+    let dir = match install_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("warning: no install dir ({e}); leaving the shim at its current path");
+            return (src.display().to_string(), String::new());
+        }
+    };
+    let name = if cfg!(windows) {
+        "marshal-shim.exe"
+    } else {
+        "marshal-shim"
+    };
+    let dest = dir.join(name);
+    // Skip the copy when we're already running the installed copy (can't copy onto
+    // self); still refresh PATH.
+    let is_self =
+        dest.exists() && std::fs::canonicalize(src).ok() == std::fs::canonicalize(&dest).ok();
+    if !is_self {
+        if let Err(e) =
+            std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(src, &dest).map(|_| ()))
+        {
+            eprintln!(
+                "warning: could not install to {} ({e}); leaving the shim at its current path",
+                dir.display()
+            );
+            return (src.display().to_string(), String::new());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let note = ensure_on_path(&dir);
+    (dest.display().to_string(), note)
+}
+
+/// Stable per-user bin dir: `%LOCALAPPDATA%\marshal\bin` on Windows, `~/.local/bin`
+/// elsewhere.
+fn install_dir() -> anyhow::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(|u| PathBuf::from(u).join("AppData").join("Local"))
+            })
+            .ok_or_else(|| anyhow::anyhow!("LOCALAPPDATA/USERPROFILE unset"))?;
+        Ok(base.join("marshal").join("bin"))
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("HOME unset"))?;
+        Ok(PathBuf::from(home).join(".local").join("bin"))
+    }
+}
+
+/// Best-effort put `dir` on PATH for future shells; returns a one-line summary.
+/// Windows adds it to the User environment (idempotent, User scope only); other
+/// platforms print the line to add to a shell profile — auto-editing rc files
+/// across shells is too invasive. Never fails setup.
+fn ensure_on_path(dir: &Path) -> String {
+    let dir_s = dir.display().to_string();
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let already = std::env::var_os("PATH")
+        .map(|p| p.to_string_lossy().split(sep).any(|e| e == dir_s))
+        .unwrap_or(false);
+    if already {
+        return format!("  path        {dir_s} (already on PATH)\n");
+    }
+    #[cfg(windows)]
+    {
+        // Append to the User Path only if absent, preserving every existing entry.
+        let script = "$d = $env:MARSHAL_BIN_DIR; \
+             $p = [Environment]::GetEnvironmentVariable('Path','User'); \
+             if (-not $p) { $p = '' }; \
+             $parts = @($p -split ';' | Where-Object { $_ -ne '' }); \
+             if ($parts -notcontains $d) { \
+               [Environment]::SetEnvironmentVariable('Path', (($parts + $d) -join ';'), 'User') }";
+        let ok = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("MARSHAL_BIN_DIR", &dir_s)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            format!("  path        {dir_s} (added to your user PATH; restart your shell)\n")
+        } else {
+            format!("  path        {dir_s} (add this to PATH to run `marshal-shim` by name)\n")
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "  path        {dir_s} — add to PATH (export PATH=\"{dir_s}:$PATH\" in ~/.profile) to run `marshal-shim` by name\n"
+        )
+    }
 }
 
 /// TOML basic-string quote+escape (backslashes in Windows paths must be escaped).
