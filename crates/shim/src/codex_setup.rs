@@ -107,10 +107,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     println!("Restart Codex (or start a new session) to pick up the marshal MCP server + hooks.");
     println!(
         "The marshal TOOLS and the auto-inbox HOOKS both work immediately: codex-setup\n\
-         pre-trusts the two hooks for this install (Codex skips untrusted command hooks,\n\
-         and the desktop app has no trust bypass). If Codex ever reports them as\n\
+         pre-trusts the marshal hooks for this install (Codex skips untrusted command\n\
+         hooks, and the desktop app has no trust bypass). If Codex ever reports them as\n\
          untrusted (e.g. a Codex update changes the hook-trust hash), re-run codex-setup\n\
-         or trust the two marshal hooks once in the app's hook settings."
+         or trust the marshal hooks once in the app's hook settings."
     );
     Ok(())
 }

@@ -143,7 +143,8 @@ jobs:
             marshal-daemon-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-pc-windows-gnu.exe \
-            marshal-ui-dist.tar.gz
+            marshal-ui-dist.tar.gz \
+            scripts/install-codex.sh
 
   # marshal-shim for macOS — the ONLY marshal binary a Mac needs (the daemon +
   # UI run on the Linux marshal LXC; a Mac is purely a Codex/Claude CLIENT).
