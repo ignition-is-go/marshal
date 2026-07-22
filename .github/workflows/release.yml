@@ -36,6 +36,12 @@ jobs:
       id-token: write
     env:
       CARGO_TERM_COLOR: always
+    # Expose the release outcome to the macOS build job (which uploads the
+    # darwin shims to the same release). `skip` mirrors the release-on-release
+    # guard; `version` is the stamped version the mac job checks out + tags.
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      version: ${{ steps.stamp.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -70,6 +76,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
       - name: Stamp, commit, tag, push, release, and publish
+        id: stamp
         if: steps.check.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -82,6 +89,7 @@ jobs:
           # cleanly instead of being rejected non-fast-forward.
           git pull --ff-only origin "$GITHUB_REF_NAME"
           VERSION=$(cargo flux version)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           cargo flux stamp "$VERSION"
           # Keep Claude Code plugin manifests in lockstep with the workspace
           # version so `/plugin update` actually detects new releases.
@@ -136,3 +144,40 @@ jobs:
             marshal-shim-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-pc-windows-gnu.exe \
             marshal-ui-dist.tar.gz
+
+  # marshal-shim for macOS — the ONLY marshal binary a Mac needs (the daemon +
+  # UI run on the Linux marshal LXC; a Mac is purely a Codex/Claude CLIENT).
+  # Darwin can't be cross-built from the Ubuntu release job (no Apple SDK), so a
+  # native macos runner builds both arches and uploads them to the SAME release.
+  # Gated on `release` so the tag + GitHub release already exist to upload into.
+  build-macos:
+    needs: release
+    if: needs.release.outputs.skip == 'false'
+    runs-on: macos-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Build the exact commit the release job stamped + tagged.
+          ref: v${{ needs.release.outputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build + upload macOS marshal-shim (arm64 + x86_64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.release.outputs.version }}"
+          # macos-latest is Apple Silicon (aarch64 native); x86_64 is a cross
+          # target the universal Apple SDK on the runner already supports.
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release -p marshal-shim --target aarch64-apple-darwin
+          cargo build --release -p marshal-shim --target x86_64-apple-darwin
+          cp target/aarch64-apple-darwin/release/marshal-shim marshal-shim-aarch64-apple-darwin
+          cp target/x86_64-apple-darwin/release/marshal-shim  marshal-shim-x86_64-apple-darwin
+          gh release upload "v$VERSION" \
+            marshal-shim-aarch64-apple-darwin \
+            marshal-shim-x86_64-apple-darwin
