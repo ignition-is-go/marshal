@@ -21,6 +21,9 @@ log = { workspace = true }
 env_logger = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
+# codex-setup pre-trusts the Codex hooks by writing the trust-hash Codex itself
+# computes (SHA256 over the normalized hook identity — see codex_setup.rs).
+sha2 = "0.10"
 tokio = { workspace = true }
 chrono = { workspace = true }
 uuid = { version = "1", features = ["v4"] }

@@ -13,12 +13,18 @@
 //! one binary, run `marshal-shim codex-setup --daemon ws://<daemon>:6155`, done.
 //! (Fleet Linux hosts use the `marshal_codex` Ansible role instead.)
 
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 const CFG_BEGIN: &str = "# >>> marshal (managed by marshal-shim codex-setup) >>>";
 const CFG_END: &str = "# <<< marshal (managed by marshal-shim codex-setup) <<<";
 const MD_BEGIN: &str = "<!-- >>> marshal (managed by marshal-shim codex-setup) >>> -->";
 const MD_END: &str = "<!-- <<< marshal (managed by marshal-shim codex-setup) <<< -->";
+
+/// SessionStart matcher — must match byte-for-byte between the `[[hooks.SessionStart]]`
+/// block AND the trust-hash identity, or Codex computes a different hash and the
+/// pre-trust misses.
+const SS_MATCHER: &str = "startup|resume|clear|compact";
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut daemon: Option<String> = None;
@@ -60,7 +66,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let config_path = home.join("config.toml");
     let agents_path = home.join("AGENTS.md");
 
-    let block = config_block(&exe, &ws, &hook_base);
+    // The exact command strings Codex will run (and hash). command == command_windows,
+    // so the trust hash is platform-independent.
+    let cmd_ss = format!("{exe} codex-hook session-start {hook_base}");
+    let cmd_ups = format!("{exe} codex-hook prompt-submit {hook_base}");
+    let block =
+        config_block(&exe, &ws, &cmd_ss, &cmd_ups) + &trust_block(&config_path, &cmd_ss, &cmd_ups);
     write_managed(&config_path, CFG_BEGIN, CFG_END, &block)?;
     write_managed(&agents_path, MD_BEGIN, MD_END, AGENTS_BLOCK)?;
 
@@ -72,9 +83,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     println!();
     println!("Restart Codex (or start a new session) to pick up the marshal MCP server + hooks.");
     println!(
-        "The marshal TOOLS work immediately. The auto-inbox HOOKS need a one-time trust: run\n  \
-         codex   (then `/hooks`, and trust the two marshal hooks)\n\
-         because Codex skips untrusted hooks (the desktop app has no bypass). MCP tools need no trust."
+        "The marshal TOOLS and the auto-inbox HOOKS both work immediately: codex-setup\n\
+         pre-trusts the two hooks for this install (Codex skips untrusted command hooks,\n\
+         and the desktop app has no trust bypass). If Codex ever reports them as\n\
+         untrusted (e.g. a Codex update changes the hook-trust hash), re-run codex-setup\n\
+         or trust the two marshal hooks once in the app's hook settings."
     );
     Ok(())
 }
@@ -94,20 +107,23 @@ fn codex_home(override_: Option<String>) -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".codex"))
 }
 
-fn config_block(exe: &str, ws: &str, hook_base: &str) -> String {
-    // TOML string values: backslashes (Windows paths) must be escaped, so quote
-    // via serde_json (JSON string escaping is a valid TOML basic-string escape).
-    let q = |s: &str| serde_json::Value::String(s.to_string()).to_string();
-    let cmd = |ep: &str| format!("{} codex-hook {ep} {hook_base}", exe);
+/// TOML basic-string quote+escape (backslashes in Windows paths must be escaped).
+/// JSON string escaping is a valid TOML basic-string escape, so borrow serde_json's.
+fn q(s: &str) -> String {
+    serde_json::Value::String(s.to_string()).to_string()
+}
+
+fn config_block(exe: &str, ws: &str, cmd_ss: &str, cmd_ups: &str) -> String {
     // Windows runs the hook command through cmd.exe; the same argv form works,
     // but declare command_windows explicitly per Codex's Windows hook contract.
+    // (command == command_windows keeps the trust hash platform-independent.)
     format!(
         "[mcp_servers.marshal]\n\
          command = {exe_q}\n\
          env = {{ MARSHAL_DAEMON_ADDRESS = {ws_q}, MARSHAL_HARNESS = \"codex\" }}\n\
          \n\
          [[hooks.SessionStart]]\n\
-         matcher = \"startup|resume|clear|compact\"\n\
+         matcher = {matcher_q}\n\
          [[hooks.SessionStart.hooks]]\n\
          type = \"command\"\n\
          command = {ss_q}\n\
@@ -120,9 +136,62 @@ fn config_block(exe: &str, ws: &str, hook_base: &str) -> String {
          command_windows = {ups_q}\n",
         exe_q = q(exe),
         ws_q = q(ws),
-        ss_q = q(&cmd("session-start")),
-        ups_q = q(&cmd("prompt-submit")),
+        matcher_q = q(SS_MATCHER),
+        ss_q = q(cmd_ss),
+        ups_q = q(cmd_ups),
     )
+}
+
+/// Pre-trust the two hooks so they fire in the ChatGPT desktop app, which has no
+/// hook-trust bypass. Codex trusts a User-layer command hook when a stored
+/// `trusted_hash` equals the hook's current identity hash; we compute that hash
+/// (verified byte-identical to Codex's own) from the exact commands we just wrote,
+/// and persist it under `[hooks.state."<key>"]` in this same config.toml.
+fn trust_block(config_path: &Path, cmd_ss: &str, cmd_ups: &str) -> String {
+    let cp = config_path.display().to_string();
+    let ss_key = format!("{cp}:session_start:0:0");
+    let ups_key = format!("{cp}:user_prompt_submit:0:0");
+    let ss_hash = hook_hash("session_start", Some(SS_MATCHER), cmd_ss);
+    let ups_hash = hook_hash("user_prompt_submit", None, cmd_ups);
+    format!(
+        "\n\
+         # Pre-trusts the two hooks above for THIS install so they fire in the ChatGPT\n\
+         # desktop app (no trust bypass there). Computed from the commands above; if a\n\
+         # future Codex changes the hook-trust hash these fall back to Untrusted (tools\n\
+         # still work) — re-run codex-setup or trust the hooks once in the app.\n\
+         [hooks.state.{ss_k}]\n\
+         trusted_hash = {ss_h}\n\
+         [hooks.state.{ups_k}]\n\
+         trusted_hash = {ups_h}\n",
+        ss_k = q(&ss_key),
+        ss_h = q(&ss_hash),
+        ups_k = q(&ups_key),
+        ups_h = q(&ups_hash),
+    )
+}
+
+/// Reproduce Codex's `command_hook_hash` (`hooks/src/engine/discovery.rs`) +
+/// `version_for_toml` (`config/src/fingerprint.rs`): SHA256 over the canonical
+/// (keys sorted, compact) JSON of the normalized hook identity
+/// `{event_name, matcher?, hooks:[{type:"command", command, timeout:600, async:false}]}`.
+/// `command_windows`/`statusMessage` are None (dropped); `timeout` defaults to 600.
+/// Keys are emitted already sorted so the output matches serde_json's canonical form
+/// regardless of the `preserve_order` feature.
+fn hook_hash(event_label: &str, matcher: Option<&str>, command: &str) -> String {
+    let handler = format!(
+        "{{\"async\":false,\"command\":{},\"timeout\":600,\"type\":\"command\"}}",
+        q(command)
+    );
+    let identity = match matcher {
+        Some(m) => format!(
+            "{{\"event_name\":\"{event_label}\",\"hooks\":[{handler}],\"matcher\":{}}}",
+            q(m)
+        ),
+        None => format!("{{\"event_name\":\"{event_label}\",\"hooks\":[{handler}]}}"),
+    };
+    let digest = Sha256::digest(identity.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{hex}")
 }
 
 /// Replace (or append) the marker-delimited managed block in `path`.
