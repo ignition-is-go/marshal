@@ -11,6 +11,7 @@
 
 mod activity;
 mod channels;
+mod codex_hook;
 mod mcp;
 mod session_discovery;
 mod statusline;
@@ -77,6 +78,16 @@ fn main() -> Result<()> {
         }
         Some("statusline") if argv.next().is_none() => {
             statusline::render();
+            return Ok(());
+        }
+        // Codex hook bridge (cross-platform, no shell): Codex runs
+        // `marshal-shim codex-hook session-start|prompt-submit [base-url]` from
+        // its `[hooks]` config. Also runs runtime-free — a single blocking POST
+        // to the daemon's /hook/* endpoint. See `codex_hook`.
+        Some("codex-hook") => {
+            let ep = argv.next().unwrap_or_else(|| "prompt-submit".to_string());
+            let base = argv.next();
+            codex_hook::run(&ep, base.as_deref());
             return Ok(());
         }
         Some(other) => {
@@ -617,7 +628,7 @@ fn emit_session_del(client: &MykoClient, session: &Session) -> Result<()> {
 /// non-empty trimmed line from the first readable file. Trailing newlines
 /// and surrounding whitespace are stripped so an operator can `echo URL >
 /// daemon-address` without worrying about formatting.
-fn read_address_from_config_file() -> Option<String> {
+pub(crate) fn read_address_from_config_file() -> Option<String> {
     for path in config_file_candidates(ADDRESS_FILE) {
         if let Ok(contents) = std::fs::read_to_string(&path) {
             let line = contents.lines().next().unwrap_or("").trim();
