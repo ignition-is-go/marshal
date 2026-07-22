@@ -77,10 +77,10 @@ fn resolve_base(base_override: Option<&str>) -> String {
     if let Some(b) = base_override.filter(|b| !b.is_empty()) {
         return b.trim_end_matches('/').to_string();
     }
-    if let Ok(b) = std::env::var("MARSHAL_BASE_URL") {
-        if !b.is_empty() {
-            return b.trim_end_matches('/').to_string();
-        }
+    if let Ok(b) = std::env::var("MARSHAL_BASE_URL")
+        && !b.is_empty()
+    {
+        return b.trim_end_matches('/').to_string();
     }
     // Fall back to the same daemon address the shim's MCP path uses, remapped
     // from the WS endpoint to the plain-HTTP hook port.
