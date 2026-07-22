@@ -19,7 +19,7 @@ mod tools;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use hyphae::{Gettable, Watchable};
-use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session};
+use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session, SessionId};
 use mcp::ServerConfig;
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -148,16 +148,42 @@ async fn serve() -> Result<()> {
     let operator = detect_operator(&cwd);
     let host = detect_host();
 
-    // Claude Code's canonical session_id is the filename of its per-session
-    // transcript at `~/.claude/projects/<encoded_cwd>/<id>.jsonl`. Adopting
-    // that id keeps shim + hook on a single Session row keyed by it. We
-    // hard-fail if discovery doesn't converge — better to die loudly than
+    // Harness selection. Claude Code (default) discovers its canonical
+    // session_id from `~/.claude` transcripts; Codex from its `~/.codex`
+    // rollout store — Codex hands the id to neither its MCP servers nor this
+    // shim (openai/codex#19937), so both harnesses learn it out-of-band from
+    // disk. Set `MARSHAL_HARNESS=codex` in the `[mcp_servers.marshal].env`
+    // block. Adopting the same id the daemon's `/hook/*` endpoints receive
+    // keeps shim + hooks on a single Session row; we hard-fail rather than
     // register under a synthetic id and silently break peer routing.
-    let Some(session_id) = session_discovery::resolve(&cwd) else {
-        anyhow::bail!(
-            "could not discover Claude Code session_id from ~/.claude/projects/*/*.jsonl \
-             (cwd={cwd}); refusing to start under a synthetic id"
-        );
+    let is_codex = std::env::var("MARSHAL_HARNESS")
+        .map(|h| h.eq_ignore_ascii_case("codex"))
+        .unwrap_or(false);
+
+    let (session_id, git_branch) = if is_codex {
+        // Codex harness: the shim does NOT own identity. Codex never tells its
+        // MCP servers which session they serve (openai/codex#19937), and disk
+        // discovery is unreliable (spawn-vs-write race, resume, same-cwd
+        // concurrency) — inferring an id gets peer attribution wrong, which
+        // breaks reply routing. So under Codex the shim registers NO Session
+        // and never sends with an inferred id: the daemon's SessionStart hook
+        // registers the authoritative Session (Codex hands the hook the real
+        // id) and injects it, and the agent passes it back as `asSession` on
+        // write tools, which the shim forwards. This id is a local placeholder
+        // that is never published to the daemon (registration is skipped
+        // below), present only to satisfy the shared `ToolHost` shape.
+        (
+            SessionId(std::sync::Arc::from(format!("codex-shim-{pid}"))),
+            git_branch,
+        )
+    } else {
+        match session_discovery::resolve(&cwd) {
+            Some(sid) => (sid, git_branch),
+            None => anyhow::bail!(
+                "could not discover Claude Code session_id from ~/.claude/projects/*/*.jsonl \
+                 (cwd={cwd}); refusing to start under a synthetic id"
+            ),
+        }
     };
 
     // Resolve whether this session can actually RECEIVE live peer messages —
@@ -168,10 +194,15 @@ async fn serve() -> Result<()> {
     // (a flag-off recipient is queued to its inbox, never claimed as live).
     // `None` = parent unreadable (legacy/unknown). The user-facing RECV-OFF
     // warning does NOT depend on this startup read — the statusline detects
-    // live on every render, which is race-free across resume.
-    let channels_enabled = tokio::task::spawn_blocking(channels::detect)
-        .await
-        .unwrap_or(None);
+    // live on every render, which is race-free across resume. Codex has no
+    // channels flag and delivers inbound via hooks, so it's simply unknown.
+    let channels_enabled = if is_codex {
+        None
+    } else {
+        tokio::task::spawn_blocking(channels::detect)
+            .await
+            .unwrap_or(None)
+    };
 
     let session = Session {
         id: session_id.clone(),
@@ -258,10 +289,17 @@ async fn serve() -> Result<()> {
         if let hyphae::Signal::Value(status) = signal {
             match &**status {
                 ConnectionStatus::Connected(addr) => {
-                    log::info!("[marshal-shim] connected to {addr} — (re)sending session");
-                    let snapshot = session_for_resend.lock().unwrap().clone();
-                    if let Err(e) = emit_session_set(&client_for_resend, &snapshot) {
-                        log::warn!("[marshal-shim] re-SET on connect failed: {e}");
+                    // Under Codex the shim owns no Session (the SessionStart
+                    // hook registers the authoritative one) — so skip the
+                    // re-SET, which would publish the placeholder id.
+                    if is_codex {
+                        log::info!("[marshal-shim] connected to {addr} (codex: no self-register)");
+                    } else {
+                        log::info!("[marshal-shim] connected to {addr} — (re)sending session");
+                        let snapshot = session_for_resend.lock().unwrap().clone();
+                        if let Err(e) = emit_session_set(&client_for_resend, &snapshot) {
+                            log::warn!("[marshal-shim] re-SET on connect failed: {e}");
+                        }
                     }
                 }
                 ConnectionStatus::Disconnected => {
@@ -281,6 +319,7 @@ async fn serve() -> Result<()> {
         client: Arc::clone(&client),
         pid,
         cwd: cwd.clone(),
+        is_codex,
         session: Arc::clone(&session),
         sessions_cell,
         rooms_cell,
@@ -329,7 +368,7 @@ async fn serve() -> Result<()> {
              events; reply with `send_message` or `broadcast`.",
             session_id.0
         ),
-        tools: tools::tools_def(),
+        tools: tools::tools_def(is_codex),
         resources: tools::resources_def(),
     };
 
@@ -414,8 +453,21 @@ async fn serve() -> Result<()> {
     let session_for_publish = Arc::clone(&session);
     // The parent `claude` pid is stable for this shim's lifetime; we poll its
     // live per-PID manifest to detect canonical-id drift (compact/clear).
-    let parent_pid_for_publish = session_discovery::parent_pid();
+    // Codex has no per-PID session manifest, and its SessionStart hook
+    // (matcher covers startup|resume|clear|compact) re-registers the Session
+    // on drift — so shim-side self-heal is a no-op under the Codex harness.
+    let parent_pid_for_publish = if is_codex {
+        None
+    } else {
+        session_discovery::parent_pid()
+    };
     tokio::spawn(async move {
+        // Under Codex the shim owns no Session, so there is nothing to publish
+        // liveness for — the SessionStart / UserPromptSubmit hooks bump the
+        // authoritative Session's activity. Skip the whole publisher.
+        if is_codex {
+            return;
+        }
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Cache the last-pushed values so we only dispatch setters

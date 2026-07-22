@@ -187,15 +187,25 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> H
     }
 
     // Inject the agent's own marshal identity for context — recognising
-    // itself in the roster, addressing self-sends. Claude agents reach
-    // marshal through the shim, which resolves the sender from its WS
-    // connection, so — unlike a raw HTTP-MCP client — the agent does NOT
-    // pass `asSession`; the shim attaches identity. Persists in context
-    // across the session; re-injected on resume.
-    let mut out = format!(
-        "<marshal_session>You are marshal session_id {sid}. Your marshal tools attach \
-         this identity automatically — you never pass it yourself.</marshal_session>\n"
-    );
+    // itself in the roster, addressing self-sends. Persists in context across
+    // the session; re-injected on resume. The `asSession` guidance is
+    // harness-specific: Claude reaches marshal through the shim, which resolves
+    // the sender from its WS connection, so the agent does NOT pass it. Codex's
+    // MCP server has no connection identity (Codex never tells it the session),
+    // so the Codex agent must name itself explicitly on every write.
+    let mut out = if q.get("harness").map(String::as_str) == Some("codex") {
+        format!(
+            "<marshal_session>You are marshal session_id {sid}. On EVERY marshal write tool \
+             (send_message, broadcast, join_room, leave_room, set_status, ack_messages) pass \
+             this id as the `asSession` argument — peers need it to know who sent the message \
+             and to reply to you.</marshal_session>\n"
+        )
+    } else {
+        format!(
+            "<marshal_session>You are marshal session_id {sid}. Your marshal tools attach \
+             this identity automatically — you never pass it yourself.</marshal_session>\n"
+        )
+    };
     let (inbox, ids) = surface_unread(&cmd_ctx, sid);
     out.push_str(&inbox);
     HookOutcome {

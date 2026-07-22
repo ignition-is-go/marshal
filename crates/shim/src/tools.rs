@@ -30,9 +30,15 @@ pub struct ToolHost {
     pub client: Arc<MykoClient>,
     pub pid: u32,
     pub cwd: String,
+    /// True under the Codex harness. Codex gives the shim no connection
+    /// identity and disk discovery is unreliable, so the shim owns no Session
+    /// and write tools carry an explicit `asSession` (the id the SessionStart
+    /// hook injected) instead of resolving the caller from the WS connection.
+    pub is_codex: bool,
     /// The shim's local copy of its Session entity. Mutations
     /// (set_status) update this and re-emit a SET event so the
-    /// server's view stays in sync.
+    /// server's view stays in sync. A placeholder under Codex (never
+    /// published — the SessionStart hook owns the real Session row).
     pub session: Arc<Mutex<Session>>,
     /// Long-lived watch_query subscriptions held warm so resources
     /// can read a primed cache without racing the server's first
@@ -241,6 +247,30 @@ async fn read_messages(
 // Tool implementations (writes)
 // =============================================================================
 
+/// The session a write command acts AS. Under Codex the shim holds no
+/// connection identity, so the agent names its own session explicitly via
+/// `asSession` (the id the SessionStart hook injected in the `<marshal_session>`
+/// block) and the shim forwards it. Every other harness resolves the caller
+/// from the WS connection, so this is `None`.
+fn caller(host: &ToolHost, args: &Value) -> Result<Option<SessionId>, ToolError> {
+    if !host.is_codex {
+        return Ok(None);
+    }
+    let s = args
+        .get("asSession")
+        .or_else(|| args.get("as_session"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ToolError::invalid_params(
+                "missing `asSession`: pass your own marshal session id (shown in the \
+                 <marshal_session> block at session start) so peers know who sent this",
+            )
+        })?;
+    Ok(Some(SessionId(Arc::from(s))))
+}
+
 async fn set_status(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
     let text = arg_str(args, "text", "set_status: missing `text`")?;
     let new_task = if text.is_empty() {
@@ -248,13 +278,15 @@ async fn set_status(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolEr
     } else {
         Some(Arc::<str>::from(text.as_str()))
     };
+    // Codex: target the agent's own session (asSession); else our own row.
+    let id = caller(host, args)?.unwrap_or_else(|| host.session.lock().unwrap().id.clone());
     let _ = host
         .client
         .send_command::<SetSessionCurrentTask, ()>(&SetSessionCurrentTask {
-            id: host.session.lock().unwrap().id.clone(),
+            id,
             current_task: new_task,
         });
-    {
+    if !host.is_codex {
         let mut sess = host.session.lock().unwrap();
         sess.current_task = if text.is_empty() { None } else { Some(text) };
     }
@@ -275,7 +307,7 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
     let cmd = SendMessage {
         to_session_id,
         body,
-        as_session: None, // WS path: sender resolved from the connection
+        as_session: caller(host, args)?,
     };
     let cell = host
         .client
@@ -297,7 +329,7 @@ async fn broadcast(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolErr
     let cmd = BroadcastMessage {
         to_room_id: RoomId(Arc::<str>::from(to_room.as_str())),
         body,
-        as_session: None, // WS path: sender resolved from the connection
+        as_session: caller(host, args)?,
     };
     let cell = host
         .client
@@ -317,7 +349,7 @@ async fn join_room(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolErr
     let cmd = JoinRoom {
         name,
         description,
-        as_session: None,
+        as_session: caller(host, args)?,
     };
     let cell = host.client.send_command::<JoinRoom, JoinRoomResult>(&cmd);
     let result = await_command(cell, REQUEST_TIMEOUT)
@@ -330,7 +362,7 @@ async fn leave_room(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolEr
     let room = arg_str(args, "room", "leave_room: missing `room` (id or name)")?;
     let cmd = LeaveRoom {
         room,
-        as_session: None,
+        as_session: caller(host, args)?,
     };
     let cell = host.client.send_command::<LeaveRoom, LeaveRoomResult>(&cmd);
     let result = await_command(cell, REQUEST_TIMEOUT)
@@ -353,7 +385,7 @@ async fn ack_messages(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         .collect();
     let cmd = AckMessages {
         message_ids,
-        as_session: None,
+        as_session: caller(host, args)?,
     };
     let cell = host
         .client
@@ -377,12 +409,33 @@ fn schema_object(properties: Value, required: &[&str]) -> Value {
     })
 }
 
-pub fn tools_def() -> Vec<ToolDef> {
+/// Build a write-tool input schema, adding a required `asSession` argument
+/// under the Codex harness (where the shim has no connection identity and the
+/// agent must name its own session — the id the SessionStart hook injected).
+fn write_schema(is_codex: bool, mut properties: Value, required: &[&str]) -> Value {
+    let mut req: Vec<String> = required.iter().map(|s| (*s).to_string()).collect();
+    if is_codex {
+        if let Some(obj) = properties.as_object_mut() {
+            obj.insert(
+                "asSession".into(),
+                json!({
+                    "type": "string",
+                    "description": "YOUR own marshal session id — copy it from the <marshal_session> block injected at session start. Required so peers see who sent this and can reply to the right session."
+                }),
+            );
+        }
+        req.push("asSession".into());
+    }
+    let req_refs: Vec<&str> = req.iter().map(String::as_str).collect();
+    schema_object(properties, &req_refs)
+}
+
+pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "set_status".into(),
             description: "Set this session's free-form status text (the `current_task` field on the roster).".into(),
-            input_schema: schema_object(
+            input_schema: write_schema(is_codex, 
                 json!({
                     "text": { "type": "string", "description": "Free-form status text. Empty string clears." }
                 }),
@@ -392,7 +445,7 @@ pub fn tools_def() -> Vec<ToolDef> {
         ToolDef {
             name: "send_message".into(),
             description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates.".into(),
-            input_schema: schema_object(
+            input_schema: write_schema(is_codex, 
                 json!({
                     "to":   { "type": "string", "description": "Recipient: a nickname (e.g. `swift-falcon`), full `session_id`, session_id prefix, or an operator identity/email (e.g. `max@lucid.rocks`) to reach the human via their most-active agent — all from marshal://roster." },
                     "body": { "type": "string", "description": "Message body." }
@@ -403,7 +456,7 @@ pub fn tools_def() -> Vec<ToolDef> {
         ToolDef {
             name: "broadcast".into(),
             description: "Ambient fan-out to a room — the message is addressed to the room and surfaced there (marshal UI / `marshal://messages room=…`), NOT injected into members' turns, so it never hijacks anyone's context. To pull a specific peer in, @mention them in the body (`@swift-falcon`, or `@max@lucid.rocks` to reach a human): each resolved handle ALSO gets a real direct message (inbox + live push), even if they aren't in the room. Returns delivered + the resolved `mentioned` list; errors if the room has no other members.".into(),
-            input_schema: schema_object(
+            input_schema: write_schema(is_codex, 
                 json!({
                     "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },
                     "body":    { "type": "string", "description": "Message body." }
@@ -414,7 +467,7 @@ pub fn tools_def() -> Vec<ToolDef> {
         ToolDef {
             name: "join_room".into(),
             description: "Create or join an ad-hoc room. Reserved prefixes (everyone, host:, op:, project:) are blocked — those auto-rooms are managed by the daemon. Returns whether this call created the room and whether it added a new membership row.".into(),
-            input_schema: schema_object(
+            input_schema: write_schema(is_codex, 
                 json!({
                     "name":        { "type": "string", "description": "Display name; slugified into the room id (e.g. \"Frontend Redesign\" -> frontend-redesign)." },
                     "description": { "type": "string", "description": "Optional human-readable purpose." }
@@ -425,7 +478,7 @@ pub fn tools_def() -> Vec<ToolDef> {
         ToolDef {
             name: "leave_room".into(),
             description: "Leave an ad-hoc room. Errors on auto-rooms (their membership is derived from your session's identity).".into(),
-            input_schema: schema_object(
+            input_schema: write_schema(is_codex, 
                 json!({
                     "room": { "type": "string", "description": "Room id (preferred) or original name." }
                 }),
@@ -435,7 +488,7 @@ pub fn tools_def() -> Vec<ToolDef> {
         ToolDef {
             name: "ack_messages".into(),
             description: "Mark message ids as read for this session. Idempotent. Returns counts of newly-acked vs already-acked.".into(),
-            input_schema: schema_object(
+            input_schema: write_schema(is_codex, 
                 json!({
                     "message_ids": {
                         "type": "array",
