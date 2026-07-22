@@ -12,6 +12,7 @@
 mod activity;
 mod channels;
 mod codex_hook;
+mod codex_setup;
 mod mcp;
 mod session_discovery;
 mod statusline;
@@ -88,6 +89,15 @@ fn main() -> Result<()> {
             let ep = argv.next().unwrap_or_else(|| "prompt-submit".to_string());
             let base = argv.next();
             codex_hook::run(&ep, base.as_deref());
+            return Ok(());
+        }
+        // One-shot cross-platform setup: wire marshal into a Codex install
+        // (CLI / IDE / desktop app) by writing the config.toml + AGENTS.md
+        // managed blocks. For laptops / the desktop app where there's no
+        // Ansible. See `codex_setup`.
+        Some("codex-setup") => {
+            let rest: Vec<String> = argv.collect();
+            codex_setup::run(&rest)?;
             return Ok(());
         }
         Some(other) => {
