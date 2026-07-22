@@ -103,7 +103,7 @@ impl Handler for CoordHandler {
         Box::pin(async move {
             let parsed = ParsedUri::parse(&uri)?;
             match parsed.path.as_str() {
-                "whoami" => Ok(read_whoami(&host, &uri)),
+                "whoami" => Ok(read_whoami(&host, &uri, &parsed.query)),
                 "roster" => Ok(read_roster(&host, &uri)),
                 "rooms" => Ok(read_rooms(&host, &uri)),
                 "messages" => read_messages(&host, &uri, &parsed.query).await,
@@ -121,7 +121,61 @@ impl Handler for CoordHandler {
 // Resource implementations (read-only)
 // =============================================================================
 
-fn read_whoami(host: &ToolHost, uri: &str) -> ResourceContent {
+fn read_whoami(
+    host: &ToolHost,
+    uri: &str,
+    query: &std::collections::HashMap<String, String>,
+) -> ResourceContent {
+    // Under Codex the shim holds no connection identity — `host.session` is a
+    // placeholder id, so reporting it here would tell the agent the WRONG roster
+    // nickname. The authoritative identity is the one the SessionStart hook
+    // injected in the <marshal_session> block; the agent names it via ?asSession=,
+    // exactly as it does on write tools. With the id we return the live roster row.
+    if host.is_codex {
+        let as_session = query
+            .get("asSession")
+            .or_else(|| query.get("as_session"))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        return match as_session {
+            Some(sid) => {
+                let sessions = host.sessions_cell.get();
+                match sessions.iter().find(|s| s.id.0.as_ref() == sid) {
+                    Some(s) => json_resource(
+                        uri,
+                        json!({
+                            "session_id": s.id.0.as_ref(),
+                            "nickname": handle_for(host, s.id.0.as_ref()),
+                            "pid": s.pid,
+                            "cwd": s.cwd,
+                            "operator": s.operator,
+                            "host": s.host,
+                            "harness": "codex",
+                        }),
+                    ),
+                    // Given, but not on the roster yet (SessionStart hook lag).
+                    None => json_resource(
+                        uri,
+                        json!({
+                            "session_id": sid,
+                            "nickname": handle_for(host, sid),
+                            "harness": "codex",
+                            "note": "This id isn't on the live roster yet (the SessionStart hook may not have registered it); identity is derived from the id.",
+                        }),
+                    ),
+                }
+            }
+            None => json_resource(
+                uri,
+                json!({
+                    "session_id": null,
+                    "nickname": null,
+                    "harness": "codex",
+                    "note": "Under Codex this MCP server isn't told which session it serves. Your identity is the session_id in your <marshal_session> block — pass it as ?asSession=<id> here (marshal://whoami?asSession=<id>) and as asSession=<id> on every write tool.",
+                }),
+            ),
+        };
+    }
     let snapshot = host.session.lock().unwrap().clone();
     json_resource(
         uri,
@@ -214,6 +268,30 @@ async fn read_messages(
     uri: &str,
     query: &std::collections::HashMap<String, String>,
 ) -> Result<ResourceContent, ResourceError> {
+    // Under Codex the shim has no connection identity, so the daemon can't resolve
+    // whose inbox/sent to read — the agent names itself via ?asSession= (the same id
+    // it passes to write tools). Every other harness resolves the caller from the WS
+    // connection, so this stays None.
+    let as_session = if host.is_codex {
+        match query
+            .get("asSession")
+            .or_else(|| query.get("as_session"))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            Some(sid) => Some(SessionId(Arc::from(sid))),
+            None => {
+                return Err(ResourceError::invalid_params(
+                    "Under Codex, marshal://messages needs your session id: pass \
+                     ?asSession=<the id from your <marshal_session> block>, e.g. \
+                     marshal://messages?asSession=<id>&inbox=true. (This MCP server \
+                     isn't told which Codex session it serves.)",
+                ));
+            }
+        }
+    } else {
+        None // WS path: caller resolved from the connection
+    };
     let cmd = ReadMessages {
         room: query
             .get("room")
@@ -232,7 +310,7 @@ async fn read_messages(
         unread: query.get("unread").map(|v| parse_bool(v)).unwrap_or(false),
         since: query.get("since").and_then(|s| s.parse::<i64>().ok()),
         limit: query.get("limit").and_then(|s| s.parse::<u32>().ok()),
-        as_session: None, // WS path: caller resolved from the connection
+        as_session,
     };
     let cell = host
         .client
