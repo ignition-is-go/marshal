@@ -435,7 +435,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         ToolDef {
             name: "set_status".into(),
             description: "Set this session's free-form status text (the `current_task` field on the roster).".into(),
-            input_schema: write_schema(is_codex, 
+            input_schema: write_schema(is_codex,
                 json!({
                     "text": { "type": "string", "description": "Free-form status text. Empty string clears." }
                 }),
@@ -445,7 +445,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         ToolDef {
             name: "send_message".into(),
             description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates.".into(),
-            input_schema: write_schema(is_codex, 
+            input_schema: write_schema(is_codex,
                 json!({
                     "to":   { "type": "string", "description": "Recipient: a nickname (e.g. `swift-falcon`), full `session_id`, session_id prefix, or an operator identity/email (e.g. `max@lucid.rocks`) to reach the human via their most-active agent — all from marshal://roster." },
                     "body": { "type": "string", "description": "Message body." }
@@ -456,7 +456,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         ToolDef {
             name: "broadcast".into(),
             description: "Ambient fan-out to a room — the message is addressed to the room and surfaced there (marshal UI / `marshal://messages room=…`), NOT injected into members' turns, so it never hijacks anyone's context. To pull a specific peer in, @mention them in the body (`@swift-falcon`, or `@max@lucid.rocks` to reach a human): each resolved handle ALSO gets a real direct message (inbox + live push), even if they aren't in the room. Returns delivered + the resolved `mentioned` list; errors if the room has no other members.".into(),
-            input_schema: write_schema(is_codex, 
+            input_schema: write_schema(is_codex,
                 json!({
                     "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },
                     "body":    { "type": "string", "description": "Message body." }
@@ -467,7 +467,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         ToolDef {
             name: "join_room".into(),
             description: "Create or join an ad-hoc room. Reserved prefixes (everyone, host:, op:, project:) are blocked — those auto-rooms are managed by the daemon. Returns whether this call created the room and whether it added a new membership row.".into(),
-            input_schema: write_schema(is_codex, 
+            input_schema: write_schema(is_codex,
                 json!({
                     "name":        { "type": "string", "description": "Display name; slugified into the room id (e.g. \"Frontend Redesign\" -> frontend-redesign)." },
                     "description": { "type": "string", "description": "Optional human-readable purpose." }
@@ -478,7 +478,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         ToolDef {
             name: "leave_room".into(),
             description: "Leave an ad-hoc room. Errors on auto-rooms (their membership is derived from your session's identity).".into(),
-            input_schema: write_schema(is_codex, 
+            input_schema: write_schema(is_codex,
                 json!({
                     "room": { "type": "string", "description": "Room id (preferred) or original name." }
                 }),
@@ -488,7 +488,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         ToolDef {
             name: "ack_messages".into(),
             description: "Mark message ids as read for this session. Idempotent. Returns counts of newly-acked vs already-acked.".into(),
-            input_schema: write_schema(is_codex, 
+            input_schema: write_schema(is_codex,
                 json!({
                     "message_ids": {
                         "type": "array",
