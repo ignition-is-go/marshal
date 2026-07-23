@@ -33,7 +33,8 @@ use myko::{
 use serde_json::Value;
 
 use marshal_entities::{
-    AckMessages, GetAllSessions, HostInfo, MessageId, MessageView, ReadMessages, Session, SessionId,
+    AckMessages, GetAllSessions, HostInfo, MessageId, MessageView, ReadMessages, Session,
+    SessionId, nickname_for,
 };
 
 /// A hook's HTTP response body, plus any inbox ack that must be deferred
@@ -193,16 +194,20 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> H
     // the sender from its WS connection, so the agent does NOT pass it. Codex's
     // MCP server has no connection identity (Codex never tells it the session),
     // so the Codex agent must name itself explicitly on every write.
+    // The agent's own handle — so it recognises itself in the roster and can say
+    // who it is. Authoritative (assigned handle, else the computed candidate the
+    // assigner would use), matching what peers see in marshal://roster.
+    let nick = nickname_for(&cmd_ctx, sid).unwrap_or_else(|_| marshal_entities::nickname(sid));
     let mut out = if q.get("harness").map(String::as_str) == Some("codex") {
         format!(
-            "<marshal_session>You are marshal session_id {sid}. On EVERY marshal write tool \
-             (send_message, broadcast, join_room, leave_room, set_status, ack_messages) pass \
+            "<marshal_session>You are marshal {nick} (session_id {sid}). On EVERY marshal write \
+             tool (send_message, broadcast, join_room, leave_room, set_status, ack_messages) pass \
              this id as the `asSession` argument — peers need it to know who sent the message \
              and to reply to you.</marshal_session>\n"
         )
     } else {
         format!(
-            "<marshal_session>You are marshal session_id {sid}. Your marshal tools attach \
+            "<marshal_session>You are marshal {nick} (session_id {sid}). Your marshal tools attach \
              this identity automatically — you never pass it yourself.</marshal_session>\n"
         )
     };
