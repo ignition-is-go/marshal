@@ -43,6 +43,12 @@ const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
 const ADDRESS_ENV: &str = "MARSHAL_DAEMON_ADDRESS";
 const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
 
+/// Publisher ticks (5s each) our own session may be absent from the roster before
+/// we conclude the registration was lost and re-SET. Two ticks (~10s) is long
+/// enough that a just-sent SET has propagated, short enough that a dropped one
+/// heals quickly instead of leaving the session write-blocked indefinitely.
+const ROSTER_MISS_TICKS: u32 = 2;
+
 /// Filename the shim reads from a per-user config dir when neither
 /// `MARSHAL_DAEMON_ADDRESS` nor `MYKO_ADDRESS` is set in the
 /// environment. The file contains a single line: the daemon URL.
@@ -348,7 +354,11 @@ async fn serve() -> Result<()> {
         nicknames_cell,
     });
 
-    let handler = Arc::new(tools::CoordHandler { host });
+    // Clone: the liveness publisher below also needs the host (for the roster
+    // cell it uses to verify our own registration landed).
+    let handler = Arc::new(tools::CoordHandler {
+        host: Arc::clone(&host),
+    });
 
     let config = ServerConfig {
         name: "marshal-shim".into(),
@@ -472,6 +482,9 @@ async fn serve() -> Result<()> {
     let activity_for_publish = Arc::clone(&activity);
     let client_for_publish = Arc::clone(&client);
     let session_for_publish = Arc::clone(&session);
+    // The live roster we already subscribe to — ground truth for whether our own
+    // registration actually landed (see the self-check in the publisher loop).
+    let host_for_publish = Arc::clone(&host);
     // The parent `claude` pid is stable for this shim's lifetime; we poll its
     // live per-PID manifest to detect canonical-id drift (compact/clear).
     // Codex has no per-PID session manifest, and its SessionStart hook
@@ -497,6 +510,8 @@ async fn serve() -> Result<()> {
         let mut pushed_activity_at: Option<i64> = None;
         let mut pushed_tool: Option<String> = None;
         let mut pushed_tool_at: Option<i64> = None;
+        // Consecutive ticks our own session was absent from the roster.
+        let mut missing_from_roster: u32 = 0;
         loop {
             interval.tick().await;
 
@@ -529,6 +544,35 @@ async fn serve() -> Result<()> {
                     };
                     if let Err(e) = emit_session_set(&client_for_publish, &refreshed) {
                         log::warn!("[marshal-shim] re-SET under new id failed: {e}");
+                    }
+                }
+            }
+
+            // Self-verifying registration. The drift check above depends on
+            // Claude's per-PID manifest, which can silently return None, and the
+            // re-SET on connect is fire-and-forget with no ack or retry. Either
+            // hole leaves this session off the roster indefinitely — READS keep
+            // working (they need no roster membership) while every write fails
+            // "caller has no session on the roster", which reads as "marshal is
+            // half-broken" rather than "I'm unregistered". The roster we already
+            // subscribe to is ground truth, so check it directly and re-publish.
+            {
+                let me = session_for_publish.lock().unwrap().id.clone();
+                let sessions = host_for_publish.sessions_cell.get();
+                let (next, resend) = roster_miss_step(
+                    missing_from_roster,
+                    sessions.is_empty(),
+                    sessions.iter().any(|s| s.id == me),
+                );
+                missing_from_roster = next;
+                if resend {
+                    log::warn!(
+                        "[marshal-shim] session {} absent from roster — re-SETting",
+                        me.0
+                    );
+                    let snapshot = session_for_publish.lock().unwrap().clone();
+                    if let Err(e) = emit_session_set(&client_for_publish, &snapshot) {
+                        log::warn!("[marshal-shim] roster self-heal re-SET failed: {e}");
                     }
                 }
             }
@@ -614,6 +658,25 @@ async fn serve() -> Result<()> {
 /// subsequent reconnect (the daemon's in-memory store loses everything
 /// when it restarts, so we have to re-publish or peers can't see us).
 /// The server auto-populates `client_id` from the WS connection.
+/// One tick of the roster self-check. Given the running miss count and what the
+/// roster snapshot says, return `(next_miss_count, should_re_SET)`.
+///
+/// An empty roster means "not synced yet / disconnected", never "we're gone" —
+/// concluding otherwise would re-SET on every startup before the first sync.
+/// Firing resets the counter so a persistently-failing SET retries once per full
+/// window instead of once per tick.
+fn roster_miss_step(misses: u32, roster_empty: bool, present: bool) -> (u32, bool) {
+    if roster_empty || present {
+        return (0, false);
+    }
+    let n = misses + 1;
+    if n >= ROSTER_MISS_TICKS {
+        (0, true)
+    } else {
+        (n, false)
+    }
+}
+
 fn emit_session_set(client: &MykoClient, session: &Session) -> Result<()> {
     let event = MEvent::from_item(session, MEventType::SET, &Uuid::new_v4().to_string());
     client
@@ -887,8 +950,43 @@ fn detect_host() -> HostInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_git_branch, resolve_git_head_dir};
+    use super::{ROSTER_MISS_TICKS, detect_git_branch, resolve_git_head_dir, roster_miss_step};
     use std::process::Command;
+
+    #[test]
+    fn roster_self_check_ignores_unsynced_and_present_rosters() {
+        // Empty roster = not synced yet / disconnected. Must never be read as
+        // "we were dropped", or every startup would re-SET before first sync.
+        assert_eq!(roster_miss_step(0, true, false), (0, false));
+        assert_eq!(roster_miss_step(5, true, false), (0, false));
+        // Present = registration is intact; counter clears.
+        assert_eq!(roster_miss_step(0, false, true), (0, false));
+        assert_eq!(roster_miss_step(1, false, true), (0, false));
+    }
+
+    #[test]
+    fn roster_self_check_reregisters_only_after_the_full_window() {
+        // Absent but inside the window: count up, don't act (a just-sent SET may
+        // simply not have propagated yet).
+        let mut misses = 0;
+        for _ in 1..ROSTER_MISS_TICKS {
+            let (next, resend) = roster_miss_step(misses, false, false);
+            assert!(!resend, "must not re-SET before {ROSTER_MISS_TICKS} misses");
+            misses = next;
+        }
+        // The tick that completes the window fires and resets, so a persistently
+        // failing SET retries once per window rather than every tick.
+        assert_eq!(roster_miss_step(misses, false, false), (0, true));
+    }
+
+    #[test]
+    fn roster_self_check_recovers_between_misses() {
+        // A single miss followed by a sync must not carry over toward a re-SET.
+        let (misses, resend) = roster_miss_step(0, false, false);
+        assert!(!resend);
+        let (misses, _) = roster_miss_step(misses, false, true);
+        assert_eq!(misses, 0);
+    }
 
     fn git(args: &[&str], cwd: &std::path::Path) {
         let ok = Command::new("git")
