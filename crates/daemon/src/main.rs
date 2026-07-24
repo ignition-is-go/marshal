@@ -125,7 +125,7 @@ fn marshal_server_info() -> ServerInfo {
         name: "marshal".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         instructions: Some(
-            "Marshal coordinates sibling Claude sessions on this fleet.\n\
+            "Marshal coordinates sibling coding-agent sessions on this fleet.\n\
              \n\
              This is stock myko 4.24: the MCP surface is `search` (discover operations) + \
              `execute` (run JS — `await myko.command(id, args)` for writes, \

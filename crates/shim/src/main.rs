@@ -360,12 +360,22 @@ async fn serve() -> Result<()> {
         host: Arc::clone(&host),
     });
 
+    // Inbound-delivery differs by harness: Claude gets a live channel push,
+    // Codex gets the hook-injected <marshal_inbox> block (it has no server→model
+    // push). Describe the one this agent actually gets.
+    let inbound_line = if is_codex {
+        "Inbound peer messages are injected into your turn automatically as a \
+         `<marshal_inbox>` block; reply with `send_message` or `broadcast`."
+    } else {
+        "Inbound peer messages arrive as `notifications/claude/channel` events; \
+         reply with `send_message` or `broadcast`."
+    };
     let config = ServerConfig {
         name: "marshal-shim".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         instructions: format!(
             "You are marshal session {} in {cwd}. Coordinate with sibling \
-             Claude sessions via the marshal daemon.\n\
+             coding-agent sessions via the marshal daemon.\n\
              \n\
              READ paths are resources (use `resources/read`):\n\
              - marshal://whoami       — your session id, pid, cwd, operator, host\n\
@@ -395,8 +405,7 @@ async fn serve() -> Result<()> {
              `swift-falcon` after a peer's path is its nickname, NOT a git \
              branch or commit.\n\
              \n\
-             Inbound peer messages arrive as `notifications/claude/channel` \
-             events; reply with `send_message` or `broadcast`.",
+             {inbound_line}",
             session_id.0
         ),
         tools: tools::tools_def(is_codex),
