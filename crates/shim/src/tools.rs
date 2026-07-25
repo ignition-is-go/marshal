@@ -393,11 +393,26 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
     let result = await_command(cell, REQUEST_TIMEOUT)
         .await
         .map_err(ToolError::invalid_params)?;
+    // The daemon persists the message to the recipient's inbox BEFORE deciding on a
+    // live push, so reaching here (no command error) means it WAS delivered. Say so
+    // explicitly: a bare `delivered_live:false` reads as a FAILURE when it only means
+    // "went to the inbox, not a live push" — that ambiguity has repeatedly triggered
+    // false "marshal is broken" alarms. `delivered_live` stays for compatibility.
+    let delivered_live = result.delivered_live;
     Ok(ToolOutcome::Json(json!({
         "message_id": result.message_id.0.as_ref(),
         "to_session_id": result.to_session_id.0.as_ref(),
         "sent_at": result.sent_at,
-        "delivered_live": result.delivered_live,
+        "delivered": true,
+        "delivery": if delivered_live { "live" } else { "inbox" },
+        "delivered_live": delivered_live,
+        "note": if delivered_live {
+            "Delivered and live-pushed into the recipient's current turn."
+        } else {
+            "Delivered to the recipient's marshal inbox — they read it on their next \
+             turn. delivered_live=false is normal here (the recipient has no live \
+             channel open); it is NOT a failure."
+        },
     })))
 }
 
@@ -522,7 +537,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates.".into(),
+            description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates. On success `delivered` is always true; `delivery` is `live` (pushed into the recipient's active turn) or `inbox` (they read it on their next turn) — `inbox`/`delivered_live:false` is normal, NOT a failure.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to":   { "type": "string", "description": "Recipient: a nickname (e.g. `swift-falcon`), full `session_id`, session_id prefix, or an operator identity/email (e.g. `max@lucid.rocks`) to reach the human via their most-active agent — all from marshal://roster." },
