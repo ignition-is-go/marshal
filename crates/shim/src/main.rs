@@ -423,7 +423,7 @@ async fn serve() -> Result<()> {
              {inbound_line}",
         ),
         tools: tools::tools_def(is_codex),
-        resources: tools::resources_def(),
+        resources: tools::resources_def(is_codex),
     };
 
     // Event-driven git-branch refresh. A checkout/switch rewrites the repo's

@@ -548,7 +548,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "broadcast".into(),
-            description: "Ambient fan-out to a room — the message is addressed to the room and surfaced there (marshal UI / `marshal://messages room=…`), NOT injected into members' turns, so it never hijacks anyone's context. To pull a specific peer in, @mention them in the body (`@swift-falcon`, or `@max@lucid.rocks` to reach a human): each resolved handle ALSO gets a real direct message (inbox + live push), even if they aren't in the room. Returns delivered + the resolved `mentioned` list; errors if the room has no other members.".into(),
+            description: "Ambient fan-out to a room — the message is addressed to the room and surfaced there (marshal UI / `marshal://messages room=…`), NOT injected into members' turns, so it never hijacks anyone's context. To pull a specific peer in, @mention them in the body (`@swift-falcon`, or `@max@lucid.rocks` to reach a human): each resolved handle ALSO gets a real direct message (inbox + live push), even if they aren't in the room — so @mention is a genuine interrupt, not casual chat syntax: use it only for a peer you specifically need to pull in. Returns delivered + the resolved `mentioned` list; errors if the room has no other members.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },
@@ -595,12 +595,22 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
     ]
 }
 
-pub fn resources_def() -> Vec<ResourceDef> {
+pub fn resources_def(is_codex: bool) -> Vec<ResourceDef> {
+    // Under Codex the shim isn't told which session it serves, so the two
+    // caller-relative reads take the agent's own id as a `?asSession=` query
+    // param (the id from the <marshal_session> block). Claude resolves the
+    // caller from its WS connection, so this note is Codex-only. roster/rooms
+    // need no caller and are unaffected.
+    let codex_as = if is_codex {
+        " Under Codex, pass your own id as `?asSession=<id>` (from the <marshal_session> block) — without it whoami can't name you and messages is rejected."
+    } else {
+        ""
+    };
     vec![
         ResourceDef {
             uri: "marshal://whoami".into(),
             name: "whoami".into(),
-            description: "This session's id, pid, cwd, operator, and host info.".into(),
+            description: format!("This session's id, pid, cwd, operator, and host info.{codex_as}"),
             mime_type: "application/json".into(),
         },
         ResourceDef {
@@ -618,7 +628,7 @@ pub fn resources_def() -> Vec<ResourceDef> {
         ResourceDef {
             uri: "marshal://messages".into(),
             name: "messages".into(),
-            description: "Message history. Query params: room=ID, from=SID, to_session=SID, inbox=true, sent=true, unread=true, since=MILLIS, limit=N. Default returns the 50 most recent messages visible to you (sent, direct-recipient, or via room membership).".into(),
+            description: format!("Message history. Query params: room=ID, from=SID, to_session=SID, inbox=true, sent=true, unread=true, since=MILLIS, limit=N. Default returns the 50 most recent messages visible to you (sent, direct-recipient, or via room membership).{codex_as}"),
             mime_type: "application/json".into(),
         },
     ]
