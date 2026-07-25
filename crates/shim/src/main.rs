@@ -392,22 +392,10 @@ async fn serve() -> Result<()> {
             "{identity_line} Coordinate with sibling \
              coding-agent sessions via the marshal daemon.\n\
              \n\
-             READ paths are resources (use `resources/read`):\n\
-             - marshal://whoami       — your session id, pid, cwd, operator, host\n\
-             - marshal://roster       — every live session and what room(s) it's in\n\
-             - marshal://rooms        — every room and who its members are\n\
-             - marshal://messages     — message history; supports query params:\n\
-                                       inbox=true, sent=true, unread=true,\n\
-                                       room=ID, from=SID, to_session=SID,\n\
-                                       since=MILLIS, limit=N\n\
-             \n\
-             WRITE paths are tools (use `tools/call`):\n\
-             - send_message       — direct send to a peer (agent), or to a human via their agent\n\
-             - broadcast          — ambient fan-out to a room (@mention a peer in the body to also ping them directly)\n\
-             - join_room          — create or join an ad-hoc room\n\
-             - leave_room         — leave an ad-hoc room\n\
-             - set_status         — set this session's free-form status text\n\
-             - ack_messages       — mark message ids as read for this session\n\
+             Read state via the `marshal://` resources (whoami, roster, rooms, \n\
+             messages) and act via the marshal tools (send_message, broadcast, \n\
+             join_room, leave_room, set_status, ack_messages); each resource and \n\
+             tool documents its own usage.\n\
              \n\
              Each session has a memorable `nickname` (e.g. `swift-falcon`) — a \
              deterministic adjective-noun derived from its session_id, shown in \
