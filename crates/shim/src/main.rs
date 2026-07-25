@@ -370,11 +370,26 @@ async fn serve() -> Result<()> {
         "Inbound peer messages arrive as `notifications/claude/channel` events; \
          reply with `send_message` or `broadcast`."
     };
+    // Identity line is harness-aware. Under Codex the shim owns no session id
+    // (its `session_id` here is a placeholder), so asserting it would tell the
+    // agent the WRONG identity — defer to the authoritative <marshal_session>
+    // block the SessionStart hook injects. Claude's shim owns the real id.
+    let identity_line = if is_codex {
+        format!(
+            "You are a marshal-connected session in {cwd}. Your marshal identity \
+             (session id + nickname) is in the <marshal_session> block injected at \
+             session start; pass that id as `asSession` on write tools and \
+             `?asSession=<id>` on reads — this MCP server isn't told which Codex \
+             session it serves."
+        )
+    } else {
+        format!("You are marshal session {} in {cwd}.", session_id.0)
+    };
     let config = ServerConfig {
         name: "marshal-shim".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         instructions: format!(
-            "You are marshal session {} in {cwd}. Coordinate with sibling \
+            "{identity_line} Coordinate with sibling \
              coding-agent sessions via the marshal daemon.\n\
              \n\
              READ paths are resources (use `resources/read`):\n\
@@ -406,7 +421,6 @@ async fn serve() -> Result<()> {
              branch or commit.\n\
              \n\
              {inbound_line}",
-            session_id.0
         ),
         tools: tools::tools_def(is_codex),
         resources: tools::resources_def(),
@@ -568,11 +582,22 @@ async fn serve() -> Result<()> {
             {
                 let me = session_for_publish.lock().unwrap().id.clone();
                 let sessions = host_for_publish.sessions_cell.get();
-                let (next, resend) = roster_miss_step(
-                    missing_from_roster,
-                    sessions.is_empty(),
-                    sessions.iter().any(|s| s.id == me),
+                let empty = sessions.is_empty();
+                let present = sessions.iter().any(|s| s.id == me);
+                // Health word for the statusline. "ok" when we're on the roster (or it
+                // hasn't synced yet — the statusline's own daemon probe covers a real
+                // outage); "unregistered" when the roster is populated but we're absent
+                // — the send-blocked state a passive reader can't otherwise see. The
+                // file mtime (rewritten here every tick) is the "shim alive" heartbeat.
+                write_health(
+                    me.0.as_ref(),
+                    if present || empty {
+                        "ok"
+                    } else {
+                        "unregistered"
+                    },
                 );
+                let (next, resend) = roster_miss_step(missing_from_roster, empty, present);
                 missing_from_roster = next;
                 if resend {
                     log::warn!(
@@ -764,6 +789,48 @@ fn write_assigned_nickname(session_id: &str, nickname: &str) {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(&path, nickname);
+}
+
+fn health_file_name(session_id: &str) -> String {
+    format!("health-{session_id}")
+}
+
+/// Write this session's marshal health word for the statusline to read. The file's
+/// MTIME is the freshness signal — the publisher rewrites it every tick, so a stale
+/// mtime means the shim (and thus this session's MCP tools) died or hung. Best-effort.
+pub(crate) fn write_health(session_id: &str, status: &str) {
+    let Some(path) = config_file_candidates(&health_file_name(session_id))
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, status);
+}
+
+/// Read this session's health as `(status, age)` for the statusline. `age` is time
+/// since the shim last wrote it (file mtime) — a large age means the shim isn't
+/// running. `None` when no file exists.
+pub(crate) fn read_health(session_id: &str) -> Option<(String, std::time::Duration)> {
+    for path in config_file_candidates(&health_file_name(session_id)) {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let status = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .unwrap_or_default();
+        return Some((status, age));
+    }
+    None
 }
 
 #[cfg(unix)]
