@@ -80,19 +80,56 @@ pub fn render() {
     // git-prompt.sh (__git_ps1) convention. None on detached HEAD / non-repo.
     let branch = git_branch(&cwd);
 
-    // Warn ONLY when this session genuinely cannot receive — i.e. the marshal
-    // daemon is unreachable, so neither the live channel nor the inbox can
-    // deliver. We deliberately do NOT warn merely because the live-channel
-    // flag is absent: the flag-independent inbox still delivers for flagless
-    // (e.g. VS Code) sessions whenever the daemon is reachable, so a
-    // flag-based warning false-alarms on perfectly functional sessions. See
-    // channels.rs module docs.
-    let cannot_receive = crate::channels::cannot_receive();
+    // Warn when marshal is genuinely broken for THIS session, ordered by root
+    // cause (see `pick_warning`). We deliberately do NOT warn merely because the
+    // live-channel flag is absent: the flag-independent inbox still delivers for
+    // flagless (e.g. VS Code) sessions whenever the daemon is reachable, so a
+    // flag-based warning false-alarms on functional sessions.
+    let warning = marshal_warning(session_id);
 
     println!(
         "{}",
-        format_prefix(&user, host, dir, branch.as_deref(), &handle, cannot_receive)
+        format_prefix(&user, host, dir, branch.as_deref(), &handle, warning)
     );
+}
+
+/// A session heartbeat older than this means the shim stopped writing it — the shim
+/// died or hung, so this session has no working marshal MCP. ~4 missed 5s publisher
+/// ticks.
+const HEALTH_STALE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// This session's statusline warning, or `None` when healthy. Reads the shim's
+/// heartbeat file + probes the daemon.
+fn marshal_warning(session_id: &str) -> Option<&'static str> {
+    let health = if session_id.is_empty() {
+        None
+    } else {
+        crate::read_health(session_id)
+    };
+    pick_warning(
+        crate::channels::cannot_receive(),
+        health.as_ref().map(|(s, a)| (s.as_str(), *a)),
+    )
+}
+
+/// Pure warning precedence, so the policy is testable without the filesystem or
+/// network. Root cause first: a dead daemon (nothing works) outranks a dead/hung
+/// shim (no MCP tools) outranks an unregistered session (reads work, writes get
+/// rejected). `health` is `(status_word, age_since_written)` from the heartbeat
+/// file; `None` = unknown (shim hasn't written yet / older build) → no health-based
+/// warning, so an unknown state never false-alarms.
+fn pick_warning(
+    cannot_receive: bool,
+    health: Option<(&str, std::time::Duration)>,
+) -> Option<&'static str> {
+    if cannot_receive {
+        return Some("UNREACHABLE");
+    }
+    match health {
+        Some((_, age)) if age > HEALTH_STALE => Some("shim DOWN"),
+        Some(("unregistered", _)) => Some("UNREGISTERED"),
+        _ => None,
+    }
 }
 
 /// Current branch of the repo at `cwd`, via the same call the shim uses for
@@ -120,16 +157,16 @@ fn git_branch(cwd: &str) -> Option<String> {
 /// Render the statusline prefix. Pure so the formatting contract is
 /// testable without touching stdin / env / gethostname. `branch` is rendered
 /// as ` (branch)` after the path per git-prompt.sh convention; `handle` is the
-/// session's memorable nickname (omitted when empty); `cannot_receive` appends
-/// a warning when the marshal daemon is unreachable (no live channel AND no
-/// inbox — genuinely can't receive peer messages).
+/// session's memorable nickname (omitted when empty); `warning`, when `Some`,
+/// appends ` ⚠ marshal <warning>` (marshal is broken for this session — see
+/// `pick_warning`).
 fn format_prefix(
     user: &str,
     host: &str,
     dir: &str,
     branch: Option<&str>,
     handle: &str,
-    cannot_receive: bool,
+    warning: Option<&str>,
 ) -> String {
     let loc = match branch {
         Some(b) => format!("{dir} ({b})"),
@@ -140,10 +177,9 @@ fn format_prefix(
     } else {
         format!("[{user}@{host} {loc} {handle}]")
     };
-    if cannot_receive {
-        format!("{base} ⚠ marshal UNREACHABLE")
-    } else {
-        base
+    match warning {
+        Some(w) => format!("{base} ⚠ marshal {w}"),
+        None => base,
     }
 }
 
@@ -157,7 +193,8 @@ fn extract_cwd(v: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_prefix;
+    use super::{HEALTH_STALE, format_prefix, pick_warning};
+    use std::time::Duration;
 
     #[test]
     fn prefix_includes_handle_when_present() {
@@ -168,7 +205,7 @@ mod tests {
                 "pulse-deploy",
                 None,
                 "swift-falcon",
-                false
+                None
             ),
             "[max@pulse-admin pulse-deploy swift-falcon]"
         );
@@ -177,7 +214,7 @@ mod tests {
     #[test]
     fn prefix_omits_handle_when_empty() {
         assert_eq!(
-            format_prefix("max", "pulse-admin", "pulse-deploy", None, "", false),
+            format_prefix("max", "pulse-admin", "pulse-deploy", None, "", None),
             "[max@pulse-admin pulse-deploy]"
         );
     }
@@ -191,14 +228,14 @@ mod tests {
                 "pulse-deploy",
                 Some("feat/rotunda-mesh-partition-support"),
                 "swift-falcon",
-                false
+                None
             ),
             "[max@pulse-admin pulse-deploy (feat/rotunda-mesh-partition-support) swift-falcon]"
         );
     }
 
     #[test]
-    fn unreachable_appends_warning_after_branch() {
+    fn warning_appended_after_branch() {
         assert_eq!(
             format_prefix(
                 "max",
@@ -206,9 +243,47 @@ mod tests {
                 "pulse-deploy",
                 Some("main"),
                 "swift-falcon",
-                true
+                Some("UNREACHABLE"),
             ),
             "[max@pulse-admin pulse-deploy (main) swift-falcon] ⚠ marshal UNREACHABLE"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_healthy_or_unknown() {
+        assert_eq!(pick_warning(false, None), None);
+        assert_eq!(
+            pick_warning(false, Some(("ok", Duration::from_secs(3)))),
+            None
+        );
+    }
+
+    #[test]
+    fn unreachable_outranks_health() {
+        // A dead daemon is the root cause regardless of any health word.
+        assert_eq!(pick_warning(true, None), Some("UNREACHABLE"));
+        assert_eq!(
+            pick_warning(true, Some(("unregistered", Duration::ZERO))),
+            Some("UNREACHABLE")
+        );
+    }
+
+    #[test]
+    fn stale_heartbeat_reads_as_shim_down() {
+        let stale = HEALTH_STALE + Duration::from_secs(1);
+        assert_eq!(pick_warning(false, Some(("ok", stale))), Some("shim DOWN"));
+        // Staleness (shim not running) outranks the last-written status word.
+        assert_eq!(
+            pick_warning(false, Some(("unregistered", stale))),
+            Some("shim DOWN")
+        );
+    }
+
+    #[test]
+    fn fresh_but_absent_reads_as_unregistered() {
+        assert_eq!(
+            pick_warning(false, Some(("unregistered", Duration::from_secs(2)))),
+            Some("UNREGISTERED")
         );
     }
 }
