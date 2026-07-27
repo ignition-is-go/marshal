@@ -55,12 +55,7 @@ pub fn CommandK() -> impl IntoView {
                 // Sub-line identifies the session: its human name if named,
                 // else its current status.
                 let sub = sname.or_else(|| s.current_task.clone());
-                out.push((
-                    "session",
-                    handle,
-                    sub,
-                    Target::Session(s.id.0.to_string()),
-                ));
+                out.push(("session", handle, sub, Target::Session(s.id.0.to_string())));
             }
         }
         for r in rooms.get() {
