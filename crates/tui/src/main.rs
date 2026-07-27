@@ -32,7 +32,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell as RowCell, Paragraph, Row, Table},
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     io,
     sync::{Arc, Mutex},
@@ -110,6 +110,51 @@ impl State {
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
+}
+
+/// How the Agents pane clusters its rows. Cycled with `g` (btop-style:
+/// one key walks the ring), held by the render loop — it's pure view
+/// state, not daemon data, so it lives outside `StateInner`.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum GroupMode {
+    /// Flat list, no grouping — the default.
+    #[default]
+    None,
+    /// Cluster by `operator@host` (the same identity pair auto-rooms
+    /// key on).
+    Identity,
+    /// Cluster by `Session.project` (the basename anchoring the
+    /// `project:` auto-room). Sessions outside any project fall into
+    /// a `(no project)` bucket.
+    Project,
+    /// Cluster by working directory.
+    Cwd,
+    /// Cluster by room membership. A session in several rooms appears
+    /// under each; `everyone` is skipped (it holds every session, so
+    /// it groups nothing).
+    Room,
+}
+
+impl GroupMode {
+    fn next(self) -> Self {
+        match self {
+            GroupMode::None => GroupMode::Identity,
+            GroupMode::Identity => GroupMode::Project,
+            GroupMode::Project => GroupMode::Cwd,
+            GroupMode::Cwd => GroupMode::Room,
+            GroupMode::Room => GroupMode::None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            GroupMode::None => "none",
+            GroupMode::Identity => "identity",
+            GroupMode::Project => "project",
+            GroupMode::Cwd => "cwd",
+            GroupMode::Room => "room",
+        }
+    }
 }
 
 #[tokio::main]
@@ -267,9 +312,10 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
     let result = (|| -> Result<()> {
+        let mut group_mode = GroupMode::default();
         loop {
             let snap = state.snapshot();
-            terminal.draw(|frame| draw(&snap, frame.area(), frame))?;
+            terminal.draw(|frame| draw(&snap, group_mode, frame.area(), frame))?;
             if event::poll(FRAME_POLL)?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
@@ -280,6 +326,7 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
                     }
+                    KeyCode::Char('g') => group_mode = group_mode.next(),
                     _ => {}
                 }
             }
@@ -293,7 +340,7 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
     result
 }
 
-fn draw(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+fn draw(snap: &StateInner, group_mode: GroupMode, area: Rect, frame: &mut ratatui::Frame) {
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
@@ -306,10 +353,10 @@ fn draw(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         .split(area);
 
     draw_header(snap, chunks[0], frame);
-    draw_agents(snap, chunks[1], frame);
+    draw_agents(snap, group_mode, chunks[1], frame);
     draw_rooms(snap, chunks[2], frame);
     draw_messages(snap, chunks[3], frame);
-    draw_status(snap, chunks[4], frame);
+    draw_status(snap, group_mode, chunks[4], frame);
 }
 
 fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
@@ -353,10 +400,29 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     frame.render_widget(p, area);
 }
 
-fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
-    let now = now_ms();
+/// Shared column layout for the Agents pane — one definition so the
+/// flat table, the grouped sub-tables, and the standalone header row
+/// all align.
+const AGENT_COLUMNS: [Constraint; 9] = [
+    Constraint::Length(7),  // conn
+    Constraint::Length(19), // name (assigned nickname)
+    Constraint::Length(10), // id (session_id[:8])
+    Constraint::Length(22), // identity (operator@host)
+    // cwd / branch / rooms split residual width 1 : 1 : 2 —
+    // rooms tends to grow fastest as ad-hoc memberships
+    // accumulate, so it gets twice the share of any spare
+    // terminal width. Each gets at least 8 chars before the
+    // weighted split kicks in so a tiny terminal still shows
+    // something readable.
+    Constraint::Fill(1),    // cwd
+    Constraint::Fill(1),    // branch
+    Constraint::Fill(2),    // rooms
+    Constraint::Length(20), // activity
+    Constraint::Length(8),  // uptime
+];
 
-    let header = Row::new(vec![
+fn agents_header() -> Row<'static> {
+    Row::new(vec![
         RowCell::from("conn"),
         RowCell::from("name"),
         RowCell::from("id"),
@@ -371,72 +437,144 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
-    );
-
-    let rows: Vec<Row> = snap
-        .sessions
-        .iter()
-        .map(|s| {
-            let live = s
-                .client_id
-                .as_ref()
-                .map(|cid| snap.live_clients.contains(cid.0.as_ref()))
-                .unwrap_or(false);
-            let conn_cell = if live {
-                RowCell::from("● live").style(Style::default().fg(Color::Green))
-            } else {
-                RowCell::from("○ off ").style(Style::default().fg(Color::DarkGray))
-            };
-            let activity_cell = build_activity_cell(s, now);
-            let identity = format_identity(s);
-            let rooms_summary = format_member_rooms(s, &snap.members);
-            let short_id: String = s.id.0.chars().take(8).collect();
-            Row::new(vec![
-                conn_cell,
-                RowCell::from(session_label(&snap.nicknames, s.id.0.as_ref())).style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                RowCell::from(short_id).style(Style::default().fg(Color::DarkGray)),
-                RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
-                RowCell::from(short_cwd(&s.cwd)).style(Style::default().fg(Color::Gray)),
-                RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
-                RowCell::from(rooms_summary).style(Style::default().fg(Color::Magenta)),
-                activity_cell,
-                RowCell::from(format_duration(now - s.connected_at))
-                    .style(Style::default().fg(Color::DarkGray)),
-            ])
-        })
-        .collect();
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(7),  // conn
-            Constraint::Length(19), // name (assigned nickname)
-            Constraint::Length(10), // id (session_id[:8])
-            Constraint::Length(22), // identity (operator@host)
-            // cwd / branch / rooms split residual width 1 : 1 : 2 —
-            // rooms tends to grow fastest as ad-hoc memberships
-            // accumulate, so it gets twice the share of any spare
-            // terminal width. Each gets at least 8 chars before the
-            // weighted split kicks in so a tiny terminal still shows
-            // something readable.
-            Constraint::Fill(1),    // cwd
-            Constraint::Fill(1),    // branch
-            Constraint::Fill(2),    // rooms
-            Constraint::Length(20), // activity
-            Constraint::Length(8),  // uptime
-        ],
     )
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Agents ({}) ", snap.sessions.len())),
+}
+
+fn session_row(snap: &StateInner, s: &Session, now: i64) -> Row<'static> {
+    let live = s
+        .client_id
+        .as_ref()
+        .map(|cid| snap.live_clients.contains(cid.0.as_ref()))
+        .unwrap_or(false);
+    let conn_cell = if live {
+        RowCell::from("● live").style(Style::default().fg(Color::Green))
+    } else {
+        RowCell::from("○ off ").style(Style::default().fg(Color::DarkGray))
+    };
+    let activity_cell = build_activity_cell(s, now);
+    let identity = format_identity(s);
+    let rooms_summary = format_member_rooms(s, &snap.members);
+    let short_id: String = s.id.0.chars().take(8).collect();
+    Row::new(vec![
+        conn_cell,
+        RowCell::from(session_label(&snap.nicknames, s.id.0.as_ref())).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        RowCell::from(short_id).style(Style::default().fg(Color::DarkGray)),
+        RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
+        RowCell::from(short_cwd(&s.cwd)).style(Style::default().fg(Color::Gray)),
+        RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
+        RowCell::from(rooms_summary).style(Style::default().fg(Color::Magenta)),
+        activity_cell,
+        RowCell::from(format_duration(now - s.connected_at))
+            .style(Style::default().fg(Color::DarkGray)),
+    ])
+}
+
+/// Bucket sessions by the active group key. Labels sort
+/// lexicographically, except the `(no …)` fallback buckets, which
+/// always sink to the bottom. Room mode lists a session once per
+/// room it's in — membership is many-to-many, so duplication is the
+/// honest rendering.
+fn group_sessions(snap: &StateInner, mode: GroupMode) -> Vec<(String, Vec<&Arc<Session>>)> {
+    let mut groups: BTreeMap<String, Vec<&Arc<Session>>> = BTreeMap::new();
+    for s in &snap.sessions {
+        match mode {
+            GroupMode::None => groups.entry(String::new()).or_default().push(s),
+            GroupMode::Identity => groups.entry(format_identity(s)).or_default().push(s),
+            GroupMode::Project => {
+                let key = s
+                    .project
+                    .clone()
+                    .unwrap_or_else(|| "(no project)".to_string());
+                groups.entry(key).or_default().push(s);
+            }
+            GroupMode::Cwd => groups.entry(short_cwd(&s.cwd)).or_default().push(s),
+            GroupMode::Room => {
+                let rooms: Vec<&str> = snap
+                    .members
+                    .iter()
+                    .filter(|m| m.session_id == s.id)
+                    .map(|m| m.room_id.0.as_ref())
+                    .filter(|id| *id != "everyone")
+                    .collect();
+                if rooms.is_empty() {
+                    groups.entry("(no room)".to_string()).or_default().push(s);
+                } else {
+                    for r in rooms {
+                        groups.entry(format!("#{r}")).or_default().push(s);
+                    }
+                }
+            }
+        }
+    }
+    let mut out: Vec<_> = groups.into_iter().collect();
+    // Stable sort: fallback buckets last, alphabetical order preserved
+    // within each partition.
+    out.sort_by_key(|(label, _)| label.starts_with('('));
+    out
+}
+
+fn draw_agents(snap: &StateInner, mode: GroupMode, area: Rect, frame: &mut ratatui::Frame) {
+    let now = now_ms();
+    let title = if mode == GroupMode::None {
+        format!(" Agents ({}) ", snap.sessions.len())
+    } else {
+        format!(" Agents ({}) · by {} ", snap.sessions.len(), mode.label())
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    if mode == GroupMode::None {
+        let rows: Vec<Row> = snap
+            .sessions
+            .iter()
+            .map(|s| session_row(snap, s, now))
+            .collect();
+        let table = Table::new(rows, AGENT_COLUMNS)
+            .header(agents_header())
+            .block(block);
+        frame.render_widget(table, area);
+        return;
+    }
+
+    // Grouped mode: the bordered block is rendered bare and its
+    // interior split manually — a full-width label line per group,
+    // then a header-less sub-table of that group's members. Every
+    // sub-table shares AGENT_COLUMNS with the standalone header row
+    // at the top, so columns stay aligned across groups. Groups past
+    // the bottom edge get zero-height chunks from the layout solver
+    // and clip, same as overflow rows in the flat table.
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let groups = group_sessions(snap, mode);
+    let mut constraints = vec![Constraint::Length(1)]; // column header
+    for (_, members) in &groups {
+        constraints.push(Constraint::Length(1)); // group label
+        constraints.push(Constraint::Length(members.len() as u16));
+    }
+    let chunks = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    frame.render_widget(
+        Table::new(Vec::<Row>::new(), AGENT_COLUMNS).header(agents_header()),
+        chunks[0],
     );
-    frame.render_widget(table, area);
+    for (i, (label, members)) in groups.iter().enumerate() {
+        let label_line = Paragraph::new(Line::from(Span::styled(
+            format!("▾ {label} ({})", members.len()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        frame.render_widget(label_line, chunks[1 + i * 2]);
+        let rows: Vec<Row> = members.iter().map(|s| session_row(snap, s, now)).collect();
+        frame.render_widget(Table::new(rows, AGENT_COLUMNS), chunks[2 + i * 2]);
+    }
 }
 
 /// Replace the user's home directory in `cwd` with `~` so the column
@@ -629,7 +767,7 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     frame.render_widget(p, area);
 }
 
-fn draw_status(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+fn draw_status(snap: &StateInner, mode: GroupMode, area: Rect, frame: &mut ratatui::Frame) {
     let last = snap
         .last_event
         .clone()
@@ -637,6 +775,11 @@ fn draw_status(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let p = Paragraph::new(Line::from(vec![
         Span::styled(last, Style::default().fg(Color::DarkGray)),
         Span::raw("    "),
+        Span::styled(
+            format!("g group: {}", mode.label()),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("  "),
         Span::styled("q quit", Style::default().fg(Color::DarkGray)),
     ]));
     frame.render_widget(p, area);
