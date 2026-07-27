@@ -231,15 +231,20 @@ async fn serve() -> Result<()> {
             .unwrap_or(None)
     };
 
-    // Human session name (Claude's `/rename` value, or its auto-title until
-    // renamed) from Claude's per-PID manifest. The publisher loop re-reads it
-    // each tick so a mid-session rename lands on the roster. Codex has no such
-    // manifest → None (its identity is hook-owned).
-    let session_name = if is_codex {
+    // Live fields from Claude's per-PID manifest: the session name (its
+    // `/rename` value or auto-title), the busy/idle/shell activity, and the
+    // interactive/bg kind. The publisher loop re-reads them — event-driven via
+    // the manifest fs-watch below, tick as backstop — so a mid-session rename
+    // or turn-state flip lands on the roster. Codex has no such manifest → None
+    // (its identity is hook-owned).
+    let manifest = if is_codex {
         None
     } else {
-        session_discovery::parent_pid().and_then(session_discovery::session_name_from_manifest)
+        session_discovery::parent_pid().and_then(session_discovery::manifest_fields)
     };
+    let session_name = manifest.as_ref().and_then(|m| m.name.clone());
+    let activity = manifest.as_ref().and_then(|m| m.activity.clone());
+    let kind = manifest.and_then(|m| m.kind);
 
     let session = Session {
         id: session_id.clone(),
@@ -249,6 +254,8 @@ async fn serve() -> Result<()> {
         git_branch: git_branch.clone(),
         current_task: None,
         session_name,
+        activity,
+        kind,
         connected_at: Utc::now().timestamp_millis(),
         last_activity_at: None,
         last_tool: None,
@@ -517,6 +524,42 @@ async fn serve() -> Result<()> {
     } else {
         session_discovery::parent_pid()
     };
+
+    // Event-driven manifest refresh. Claude rewrites ~/.claude/sessions/<pid>.json
+    // on every turn-state flip (busy↔idle) and `/rename`; an fs-watch wakes the
+    // publisher the instant it changes, so `activity` and `session_name` track in
+    // near real time rather than only on the 5s backstop tick. Watch the whole
+    // sessions dir (the file is atomically replaced on write); extra wakes from
+    // sibling sessions are cheap no-ops — the loop re-reads OURS and diffs before
+    // pushing. Codex has no manifest → no watch. Debouncer leaked for the process
+    // lifetime, matching the HEAD watcher above.
+    let manifest_wake = Arc::new(tokio::sync::Notify::new());
+    if !is_codex
+        && let Some(dir) = session_discovery::sessions_dir()
+    {
+        use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
+        let wake = Arc::clone(&manifest_wake);
+        match new_debouncer(
+            std::time::Duration::from_millis(150),
+            move |_r: DebounceEventResult| wake.notify_one(),
+        ) {
+            Ok(mut debouncer) => {
+                match debouncer.watcher().watch(&dir, RecursiveMode::NonRecursive) {
+                    Ok(()) => {
+                        log::info!(
+                            "[marshal-shim] watching {} for turn-state changes",
+                            dir.display()
+                        );
+                        Box::leak(Box::new(debouncer));
+                    }
+                    Err(e) => log::warn!("[marshal-shim] manifest watch failed: {e}"),
+                }
+            }
+            Err(e) => log::warn!("[marshal-shim] manifest watcher init failed: {e}"),
+        }
+    }
+    let manifest_wake_for_publish = Arc::clone(&manifest_wake);
+
     tokio::spawn(async move {
         // Under Codex the shim owns no Session, so there is nothing to publish
         // liveness for — the SessionStart / UserPromptSubmit hooks bump the
@@ -536,10 +579,17 @@ async fn serve() -> Result<()> {
         // never re-pushed; only an actual `/rename` dispatches a setter.
         let mut pushed_session_name: Option<String> =
             session_for_publish.lock().unwrap().session_name.clone();
+        let mut pushed_activity: Option<String> =
+            session_for_publish.lock().unwrap().activity.clone();
         // Consecutive ticks our own session was absent from the roster.
         let mut missing_from_roster: u32 = 0;
         loop {
-            interval.tick().await;
+            // Wake on the 5s backstop tick OR the instant the manifest changes
+            // (turn-state flip / rename), whichever comes first.
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = manifest_wake_for_publish.notified() => {}
+            }
 
             // Self-heal canonical-id drift. On a compact/clear, Claude re-mints
             // this session's id but keeps the same process + MCP shim running,
@@ -618,11 +668,12 @@ async fn serve() -> Result<()> {
             // liveness setters never write to a stale/dead session row.
             let session_id_for_publish = session_for_publish.lock().unwrap().id.clone();
 
-            // Follow a mid-session `/rename`: re-read Claude's per-PID manifest
-            // (same file the drift check above uses) and push the human name
-            // only when it actually changed, mirroring the liveness setters.
-            let current_session_name =
-                parent_pid_for_publish.and_then(session_discovery::session_name_from_manifest);
+            // Follow mid-session manifest changes (same file the drift check
+            // above reads): the `/rename` name and the live busy/idle activity.
+            // One read, push each field only when it actually changed.
+            let manifest = parent_pid_for_publish.and_then(session_discovery::manifest_fields);
+            let current_session_name = manifest.as_ref().and_then(|m| m.name.clone());
+            let current_activity = manifest.and_then(|m| m.activity);
             if pushed_session_name != current_session_name {
                 let arc_name = current_session_name.as_deref().map(Arc::<str>::from);
                 let _ = client_for_publish
@@ -636,6 +687,20 @@ async fn serve() -> Result<()> {
                     s.session_name = current_session_name.clone();
                 }
                 pushed_session_name = current_session_name;
+            }
+            if pushed_activity != current_activity {
+                let arc_activity = current_activity.as_deref().map(Arc::<str>::from);
+                let _ = client_for_publish
+                    .send_command::<marshal_entities::SetSessionActivity, ()>(
+                        &marshal_entities::SetSessionActivity {
+                            id: session_id_for_publish.clone(),
+                            activity: arc_activity,
+                        },
+                    );
+                if let Ok(mut s) = session_for_publish.lock() {
+                    s.activity = current_activity.clone();
+                }
+                pushed_activity = current_activity;
             }
 
             let last_activity_at = activity_for_publish.last_activity_ms();

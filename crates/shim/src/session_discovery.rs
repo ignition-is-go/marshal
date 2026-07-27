@@ -243,27 +243,56 @@ fn sid_from_claude_sessions_file(home: &Path, parent_pid: u32) -> Option<Session
     Some(SessionId(Arc::from(sid)))
 }
 
-/// Claude's human session name from the same per-PID manifest
-/// (`<home>/.claude/sessions/<parent_pid>.json`, `name` field) — the
-/// operator's `/rename` value, or Claude's auto-generated title before a
-/// rename. `None` if the manifest is absent (older Claude / Codex, which
-/// has no such manifest), unparseable, or carries no non-empty `name`.
-///
-/// Unlike the `sessionId` cheap-scan above, this does a full JSON parse:
-/// `name` is an arbitrary human string that can contain quotes, escapes,
-/// or `}` — a substring scan would mis-slice it. The file is ~300 bytes so
-/// the parse cost is trivial. Polled each publisher tick, so a mid-session
-/// `/rename` (which rewrites the manifest) propagates to the roster.
-pub(crate) fn session_name_from_manifest(parent_pid: u32) -> Option<String> {
-    let home = home_dir()?;
-    let path = home
-        .join(".claude")
-        .join("sessions")
-        .join(format!("{parent_pid}.json"));
-    let content = std::fs::read_to_string(&path).ok()?;
-    let manifest: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let name = manifest.get("name")?.as_str()?.trim();
-    (!name.is_empty()).then(|| name.to_string())
+/// The live fields marshal scrapes from Claude's per-PID manifest
+/// (`<home>/.claude/sessions/<parent_pid>.json`). Best-effort: any absent
+/// field is `None`, and the whole struct is `None` only when the manifest is
+/// missing (older Claude / Codex, which has none) or unparseable.
+pub(crate) struct ManifestFields {
+    /// `name` — the operator's `/rename` value, or Claude's auto-title.
+    pub name: Option<String>,
+    /// `status` — live turn-state: `busy` / `idle` / `shell`.
+    pub activity: Option<String>,
+    /// `kind` — `interactive` / `bg`. Static over a session's life.
+    pub kind: Option<String>,
+}
+
+/// Parse the live fields from the per-PID manifest. Full JSON parse (not the
+/// `sessionId` cheap-scan above): `name` is arbitrary human text that can
+/// contain quotes, escapes, or `}` — a substring scan would mis-slice it. The
+/// file is ~300 bytes so the cost is trivial. Read on the publisher tick AND
+/// on an fs-watch wake, so a mid-session `/rename` or busy↔idle flip
+/// propagates to the roster in near real time.
+pub(crate) fn manifest_fields(parent_pid: u32) -> Option<ManifestFields> {
+    let content = std::fs::read_to_string(session_manifest_path(parent_pid)?).ok()?;
+    let m: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let str_field = |k: &str| {
+        m.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Some(ManifestFields {
+        name: str_field("name"),
+        activity: str_field("status"),
+        kind: str_field("kind"),
+    })
+}
+
+/// Path to Claude's per-PID manifest for `parent_pid`.
+fn session_manifest_path(parent_pid: u32) -> Option<PathBuf> {
+    Some(
+        home_dir()?
+            .join(".claude")
+            .join("sessions")
+            .join(format!("{parent_pid}.json")),
+    )
+}
+
+/// The directory holding Claude's per-PID manifests — the fs-watch target for
+/// event-driven turn-state / name updates. `None` if the home dir is unknown.
+pub(crate) fn sessions_dir() -> Option<PathBuf> {
+    Some(home_dir()?.join(".claude").join("sessions"))
 }
 
 /// Extract a `SessionId` from the raw `CLAUDE_CODE_SESSION_ID` value.

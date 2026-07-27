@@ -101,10 +101,12 @@ pub fn SessionDetail() -> impl IntoView {
                 <div class="sd-kv">
                     {kv("operator", session.operator.clone().unwrap_or_else(|| "—".into()))}
                     {kv("host", host_line(&session))}
+                    {kv("kind", session.kind.clone().unwrap_or_else(|| "—".into()))}
                     {kv("project", session.project.clone().unwrap_or_else(|| "—".into()))}
                     {kv("branch", session.git_branch.clone().unwrap_or_else(|| "—".into()))}
                     {kv("cwd", session.cwd.clone())}
                     {kv("pid", session.pid.to_string())}
+                    {kv("activity", session.activity.clone().unwrap_or_else(|| "—".into()))}
                     {kv("status", session.current_task.clone().unwrap_or_else(|| "—".into()))}
                     {kv_age("connected", session.connected_at, now)}
                     {kv_fresh("last active", session.last_activity_at, now)}

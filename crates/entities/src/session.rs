@@ -58,6 +58,8 @@ mod tests {
             git_branch: None,
             current_task: None,
             session_name: None,
+            activity: None,
+            kind: None,
             connected_at: 1_700_000_000_000_i64,
             last_activity_at: Some(1_700_000_005_000_i64),
             last_tool: Some("send_message".into()),
@@ -87,6 +89,8 @@ mod tests {
             git_branch: None,
             current_task: None,
             session_name: Some("auth refactor".into()),
+            activity: Some("busy".into()),
+            kind: Some("interactive".into()),
             connected_at: 1_700_000_000_000_i64,
             last_activity_at: None,
             last_tool: None,
@@ -105,12 +109,16 @@ mod tests {
         assert_eq!(json["host"]["name"], "laptop");
         assert_eq!(json["host"]["os"], "linux");
         assert_eq!(json["host"]["arch"], "x86_64");
-        // Human session name serializes camelCase, matches the rest of the wire.
+        // Human session name + live activity/kind serialize camelCase.
         assert_eq!(json["sessionName"], "auth refactor");
+        assert_eq!(json["activity"], "busy");
+        assert_eq!(json["kind"], "interactive");
         let back: Session = serde_json::from_value(json).unwrap();
         assert_eq!(back.operator.as_deref(), Some("trevor"));
         assert_eq!(back.host.as_ref().map(|h| h.name.as_str()), Some("laptop"));
         assert_eq!(back.session_name.as_deref(), Some("auth refactor"));
+        assert_eq!(back.activity.as_deref(), Some("busy"));
+        assert_eq!(back.kind.as_deref(), Some("interactive"));
     }
 }
 
@@ -159,6 +167,25 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[myko_setter]
     pub session_name: Option<String>,
+
+    /// Live activity / turn-state, from Claude's per-PID manifest `status`:
+    /// `"busy"` (processing a turn), `"idle"` (awaiting input), or `"shell"`
+    /// (in a shell command). A truer "is this agent working right now" signal
+    /// than `last_activity_at`, which only moves on MCP tool calls — an agent
+    /// can be `busy` for minutes without touching marshal. The shim pushes it
+    /// event-driven (an fs-watch on the manifest), so the roster tracks
+    /// turn-state in near real time. `None` for harnesses with no such
+    /// manifest (Codex) or older Claude builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[myko_setter]
+    pub activity: Option<String>,
+
+    /// Session kind, from the manifest `kind`: `"interactive"` (a human at a
+    /// terminal) or `"bg"` (a background / headless agent). Set once at
+    /// registration — it doesn't change over a session's life, so no setter.
+    /// `None` when unknown (no manifest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 
     /// Wall-clock millis since unix epoch when the session connected.
     pub connected_at: i64,
