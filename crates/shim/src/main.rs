@@ -534,9 +534,7 @@ async fn serve() -> Result<()> {
     // pushing. Codex has no manifest → no watch. Debouncer leaked for the process
     // lifetime, matching the HEAD watcher above.
     let manifest_wake = Arc::new(tokio::sync::Notify::new());
-    if !is_codex
-        && let Some(dir) = session_discovery::sessions_dir()
-    {
+    if !is_codex && let Some(dir) = session_discovery::sessions_dir() {
         use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
         let wake = Arc::clone(&manifest_wake);
         match new_debouncer(
