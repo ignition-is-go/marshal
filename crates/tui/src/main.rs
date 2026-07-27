@@ -17,8 +17,8 @@ use crossterm::{
 };
 use hyphae::{Signal, Watchable};
 use marshal_entities::{
-    GetAllMessages, GetAllRoomMembers, GetAllRooms, GetAllSessions, Message, Room, RoomKind,
-    RoomMember, Session,
+    GetAllMessages, GetAllRoomMembers, GetAllRooms, GetAllSessionNicknames, GetAllSessions,
+    Message, Room, RoomKind, RoomMember, Session, SessionNickname,
 };
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -32,7 +32,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell as RowCell, Paragraph, Row, Table},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::{
     io,
     sync::{Arc, Mutex},
@@ -71,6 +71,12 @@ struct StateInner {
     messages: Vec<Arc<Message>>,
     rooms: Vec<Arc<Room>>,
     members: Vec<Arc<RoomMember>>,
+    /// Daemon-assigned `session_id → nickname` map (the sticky
+    /// `SessionNickname` store). Read-only here — the TUI never
+    /// recomputes handles, same contract as the web dashboard's
+    /// `nick.rs`. Sessions missing from the map (assignment saga
+    /// hasn't run yet) fall back to their short id.
+    nicknames: HashMap<String, String>,
     /// Live `Client` entity ids, used to render per-session connected /
     /// disconnected status. A session whose `client_id` is not in this
     /// set has lost its WS connection (or the daemon was just restarted
@@ -195,6 +201,22 @@ async fn main() -> Result<()> {
     });
     rooms_cell.own(rooms_guard);
     Box::leak(Box::new(rooms_cell));
+
+    let nicknames_cell = client.watch_query::<GetAllSessionNicknames>(GetAllSessionNicknames {});
+    let nicknames_state = state.clone();
+    let nicknames_guard = nicknames_cell.subscribe(move |signal| {
+        if let Signal::Value(value) = signal {
+            let map: HashMap<String, String> = (**value)
+                .iter()
+                .map(|n: &Arc<SessionNickname>| {
+                    (n.id.0.as_ref().to_string(), n.nickname.clone())
+                })
+                .collect();
+            nicknames_state.update(|s| s.nicknames = map);
+        }
+    });
+    nicknames_cell.own(nicknames_guard);
+    Box::leak(Box::new(nicknames_cell));
 
     let members_cell = client.watch_query::<GetAllRoomMembers>(GetAllRoomMembers {});
     let members_state = state.clone();
@@ -336,6 +358,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
 
     let header = Row::new(vec![
         RowCell::from("conn"),
+        RowCell::from("name"),
         RowCell::from("id"),
         RowCell::from("identity"),
         RowCell::from("cwd"),
@@ -370,11 +393,12 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             let short_id: String = s.id.0.chars().take(8).collect();
             Row::new(vec![
                 conn_cell,
-                RowCell::from(short_id).style(
+                RowCell::from(session_label(&snap.nicknames, s.id.0.as_ref())).style(
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
+                RowCell::from(short_id).style(Style::default().fg(Color::DarkGray)),
                 RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
                 RowCell::from(short_cwd(&s.cwd)).style(Style::default().fg(Color::Gray)),
                 RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
@@ -390,6 +414,7 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         rows,
         [
             Constraint::Length(7),  // conn
+            Constraint::Length(19), // name (assigned nickname)
             Constraint::Length(10), // id (session_id[:8])
             Constraint::Length(22), // identity (operator@host)
             // cwd / branch / rooms split residual width 1 : 1 : 2 —
@@ -523,11 +548,20 @@ fn format_member_rooms(s: &Session, members: &[Arc<RoomMember>]) -> String {
     ids.join(", ")
 }
 
-/// Eight-char short form of a session_id, used as the display label in
-/// the messages pane. Session_id is the sole stored identity; readable
-/// labels are composed at view time.
+/// Eight-char short form of a session_id, used as the fallback label
+/// wherever no nickname assignment has landed yet. Session_id is the
+/// sole stored identity; readable labels are composed at view time.
 fn short_sid(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+/// A session's display label: its daemon-assigned nickname, or the
+/// short id in the window before the assignment saga has run.
+fn session_label(nicknames: &HashMap<String, String>, session_id: &str) -> String {
+    nicknames
+        .get(session_id)
+        .cloned()
+        .unwrap_or_else(|| short_sid(session_id))
 }
 
 fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
@@ -546,7 +580,7 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             let recipient_label = if let Some(rid) = m.to_room_id.as_ref() {
                 format!("#{}", short_sid(rid.0.as_ref()))
             } else if let Some(sid) = m.to_session_id.as_ref() {
-                short_sid(sid.0.as_ref())
+                session_label(&snap.nicknames, sid.0.as_ref())
             } else {
                 "?".to_string()
             };
@@ -565,7 +599,10 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    format!("{:>8}", short_sid(m.from_session_id.0.as_ref())),
+                    format!(
+                        "{:>18}",
+                        session_label(&snap.nicknames, m.from_session_id.0.as_ref())
+                    ),
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
@@ -578,7 +615,7 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                         Style::default().fg(Color::Cyan)
                     },
                 ),
-                Span::styled(format!("{:<14}  ", recipient_label), recipient_style),
+                Span::styled(format!("{:<18}  ", recipient_label), recipient_style),
                 Span::raw(m.body.replace('\n', " ⏎ ")),
             ])
         })
