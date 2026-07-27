@@ -44,16 +44,21 @@ pub fn CommandK() -> impl IntoView {
         let mut out: Vec<(&'static str, String, Option<String>, Target)> = Vec::new();
         for s in sessions.get() {
             let handle = nick.of(s.id.0.as_ref());
+            let sname = s.session_name.clone().filter(|x| !x.is_empty());
             let hay = format!(
-                "{handle} {} {}",
+                "{handle} {} {} {}",
+                sname.clone().unwrap_or_default(),
                 s.operator.clone().unwrap_or_default(),
                 s.host.as_ref().map(|h| h.name.clone()).unwrap_or_default(),
             );
             if q.is_empty() || hay.to_lowercase().contains(&q) {
+                // Sub-line identifies the session: its human name if named,
+                // else its current status.
+                let sub = sname.or_else(|| s.current_task.clone());
                 out.push((
                     "session",
                     handle,
-                    s.current_task.clone(),
+                    sub,
                     Target::Session(s.id.0.to_string()),
                 ));
             }

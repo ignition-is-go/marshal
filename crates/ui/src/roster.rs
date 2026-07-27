@@ -31,8 +31,8 @@ pub fn RosterPanel() -> impl IntoView {
 
     let filter = RwSignal::new(String::new());
 
-    // Filter on nickname / operator / host / project / branch / cwd. Reads the
-    // nickname map, so it re-runs as assignments arrive.
+    // Filter on session name / nickname / operator / host / project / branch /
+    // cwd. Reads the nickname map, so it re-runs as assignments arrive.
     let visible = Memo::new(move |_| {
         let q = filter.get().to_lowercase();
         let mut v: Vec<Arc<Session>> = sessions
@@ -43,8 +43,9 @@ pub fn RosterPanel() -> impl IntoView {
                     return true;
                 }
                 let hay = format!(
-                    "{} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {}",
                     nick.of(s.id.0.as_ref()),
+                    s.session_name.clone().unwrap_or_default(),
                     s.operator.clone().unwrap_or_default(),
                     s.host.as_ref().map(|h| h.name.clone()).unwrap_or_default(),
                     s.project.clone().unwrap_or_default(),
@@ -92,7 +93,7 @@ pub fn RosterPanel() -> impl IntoView {
         }}
 
         <div class="roster-search">
-            <SearchField value=filter placeholder="filter by nickname · operator · host · project" />
+            <SearchField value=filter placeholder="filter by name · nickname · operator · host · project" />
         </div>
 
         // ── the table, grouped by host ─────────────────────────────────────────
@@ -154,6 +155,9 @@ pub fn RosterPanel() -> impl IntoView {
 fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, focus: Focus) -> impl IntoView {
     let id = session.id.0.to_string();
     let sid = nick::short_id(&id);
+    // The operator's `/rename` name for this session, when set — the human
+    // label peers target on; nickname stays the address handle.
+    let sname = session.session_name.clone().filter(|s| !s.is_empty());
     let seen_ms = last_seen_ms(&session);
     let seen_abs = time::abs_time(seen_ms);
 
@@ -205,6 +209,7 @@ fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, focus: Focus) -> 
                 <span class="nick">{handle}</span>
                 <span class="sid">{sid}</span>
                 {move || (is_console && online.get()).then(|| view! { <span class="you-badge">"you"</span> })}
+                {sname.map(|n| { let t = n.clone(); view! { <span class="sname" title=t>{n}</span> } })}
             </td>
             <td class=op_dim>{op_str}</td>
             <td class=proj_dim>{proj_str}</td>
@@ -238,6 +243,7 @@ const ROSTER_CSS: &str = r#"
 .roster-t td.c-name { min-width: 140px; }
 .roster-t td.c-name .nick { display: inline-block; }
 .roster-t td.c-name .sid { display: inline-block; margin-left: 8px; }
+.roster-t td.c-name .sname { display: block; margin-top: 3px; font-size: 11px; color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .roster-t .roster-row { cursor: pointer; }
 .roster-t .roster-row.selected td { background: color-mix(in oklch, var(--color-primary) 15%, transparent); }
 .roster-t .roster-row.selected .c-name { box-shadow: inset 3px 0 0 var(--color-primary); }
