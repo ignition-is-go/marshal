@@ -243,6 +243,29 @@ fn sid_from_claude_sessions_file(home: &Path, parent_pid: u32) -> Option<Session
     Some(SessionId(Arc::from(sid)))
 }
 
+/// Claude's human session name from the same per-PID manifest
+/// (`<home>/.claude/sessions/<parent_pid>.json`, `name` field) — the
+/// operator's `/rename` value, or Claude's auto-generated title before a
+/// rename. `None` if the manifest is absent (older Claude / Codex, which
+/// has no such manifest), unparseable, or carries no non-empty `name`.
+///
+/// Unlike the `sessionId` cheap-scan above, this does a full JSON parse:
+/// `name` is an arbitrary human string that can contain quotes, escapes,
+/// or `}` — a substring scan would mis-slice it. The file is ~300 bytes so
+/// the parse cost is trivial. Polled each publisher tick, so a mid-session
+/// `/rename` (which rewrites the manifest) propagates to the roster.
+pub(crate) fn session_name_from_manifest(parent_pid: u32) -> Option<String> {
+    let home = home_dir()?;
+    let path = home
+        .join(".claude")
+        .join("sessions")
+        .join(format!("{parent_pid}.json"));
+    let content = std::fs::read_to_string(&path).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let name = manifest.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// Extract a `SessionId` from the raw `CLAUDE_CODE_SESSION_ID` value.
 /// Returns None for an absent or whitespace-only value so we fall
 /// through to the file-based tiers. Pure (takes the value rather than

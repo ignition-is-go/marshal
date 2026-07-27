@@ -146,6 +146,7 @@ fn read_whoami(
                         json!({
                             "session_id": s.id.0.as_ref(),
                             "nickname": handle_for(host, s.id.0.as_ref()),
+                            "session_name": s.session_name,
                             "pid": s.pid,
                             "cwd": s.cwd,
                             "operator": s.operator,
@@ -182,6 +183,7 @@ fn read_whoami(
         json!({
             "session_id": snapshot.id.0.as_ref(),
             "nickname": handle_for(host, snapshot.id.0.as_ref()),
+            "session_name": snapshot.session_name,
             "pid": host.pid,
             "cwd": host.cwd,
             "operator": snapshot.operator,
@@ -211,6 +213,7 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 "cwd": s.cwd,
                 "git_branch": s.git_branch,
                 "current_task": s.current_task,
+                "session_name": s.session_name,
                 "operator": s.operator,
                 "host": s.host,
                 "project": s.project,

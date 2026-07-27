@@ -57,6 +57,7 @@ mod tests {
             cwd: "/home/x".into(),
             git_branch: None,
             current_task: None,
+            session_name: None,
             connected_at: 1_700_000_000_000_i64,
             last_activity_at: Some(1_700_000_005_000_i64),
             last_tool: Some("send_message".into()),
@@ -85,6 +86,7 @@ mod tests {
             cwd: "/repo".into(),
             git_branch: None,
             current_task: None,
+            session_name: Some("auth refactor".into()),
             connected_at: 1_700_000_000_000_i64,
             last_activity_at: None,
             last_tool: None,
@@ -103,9 +105,12 @@ mod tests {
         assert_eq!(json["host"]["name"], "laptop");
         assert_eq!(json["host"]["os"], "linux");
         assert_eq!(json["host"]["arch"], "x86_64");
+        // Human session name serializes camelCase, matches the rest of the wire.
+        assert_eq!(json["sessionName"], "auth refactor");
         let back: Session = serde_json::from_value(json).unwrap();
         assert_eq!(back.operator.as_deref(), Some("trevor"));
         assert_eq!(back.host.as_ref().map(|h| h.name.as_str()), Some("laptop"));
+        assert_eq!(back.session_name.as_deref(), Some("auth refactor"));
     }
 }
 
@@ -141,6 +146,19 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[myko_setter]
     pub current_task: Option<String>,
+
+    /// Human-facing session name. For Claude Code this is the operator's
+    /// `/rename` value (Claude's auto-generated title until they rename),
+    /// read by the shim from Claude's per-PID manifest
+    /// `~/.claude/sessions/<pid>.json` (`name`) and refreshed when it
+    /// changes mid-session. Distinct from `nickname` — the daemon-assigned
+    /// stable handle peers ADDRESS: this is what the human *called* the
+    /// session, so the roster is legible for cross-repo targeting ("which
+    /// agent is doing X"). `None` for harnesses with no such manifest
+    /// (Codex) or Claude builds predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[myko_setter]
+    pub session_name: Option<String>,
 
     /// Wall-clock millis since unix epoch when the session connected.
     pub connected_at: i64,

@@ -173,6 +173,8 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> H
             cwd,
             git_branch: None,
             current_task: None,
+            // Codex has no per-PID name manifest; identity is hook-owned.
+            session_name: None,
             connected_at: now,
             last_activity_at: Some(now),
             last_tool: None,
@@ -265,6 +267,7 @@ fn handle_session_end(body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
         cwd: String::new(),
         git_branch: None,
         current_task: None,
+        session_name: None,
         connected_at: 0,
         last_activity_at: None,
         last_tool: None,

@@ -103,6 +103,7 @@ fn session_set_event(id: &str) -> MEvent {
         cwd: "/tmp".into(),
         git_branch: None,
         current_task: None,
+        session_name: None,
         connected_at: chrono::Utc::now().timestamp_millis(),
         last_activity_at: None,
         last_tool: None,

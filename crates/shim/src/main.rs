@@ -231,6 +231,16 @@ async fn serve() -> Result<()> {
             .unwrap_or(None)
     };
 
+    // Human session name (Claude's `/rename` value, or its auto-title until
+    // renamed) from Claude's per-PID manifest. The publisher loop re-reads it
+    // each tick so a mid-session rename lands on the roster. Codex has no such
+    // manifest → None (its identity is hook-owned).
+    let session_name = if is_codex {
+        None
+    } else {
+        session_discovery::parent_pid().and_then(session_discovery::session_name_from_manifest)
+    };
+
     let session = Session {
         id: session_id.clone(),
         client_id: None,
@@ -238,6 +248,7 @@ async fn serve() -> Result<()> {
         cwd: cwd.clone(),
         git_branch: git_branch.clone(),
         current_task: None,
+        session_name,
         connected_at: Utc::now().timestamp_millis(),
         last_activity_at: None,
         last_tool: None,
@@ -521,6 +532,10 @@ async fn serve() -> Result<()> {
         let mut pushed_activity_at: Option<i64> = None;
         let mut pushed_tool: Option<String> = None;
         let mut pushed_tool_at: Option<i64> = None;
+        // Seed from the value SET at registration so an unchanged name is
+        // never re-pushed; only an actual `/rename` dispatches a setter.
+        let mut pushed_session_name: Option<String> =
+            session_for_publish.lock().unwrap().session_name.clone();
         // Consecutive ticks our own session was absent from the roster.
         let mut missing_from_roster: u32 = 0;
         loop {
@@ -602,6 +617,26 @@ async fn serve() -> Result<()> {
             // Target the CURRENT id (it may have just been reconciled above) so
             // liveness setters never write to a stale/dead session row.
             let session_id_for_publish = session_for_publish.lock().unwrap().id.clone();
+
+            // Follow a mid-session `/rename`: re-read Claude's per-PID manifest
+            // (same file the drift check above uses) and push the human name
+            // only when it actually changed, mirroring the liveness setters.
+            let current_session_name =
+                parent_pid_for_publish.and_then(session_discovery::session_name_from_manifest);
+            if pushed_session_name != current_session_name {
+                let arc_name = current_session_name.as_deref().map(Arc::<str>::from);
+                let _ = client_for_publish
+                    .send_command::<marshal_entities::SetSessionSessionName, ()>(
+                        &marshal_entities::SetSessionSessionName {
+                            id: session_id_for_publish.clone(),
+                            session_name: arc_name,
+                        },
+                    );
+                if let Ok(mut s) = session_for_publish.lock() {
+                    s.session_name = current_session_name.clone();
+                }
+                pushed_session_name = current_session_name;
+            }
 
             let last_activity_at = activity_for_publish.last_activity_ms();
             let last_activity_at = if last_activity_at > 0 {

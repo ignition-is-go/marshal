@@ -62,6 +62,7 @@ impl Console {
             cwd: "—".to_string(),
             git_branch: None,
             current_task: Some("operator console".to_string()),
+            session_name: None,
             connected_at: self.connected_at.get_untracked(),
             last_activity_at: Some(now),
             last_tool: None,
