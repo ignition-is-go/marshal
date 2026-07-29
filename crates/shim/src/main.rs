@@ -631,7 +631,10 @@ async fn serve() -> Result<()> {
             // half-broken" rather than "I'm unregistered". The roster we already
             // subscribe to is ground truth, so check it directly and re-publish.
             {
-                let me = session_for_publish.lock().unwrap().id.clone();
+                let (me, channels_enabled) = {
+                    let s = session_for_publish.lock().unwrap();
+                    (s.id.clone(), s.channels_enabled)
+                };
                 let sessions = host_for_publish.sessions_cell.get();
                 let empty = sessions.is_empty();
                 let present = sessions.iter().any(|s| s.id == me);
@@ -648,6 +651,13 @@ async fn serve() -> Result<()> {
                         "unregistered"
                     },
                 );
+                // Live-channel state for the statusline's `no live channel` warning —
+                // a DISTINCT signal from health/registration: a fully-registered
+                // session can still be flag-off (forked/resumed launches bypass the
+                // wrapper), which silently drops live delivery. Static per session
+                // (detected once at startup); rewritten here keyed to the CURRENT id so
+                // it follows a canonical-id reconcile.
+                write_channels(me.0.as_ref(), channels_enabled);
                 let (next, resend) = roster_miss_step(missing_from_roster, empty, present);
                 missing_from_roster = next;
                 if resend {
@@ -915,6 +925,49 @@ pub(crate) fn read_health(session_id: &str) -> Option<(String, std::time::Durati
             .and_then(|m| m.elapsed().ok())
             .unwrap_or_default();
         return Some((status, age));
+    }
+    None
+}
+
+fn channels_file_name(session_id: &str) -> String {
+    format!("channels-{session_id}")
+}
+
+/// Write this session's live-channel state for the statusline: `on` / `off` /
+/// `unknown` (flag detected on / off / parent cmdline unreadable). Best-effort.
+/// DISTINCT from the health file — this is a static launch property (flag off =
+/// forked/resumed past the wrapper → no live delivery), not a liveness signal,
+/// so the statusline can warn on it independently of health/registration.
+pub(crate) fn write_channels(session_id: &str, enabled: Option<bool>) {
+    let word = match enabled {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "unknown",
+    };
+    let Some(path) = config_file_candidates(&channels_file_name(session_id))
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, word);
+}
+
+/// Read this session's live-channel state: `Some(false)` = flag OFF (statusline
+/// warns `no live channel`), `Some(true)` = on, `None` = unknown / no file yet
+/// (older shim) → never warn, so we don't false-alarm on an unknown state.
+pub(crate) fn read_channels(session_id: &str) -> Option<bool> {
+    for path in config_file_candidates(&channels_file_name(session_id)) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            return match contents.trim() {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            };
+        }
     }
     None
 }

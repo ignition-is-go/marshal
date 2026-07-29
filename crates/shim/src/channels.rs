@@ -6,16 +6,21 @@
 //!    `delivered_live` honestly. There is no in-band MCP signal for it, so it
 //!    is read from the parent's command line.
 //!
-//! 2. [`marshal_reachable`] — can this session receive AT ALL? This is what
-//!    the statusline warns on. Delivery has TWO paths: the live channel (needs
-//!    the flag) and the flag-independent INBOX (the `UserPromptSubmit` hook
-//!    POSTs to the daemon and surfaces `<marshal_inbox>` on the next prompt).
-//!    The inbox works for any session whose host can reach the daemon —
-//!    including VS Code's flagless `claude`. So "communication is not possible"
-//!    means the daemon is UNREACHABLE, NOT merely that the live flag is absent.
-//!    Warning on flag-absence alone false-alarms every VS Code session even
-//!    though inbox delivery is working; keying on reachability is both correct
-//!    and matches "warn when communication is not possible".
+//! 2. [`cannot_receive`] — is the daemon UNREACHABLE (the statusline's
+//!    top-severity warning, meaning nothing delivers at all)? Delivery has TWO
+//!    paths: the live channel (needs the flag) and the turn-boundary INBOX (the
+//!    `UserPromptSubmit` hook POSTs to the daemon and surfaces `<marshal_inbox>`
+//!    on the NEXT prompt). Neither works if the daemon is unreachable, so that
+//!    is the "can't communicate at all" signal, keyed on reachability.
+//!
+//!    But the two paths are NOT equivalent, and flag-off is NOT harmless: the
+//!    inbox only fires at a prompt boundary, so a flag-off session that goes
+//!    heads-down (a long autonomous turn) silently misses LIVE messages until it
+//!    returns to a prompt. So flag-off is its OWN distinct statusline warning
+//!    (`no live channel`), separate from and lower-severity than UNREACHABLE —
+//!    surfaced off the shim-written channels file, see `statusline::pick_warnings`.
+//!    (The earlier design suppressed it to avoid "false-alarming" flagless VS
+//!    Code sessions; that was wrong — the state is real and worth showing.)
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
