@@ -234,7 +234,14 @@ mod tests {
     #[test]
     fn prefix_includes_handle_when_present() {
         assert_eq!(
-            format_prefix("max", "pulse-admin", "pulse-deploy", None, "swift-falcon", &[]),
+            format_prefix(
+                "max",
+                "pulse-admin",
+                "pulse-deploy",
+                None,
+                "swift-falcon",
+                &[]
+            ),
             "[max@pulse-admin pulse-deploy swift-falcon]"
         );
     }
@@ -311,14 +318,23 @@ mod tests {
     #[test]
     fn stale_heartbeat_reads_as_shim_down_and_suppresses_channel() {
         let stale = HEALTH_STALE + Duration::from_secs(1);
-        assert_eq!(pick_warnings(false, Some(("ok", stale)), false), vec!["shim DOWN"]);
+        assert_eq!(
+            pick_warnings(false, Some(("ok", stale)), false),
+            vec!["shim DOWN"]
+        );
         // Shim down = no MCP at all; channel state is moot.
-        assert_eq!(pick_warnings(false, Some(("ok", stale)), true), vec!["shim DOWN"]);
+        assert_eq!(
+            pick_warnings(false, Some(("ok", stale)), true),
+            vec!["shim DOWN"]
+        );
     }
 
     #[test]
     fn channels_off_warns_independently_when_otherwise_healthy() {
-        assert_eq!(pick_warnings(false, ok_fresh(), true), vec!["no live channel"]);
+        assert_eq!(
+            pick_warnings(false, ok_fresh(), true),
+            vec!["no live channel"]
+        );
     }
 
     #[test]
