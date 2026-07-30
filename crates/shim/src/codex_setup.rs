@@ -4,9 +4,9 @@
 //!
 //! Writes two managed blocks (idempotent, marker-delimited, re-runnable):
 //!   1. `$CODEX_HOME/config.toml` — `[mcp_servers.marshal]` (this same binary as
-//!      the MCP server) + `[hooks]` SessionStart/UserPromptSubmit that invoke
-//!      `<this-binary> codex-hook ...` (with a `command_windows` variant so the
-//!      hook runs natively under Windows' `cmd.exe`).
+//!      the MCP server) + lifecycle/inbox `[hooks]` that invoke `<this-binary>
+//!      codex-hook ...` (with a `command_windows` variant so the hook runs
+//!      natively under Windows' `cmd.exe`).
 //!   2. `$CODEX_HOME/AGENTS.md` — how the agent uses marshal (pass `asSession`).
 //!
 //! Designed for the laptop/desktop case where there is no Ansible: download the
@@ -82,11 +82,14 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     // The exact command strings Codex will run (and hash). command == command_windows,
     // so the trust hash is platform-independent. SessionStart injects identity;
-    // the other three surface the inbox — UserPromptSubmit on a user prompt, and
+    // SessionEnd removes the roster row; the other three surface the inbox —
+    // UserPromptSubmit on a user prompt, and
     // the two tool-use hooks between tool calls so an actively-working agent picks
-    // up peer messages mid-task (the closest Codex gets to live delivery).
+    // up peer messages mid-task. `codex-run` adds true idle-turn wakeups through
+    // the shared app-server; these hooks remain the durable injection/ack path.
     let hooks = HookCmds {
         ss: format!("{exe} codex-hook session-start {hook_base}"),
+        end: format!("{exe} codex-hook session-end {hook_base}"),
         ups: format!("{exe} codex-hook prompt-submit {hook_base}"),
         pre: format!("{exe} codex-hook pre-tool-use {hook_base}"),
         post: format!("{exe} codex-hook post-tool-use {hook_base}"),
@@ -111,6 +114,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
          hooks, and the desktop app has no trust bypass). If Codex ever reports them as\n\
          untrusted (e.g. a Codex update changes the hook-trust hash), re-run codex-setup\n\
          or trust the marshal hooks once in the app's hook settings."
+    );
+    println!();
+    println!(
+        "For immediate idle-session delivery, launch the CLI as:\n\
+         \n\
+           {exe} codex-run [CODEX_ARGS...]\n\
+         \n\
+         This attaches the TUI to a local Codex app-server and runs Marshal's\n\
+         wake bridge. Plain `codex` keeps hook-boundary inbox delivery."
     );
     Ok(())
 }
@@ -244,9 +256,10 @@ fn q(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string()
 }
 
-/// The exact command string for each of the four wired hook events.
+/// The exact command string for each of the five wired hook events.
 struct HookCmds {
     ss: String,
+    end: String,
     ups: String,
     pre: String,
     post: String,
@@ -269,6 +282,13 @@ fn config_block(exe: &str, ws: &str, h: &HookCmds) -> String {
          command = {ss_q}\n\
          command_windows = {ss_q}\n\
          \n\
+         [[hooks.SessionEnd]]\n\
+         [[hooks.SessionEnd.hooks]]\n\
+         type = \"command\"\n\
+         command = {end_q}\n\
+         command_windows = {end_q}\n\
+         timeout = 3\n\
+         \n\
          [[hooks.UserPromptSubmit]]\n\
          [[hooks.UserPromptSubmit.hooks]]\n\
          type = \"command\"\n\
@@ -290,6 +310,7 @@ fn config_block(exe: &str, ws: &str, h: &HookCmds) -> String {
         ws_q = q(ws),
         matcher_q = q(SS_MATCHER),
         ss_q = q(&h.ss),
+        end_q = q(&h.end),
         ups_q = q(&h.ups),
         pre_q = q(&h.pre),
         post_q = q(&h.post),
@@ -303,13 +324,15 @@ fn config_block(exe: &str, ws: &str, h: &HookCmds) -> String {
 /// and persist it under `[hooks.state."<key>"]` in this same config.toml.
 fn trust_block(config_path: &Path, h: &HookCmds) -> String {
     let cp = config_path.display().to_string();
-    // (event_label, matcher, command) — labels are Codex's hook_event_key_label;
+    // (event_label, matcher, command, timeout) — labels are Codex's
+    // hook_event_key_label;
     // only SessionStart carries a matcher (the others resolve to None).
     let entries = [
-        ("session_start", Some(SS_MATCHER), &h.ss),
-        ("user_prompt_submit", None, &h.ups),
-        ("pre_tool_use", None, &h.pre),
-        ("post_tool_use", None, &h.post),
+        ("session_start", Some(SS_MATCHER), &h.ss, 600),
+        ("session_end", None, &h.end, 3),
+        ("user_prompt_submit", None, &h.ups, 600),
+        ("pre_tool_use", None, &h.pre, 600),
+        ("post_tool_use", None, &h.post, 600),
     ];
     let mut out = String::from(
         "\n\
@@ -318,9 +341,9 @@ fn trust_block(config_path: &Path, h: &HookCmds) -> String {
          # future Codex changes the hook-trust hash these fall back to Untrusted (tools\n\
          # still work) — re-run codex-setup or trust the hooks once in the app.\n",
     );
-    for (label, matcher, cmd) in entries {
+    for (label, matcher, cmd, timeout) in entries {
         let key = format!("{cp}:{label}:0:0");
-        let hash = hook_hash(label, matcher, cmd);
+        let hash = hook_hash(label, matcher, cmd, timeout);
         out.push_str(&format!(
             "[hooks.state.{}]\ntrusted_hash = {}\n",
             q(&key),
@@ -337,10 +360,10 @@ fn trust_block(config_path: &Path, h: &HookCmds) -> String {
 /// `command_windows`/`statusMessage` are None (dropped); `timeout` defaults to 600.
 /// Keys are emitted already sorted so the output matches serde_json's canonical form
 /// regardless of the `preserve_order` feature.
-fn hook_hash(event_label: &str, matcher: Option<&str>, command: &str) -> String {
+fn hook_hash(event_label: &str, matcher: Option<&str>, command: &str, timeout: u64) -> String {
     let handler = format!(
-        "{{\"async\":false,\"command\":{},\"timeout\":600,\"type\":\"command\"}}",
-        q(command)
+        "{{\"async\":false,\"command\":{},\"timeout\":{timeout},\"type\":\"command\"}}",
+        q(command),
     );
     let identity = match matcher {
         Some(m) => format!(
@@ -413,3 +436,35 @@ the `marshal` MCP server as `marshal__send_message`, `marshal__broadcast`,\n\
   needing authorization to your operator.\n\
 - To reach a HUMAN, address their operator identity (the email on their roster\n\
   row, e.g. `max@lucid.rocks`).\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hook_commands() -> HookCmds {
+        HookCmds {
+            ss: "shim codex-hook session-start http://host:6156".into(),
+            end: "shim codex-hook session-end http://host:6156".into(),
+            ups: "shim codex-hook prompt-submit http://host:6156".into(),
+            pre: "shim codex-hook pre-tool-use http://host:6156".into(),
+            post: "shim codex-hook post-tool-use http://host:6156".into(),
+        }
+    }
+
+    #[test]
+    fn generated_config_wires_and_pretrusts_session_end() {
+        let hooks = hook_commands();
+        let config = config_block("shim", "ws://host:6155", &hooks);
+        assert!(config.contains("[[hooks.SessionEnd]]"));
+        assert!(config.contains("command = \"shim codex-hook session-end http://host:6156\""));
+        assert!(config.contains("timeout = 3"));
+
+        let trust = trust_block(Path::new("/tmp/codex/config.toml"), &hooks);
+        assert!(trust.contains(":session_end:0:0"));
+        assert_eq!(trust.matches("trusted_hash = ").count(), 5);
+        assert_ne!(
+            hook_hash("session_end", None, &hooks.end, 3),
+            hook_hash("session_end", None, &hooks.end, 600)
+        );
+    }
+}

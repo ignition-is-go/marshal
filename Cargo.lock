@@ -2731,6 +2731,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "env_logger",
+ "futures-util",
  "gethostname",
  "hyphae",
  "libc",
@@ -2742,6 +2743,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-tungstenite",
  "uuid",
  "windows-sys 0.59.0",
 ]

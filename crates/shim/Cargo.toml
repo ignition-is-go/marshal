@@ -33,6 +33,8 @@ marshal-entities = { workspace = true }
 gethostname = "1"
 # Event-driven git-branch refresh: OS fs-watch on the repo's HEAD (no polling).
 notify-debouncer-mini = { workspace = true }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

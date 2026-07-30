@@ -17,6 +17,8 @@ log = "0.4"
 env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 notify-debouncer-mini = "0.7"
+futures-util = "0.3"
+tokio-tungstenite = "0.29"
 
 # Myko stack — pulled from crates.io. Stock (no fork patch): ships the
 # HTTP MCP router (POST /myko/mcp request/response + SSE) and the
