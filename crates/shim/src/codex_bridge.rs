@@ -8,7 +8,7 @@
 //! `marshal-shim codex-run` opts into that topology:
 //!
 //! 1. start a local Codex app-server;
-//! 2. start this bridge while the TUI is alive;
+//! 2. subscribe this bridge to app-server lifecycle events;
 //! 3. attach the TUI with `codex --remote`.
 //!
 //! Unix uses Codex's managed Unix-domain-socket daemon. Native Windows does not
@@ -20,25 +20,31 @@
 //! app-server to start that thread. The existing `UserPromptSubmit` hook then
 //! injects and acknowledges the `<marshal_inbox>` block before the model runs.
 //! Room broadcasts remain ambient, and a failed wake leaves the message unread.
+//! On Unix, per-TUI bridges attached to the shared app-server elect one
+//! host-local wake leader; every bridge still observes lifecycle events.
+//! The same bridge observes the TUI's authoritative `thread/started` event and
+//! registers its root session id before the first prompt. `codex-run` does not
+//! launch the TUI until this lifecycle subscription is ready.
 //!
 //! This is intentionally opt-in. A plain `codex` process owns an in-process
 //! backend with no control socket, so there is nowhere safe for a peer process
 //! to send `turn/start`; it retains hook-boundary inbox delivery.
 
+#[cfg(windows)]
+use std::net::{TcpListener, TcpStream};
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     str::FromStr,
     sync::Arc,
+    thread,
     time::{Duration, Instant},
 };
-#[cfg(windows)]
-use std::{
-    net::{TcpListener, TcpStream},
-    thread,
-};
+#[cfg(unix)]
+use std::{fs::OpenOptions, os::fd::AsRawFd};
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -48,20 +54,24 @@ use marshal_entities::{
 };
 use myko::client::MykoClient;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use sha2::{Digest, Sha256};
 use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::Message as WebSocketMessage};
 #[cfg(unix)]
 use tokio_tungstenite::{client_async, tungstenite::client::IntoClientRequest};
 
 const DEFAULT_POLL: Duration = Duration::from_millis(750);
-const STARTED_COOLDOWN: Duration = Duration::from_secs(30);
+const WAKE_COALESCE_WINDOW: Duration = Duration::from_secs(30);
 const RETRY_COOLDOWN: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const WAKE_LEADER_SETTLE: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(8);
+const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
-const WAKE_PROMPT: &str = "A direct message from a sibling agent arrived through Marshal. \
-Process the <marshal_inbox> block injected into this turn, act only within your existing task \
-and authority, reply to the sender when useful, and then continue. If no <marshal_inbox> block \
-was injected, read your unread direct Marshal messages before proceeding.";
+const WAKE_PROMPT: &str = "Handle the injected <marshal_inbox>; if absent, read unread direct \
+Marshal messages. Then continue your current task.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppServerEndpoint {
@@ -78,12 +88,114 @@ impl std::fmt::Display for AppServerEndpoint {
     }
 }
 
+/// Coordinates wake ownership among bridges attached to the same Unix
+/// app-server and Marshal daemon. Lifecycle registration remains active in
+/// every bridge; only model-turn creation is elected.
+///
+/// Unix `codex-run` launchers share one managed app-server, so without this
+/// lock every per-TUI bridge sees the same unread row and submits the same
+/// `turn/start`. Windows launchers own isolated app-servers and therefore do
+/// not contend.
+#[cfg(unix)]
+#[derive(Debug)]
+struct WakeLeadership {
+    lock_path: PathBuf,
+    lock: Option<fs::File>,
+    acquired_at: Option<Instant>,
+}
+
+#[cfg(unix)]
+impl WakeLeadership {
+    fn new(app_server: &AppServerEndpoint, daemon: &str) -> Self {
+        Self::at(wake_lock_path(app_server, daemon))
+    }
+
+    fn at(lock_path: PathBuf) -> Self {
+        Self {
+            lock_path,
+            lock: None,
+            acquired_at: None,
+        }
+    }
+
+    fn ready(&mut self, now: Instant) -> Result<bool> {
+        if self.lock.is_none() {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&self.lock_path)
+                .with_context(|| {
+                    format!("opening wake-leader lock {}", self.lock_path.display())
+                })?;
+            // SAFETY: `file` owns this valid fd for at least the duration of
+            // the call and remains stored in `self.lock` while leadership is
+            // held. Dropping it releases the advisory lock.
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(false);
+                }
+                return Err(error).with_context(|| {
+                    format!("acquiring wake-leader lock {}", self.lock_path.display())
+                });
+            }
+            log::info!(
+                "[codex-bridge] acquired wake leadership via {}",
+                self.lock_path.display()
+            );
+            self.lock = Some(file);
+            self.acquired_at = Some(now);
+        }
+
+        Ok(self
+            .acquired_at
+            .is_some_and(|acquired| now.saturating_duration_since(acquired) >= WAKE_LEADER_SETTLE))
+    }
+}
+
+#[cfg(unix)]
+fn wake_lock_path(app_server: &AppServerEndpoint, daemon: &str) -> PathBuf {
+    let identity = format!("{app_server}\n{daemon}");
+    let digest = Sha256::digest(identity.as_bytes());
+    let suffix: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let directory = match app_server {
+        AppServerEndpoint::Unix(socket) => socket
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+        AppServerEndpoint::WebSocket(_) => std::env::temp_dir(),
+    };
+    directory.join(format!(".marshal-codex-wake-{suffix}.lock"))
+}
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+struct WakeLeadership;
+
+#[cfg(not(unix))]
+impl WakeLeadership {
+    fn new(_app_server: &AppServerEndpoint, _daemon: &str) -> Self {
+        Self
+    }
+
+    fn ready(&mut self, _now: Instant) -> Result<bool> {
+        Ok(true)
+    }
+}
+
 #[derive(Debug)]
 struct BridgeArgs {
     daemon: String,
     app_server: AppServerEndpoint,
     poll: Duration,
     wake_thread: Option<SessionId>,
+    ready_file: Option<PathBuf>,
 }
 
 struct LaunchedAppServer {
@@ -113,11 +225,18 @@ pub fn run_codex(args: &[String]) -> Result<()> {
 
     let codex = std::env::var("MARSHAL_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
     let mut app_server = launch_app_server(&codex)?;
+    let ready_file = std::env::temp_dir().join(format!(
+        "marshal-codex-bridge-{}.ready",
+        uuid::Uuid::new_v4()
+    ));
+    let mut bridge_args = app_server.bridge_args.clone();
+    bridge_args.push("--ready-file".to_string());
+    bridge_args.push(ready_file.to_string_lossy().into_owned());
 
     let this = std::env::current_exe().context("locating marshal-shim executable")?;
     let bridge = Command::new(this)
         .arg("codex-bridge")
-        .args(&app_server.bridge_args)
+        .args(&bridge_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -130,6 +249,13 @@ pub fn run_codex(args: &[String]) -> Result<()> {
             return Err(error);
         }
     };
+    if let Err(error) = wait_for_bridge_ready(&mut bridge, &ready_file) {
+        let _ = bridge.kill();
+        let _ = bridge.wait();
+        let _ = fs::remove_file(&ready_file);
+        stop_owned_app_server(&mut app_server);
+        return Err(error);
+    }
 
     let status = Command::new(&codex)
         .args(["--remote", &app_server.remote])
@@ -138,10 +264,11 @@ pub fn run_codex(args: &[String]) -> Result<()> {
         .with_context(|| format!("running `{codex} --remote {}`", app_server.remote));
 
     // The bridge is scoped to this interactive launcher. Multiple launchers may
-    // coexist; duplicate wake attempts are harmless because app-server accepts
-    // only one active turn per thread.
+    // coexist; Unix bridges elect one wake leader for their shared app-server,
+    // while Windows launchers each own an isolated app-server.
     let _ = bridge.kill();
     let _ = bridge.wait();
+    let _ = fs::remove_file(&ready_file);
     stop_owned_app_server(&mut app_server);
 
     let status = status?;
@@ -149,6 +276,30 @@ pub fn run_codex(args: &[String]) -> Result<()> {
         anyhow::bail!("Codex exited with {status}");
     }
     Ok(())
+}
+
+fn wait_for_bridge_ready(bridge: &mut Child, ready_file: &Path) -> Result<()> {
+    let deadline = Instant::now() + BRIDGE_START_TIMEOUT;
+    loop {
+        if let Some(status) = bridge
+            .try_wait()
+            .context("checking Codex live-delivery bridge")?
+        {
+            anyhow::bail!("Codex live-delivery bridge exited before it was ready: {status}");
+        }
+        if ready_file.is_file() {
+            fs::remove_file(ready_file).with_context(|| {
+                format!("removing bridge readiness file {}", ready_file.display())
+            })?;
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for Codex live-delivery bridge to subscribe to the app-server"
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn stop_owned_app_server(app_server: &mut LaunchedAppServer) {
@@ -247,6 +398,12 @@ pub async fn run(args: &[String]) -> Result<()> {
     marshal_entities::link();
 
     let local_host = short_host();
+    let hook_base = crate::codex_hook::registration_base(&args.daemon);
+    let mut registration_task = tokio::spawn(watch_app_server_registrations(
+        args.app_server.clone(),
+        hook_base,
+        args.ready_file.clone(),
+    ));
     let client = Arc::new(MykoClient::new());
     let sessions = client.watch_query::<GetAllSessions>(GetAllSessions {});
     let messages = client.watch_query::<GetAllMessages>(GetAllMessages {});
@@ -259,6 +416,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         args.app_server
     );
 
+    let mut wake_leadership = WakeLeadership::new(&args.app_server, &args.daemon);
     let mut cooldowns: HashMap<SessionId, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(args.poll);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -269,6 +427,20 @@ pub async fn run(args: &[String]) -> Result<()> {
             signal = tokio::signal::ctrl_c() => {
                 signal.context("waiting for Ctrl-C")?;
                 break;
+            }
+            result = &mut registration_task => {
+                return result
+                    .context("Codex app-server registration watcher stopped")?;
+            }
+        }
+
+        let now = Instant::now();
+        match wake_leadership.ready(now) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                log::debug!("[codex-bridge] wake leadership unavailable: {error:#}");
+                continue;
             }
         }
 
@@ -281,8 +453,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             &read_snapshot,
             &local_host,
         );
-        let now = Instant::now();
-        cooldowns.retain(|session, until| candidates.contains(session) && *until > now);
+        retain_active_cooldowns(&mut cooldowns, now);
 
         for session_id in candidates {
             if cooldowns.get(&session_id).is_some_and(|until| *until > now) {
@@ -292,7 +463,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             match start_thread(&args.app_server, &session_id).await {
                 Ok(turn_id) => {
                     log::info!("[codex-bridge] woke thread={} turn={turn_id}", session_id.0);
-                    cooldowns.insert(session_id, now + STARTED_COOLDOWN);
+                    cooldowns.insert(session_id, now + WAKE_COALESCE_WINDOW);
                 }
                 Err(error) => {
                     // Busy threads are retried: their normal Pre/PostToolUse
@@ -309,9 +480,18 @@ pub async fn run(args: &[String]) -> Result<()> {
         }
     }
 
+    registration_task.abort();
     // Keep the client and watched cells live until the loop exits.
     drop((reads, messages, sessions, client));
     Ok(())
+}
+
+fn retain_active_cooldowns(cooldowns: &mut HashMap<SessionId, Instant>, now: Instant) {
+    // Do not tie the coalescing window to the current unread snapshot. A
+    // successful hook normally acknowledges the message immediately, making
+    // the candidate disappear; retaining the deadline lets related messages
+    // arriving moments later join the active turn instead of creating another.
+    cooldowns.retain(|_, until| *until > now);
 }
 
 fn parse_args(args: &[String]) -> Result<BridgeArgs> {
@@ -320,6 +500,7 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
     let mut endpoint = None;
     let mut poll_ms = None;
     let mut wake_thread = None;
+    let mut ready_file = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -338,13 +519,17 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
                     required_value(&mut it, "--wake-thread")?.as_str(),
                 )));
             }
+            "--ready-file" => {
+                ready_file = Some(PathBuf::from(required_value(&mut it, "--ready-file")?));
+            }
             "-h" | "--help" => {
                 println!(
                     "usage: marshal-shim codex-bridge [--daemon WS_URL] \
                      [--socket PATH | --endpoint LOOPBACK_WS_URL] \
-                     [--poll-ms N] [--wake-thread THREAD_ID]\n\
+                     [--poll-ms N] [--wake-thread THREAD_ID] [--ready-file PATH]\n\
                      \n\
-                     --wake-thread is a one-shot app-server connectivity diagnostic."
+                     --wake-thread is a one-shot app-server connectivity diagnostic.\n\
+                     --ready-file is an internal codex-run startup handshake."
                 );
                 std::process::exit(0);
             }
@@ -381,6 +566,7 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
         app_server,
         poll: poll_ms.map(Duration::from_millis).unwrap_or(DEFAULT_POLL),
         wake_thread,
+        ready_file,
     })
 }
 
@@ -432,6 +618,200 @@ fn short_host() -> String {
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "codex".to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadRegistration {
+    thread_id: String,
+    session_id: String,
+    cwd: String,
+}
+
+/// Maintain a subscribed app-server connection for lifecycle discovery.
+///
+/// `codex-run` waits for this connection's readiness marker before it launches
+/// the TUI, so the TUI's initial `thread/started` notification cannot fall into
+/// a startup race. Failed daemon registrations remain pending and are retried;
+/// a successful registration is left to the normal hooks for liveness refresh
+/// and teardown.
+async fn watch_app_server_registrations(
+    app_server: AppServerEndpoint,
+    hook_base: String,
+    mut ready_file: Option<PathBuf>,
+) -> Result<()> {
+    let mut pending = HashMap::new();
+    loop {
+        let result = match &app_server {
+            AppServerEndpoint::WebSocket(endpoint) => {
+                let connection = tokio::time::timeout(RPC_TIMEOUT, connect_async(endpoint)).await;
+                match connection {
+                    Ok(Ok((mut websocket, _))) => {
+                        monitor_registration_connection(
+                            &mut websocket,
+                            &hook_base,
+                            &mut ready_file,
+                            &mut pending,
+                        )
+                        .await
+                    }
+                    Ok(Err(error)) => {
+                        Err(error).with_context(|| format!("connecting to {endpoint}"))
+                    }
+                    Err(_) => anyhow::bail!("timed out connecting to Codex app-server"),
+                }
+            }
+            AppServerEndpoint::Unix(socket) => {
+                monitor_registrations_over_unix(socket, &hook_base, &mut ready_file, &mut pending)
+                    .await
+            }
+        };
+        if let Err(error) = result {
+            log::debug!("[codex-bridge] app-server lifecycle connection unavailable: {error:#}");
+        }
+        tokio::time::sleep(RETRY_COOLDOWN).await;
+    }
+}
+
+#[cfg(unix)]
+async fn monitor_registrations_over_unix(
+    socket: &Path,
+    hook_base: &str,
+    ready_file: &mut Option<PathBuf>,
+    pending: &mut HashMap<String, ThreadRegistration>,
+) -> Result<()> {
+    use tokio::net::UnixStream;
+
+    let stream = tokio::time::timeout(RPC_TIMEOUT, UnixStream::connect(socket))
+        .await
+        .context("timed out connecting to Codex app-server")?
+        .with_context(|| format!("connecting to {}", socket.display()))?;
+    let request = "ws://localhost/"
+        .into_client_request()
+        .context("building app-server WebSocket request")?;
+    let (mut websocket, _) = tokio::time::timeout(RPC_TIMEOUT, client_async(request, stream))
+        .await
+        .context("timed out upgrading Codex app-server connection")?
+        .context("upgrading Codex app-server Unix socket to WebSocket")?;
+    monitor_registration_connection(&mut websocket, hook_base, ready_file, pending).await
+}
+
+#[cfg(not(unix))]
+async fn monitor_registrations_over_unix(
+    _socket: &Path,
+    _hook_base: &str,
+    _ready_file: &mut Option<PathBuf>,
+    _pending: &mut HashMap<String, ThreadRegistration>,
+) -> Result<()> {
+    anyhow::bail!("Unix-domain-socket app-server endpoints are unavailable on this platform")
+}
+
+async fn monitor_registration_connection<S>(
+    websocket: &mut WebSocketStream<S>,
+    hook_base: &str,
+    ready_file: &mut Option<PathBuf>,
+    pending: &mut HashMap<String, ThreadRegistration>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    initialize_app_server(websocket).await?;
+    if let Some(path) = ready_file.as_ref() {
+        fs::write(path, b"ready")
+            .with_context(|| format!("writing bridge readiness file {}", path.display()))?;
+        ready_file.take();
+    }
+
+    let mut retry = tokio::time::interval(REGISTRATION_RETRY);
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Consume the interval's immediate first tick; new notifications attempt
+    // registration synchronously below.
+    retry.tick().await;
+
+    loop {
+        tokio::select! {
+            frame = websocket.next() => {
+                let frame = frame
+                    .context("Codex app-server closed the lifecycle connection")?
+                    .context("reading Codex app-server lifecycle notification")?;
+                let text = match frame {
+                    WebSocketMessage::Text(text) => text,
+                    WebSocketMessage::Ping(payload) => {
+                        websocket
+                            .send(WebSocketMessage::Pong(payload))
+                            .await
+                            .context("answering app-server WebSocket ping")?;
+                        continue;
+                    }
+                    WebSocketMessage::Close(_) => {
+                        anyhow::bail!("Codex app-server closed the lifecycle connection")
+                    }
+                    _ => continue,
+                };
+                let message: Value = serde_json::from_str(text.as_ref())
+                    .context("decoding app-server lifecycle notification")?;
+                if let Some(registration) = thread_registration(&message) {
+                    let session_id = registration.session_id.clone();
+                    pending.insert(session_id.clone(), registration);
+                    try_pending_registration(hook_base, pending, &session_id).await;
+                } else if let Some(thread_id) = closed_thread_id(&message) {
+                    pending.retain(|_, registration| registration.thread_id != thread_id);
+                }
+            }
+            _ = retry.tick(), if !pending.is_empty() => {
+                let session_ids: Vec<String> = pending.keys().cloned().collect();
+                for session_id in session_ids {
+                    try_pending_registration(hook_base, pending, &session_id).await;
+                }
+            }
+        }
+    }
+}
+
+fn thread_registration(message: &Value) -> Option<ThreadRegistration> {
+    if message.get("method").and_then(Value::as_str) != Some("thread/started") {
+        return None;
+    }
+    let thread = message.pointer("/params/thread")?;
+    let thread_id = thread.get("id")?.as_str()?.to_string();
+    let session_id = thread
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .unwrap_or(&thread_id)
+        .to_string();
+    let cwd = thread.get("cwd")?.as_str()?.to_string();
+    Some(ThreadRegistration {
+        thread_id,
+        session_id,
+        cwd,
+    })
+}
+
+fn closed_thread_id(message: &Value) -> Option<&str> {
+    (message.get("method").and_then(Value::as_str) == Some("thread/closed"))
+        .then(|| message.pointer("/params/threadId").and_then(Value::as_str))
+        .flatten()
+}
+
+async fn try_pending_registration(
+    hook_base: &str,
+    pending: &mut HashMap<String, ThreadRegistration>,
+    session_id: &str,
+) {
+    let Some(registration) = pending.get(session_id).cloned() else {
+        return;
+    };
+    let base = hook_base.to_string();
+    let registered = tokio::task::spawn_blocking(move || {
+        crate::codex_hook::register_session(&base, &registration.session_id, &registration.cwd)
+    })
+    .await
+    .unwrap_or(false);
+    if registered {
+        log::info!("[codex-bridge] registered thread={session_id} before first prompt");
+        pending.remove(session_id);
+    } else {
+        log::debug!("[codex-bridge] eager registration for thread={session_id} failed; will retry");
+    }
 }
 
 /// Direct, unread, hook-owned sessions on this host. Hook-owned Codex sessions
@@ -518,23 +898,7 @@ async fn initialize_and_start<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    write_rpc(
-        websocket,
-        &json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "marshal-codex-bridge",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-                "capabilities": { "experimentalApi": true },
-            },
-        }),
-    )
-    .await?;
-    let _ = read_response(websocket, 1).await?;
-    write_rpc(websocket, &json!({ "method": "initialized" })).await?;
+    initialize_app_server(websocket).await?;
 
     write_rpc(
         websocket,
@@ -554,6 +918,30 @@ where
         .and_then(Value::as_str)
         .map(str::to_string)
         .context("turn/start response omitted turn.id")
+}
+
+async fn initialize_app_server<S>(websocket: &mut WebSocketStream<S>) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    write_rpc(
+        websocket,
+        &json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "marshal-codex-bridge",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "capabilities": { "experimentalApi": true },
+            },
+        }),
+    )
+    .await?;
+    let _ = read_response(websocket, 1).await?;
+    write_rpc(websocket, &json!({ "method": "initialized" })).await?;
+    Ok(())
 }
 
 async fn write_rpc<S>(websocket: &mut WebSocketStream<S>, value: &Value) -> Result<()>
@@ -613,6 +1001,8 @@ where
 mod tests {
     use super::*;
     use marshal_entities::{HostInfo, MessageId, MessageReadId};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
     use tokio_tungstenite::accept_async;
 
     fn session(id: &str, host: &str, hook_owned: bool) -> Arc<Session> {
@@ -651,6 +1041,57 @@ mod tests {
             body: "hello".into(),
             sent_at: 2,
         })
+    }
+
+    #[test]
+    fn wake_cooldown_survives_an_empty_unread_snapshot() {
+        let session = SessionId(Arc::from("thread"));
+        let now = Instant::now();
+        let mut cooldowns = HashMap::from([(session.clone(), now + Duration::from_secs(30))]);
+
+        // The inbox has been acknowledged, but the cooldown remains so a
+        // related message moments later does not create a second turn.
+        retain_active_cooldowns(&mut cooldowns, now + Duration::from_secs(1));
+        assert!(cooldowns.contains_key(&session));
+
+        retain_active_cooldowns(&mut cooldowns, now + Duration::from_secs(31));
+        assert!(cooldowns.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_bridges_elect_one_wake_leader_and_fail_over() {
+        let path = std::env::temp_dir().join(format!(
+            "marshal-codex-leader-test-{}.lock",
+            uuid::Uuid::new_v4()
+        ));
+        let now = Instant::now();
+        let mut first = WakeLeadership::at(path.clone());
+        let mut second = WakeLeadership::at(path.clone());
+
+        assert!(!first.ready(now).expect("first acquires and settles"));
+        assert!(!second.ready(now).expect("second observes held lock"));
+        assert!(
+            first
+                .ready(now + WAKE_LEADER_SETTLE)
+                .expect("first becomes ready")
+        );
+
+        drop(first);
+        let takeover = now + WAKE_LEADER_SETTLE + Duration::from_millis(1);
+        assert!(
+            !second
+                .ready(takeover)
+                .expect("second acquires after first exits")
+        );
+        assert!(
+            second
+                .ready(takeover + WAKE_LEADER_SETTLE)
+                .expect("second becomes ready after settling")
+        );
+
+        drop(second);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -694,6 +1135,35 @@ mod tests {
         assert!(loopback_address("ws://192.0.2.10:4500").is_err());
         assert!(loopback_address("wss://127.0.0.1:4500").is_err());
         assert!(loopback_address("ws://127.0.0.1:4500/path").is_err());
+    }
+
+    #[test]
+    fn thread_started_uses_root_session_id_and_cwd() {
+        let notification = json!({
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": "child-thread",
+                    "sessionId": "root-session",
+                    "cwd": "/work/pulse"
+                }
+            }
+        });
+        assert_eq!(
+            thread_registration(&notification),
+            Some(ThreadRegistration {
+                thread_id: "child-thread".into(),
+                session_id: "root-session".into(),
+                cwd: "/work/pulse".into(),
+            })
+        );
+        assert!(
+            thread_registration(&json!({
+                "method": "turn/started",
+                "params": {}
+            }))
+            .is_none()
+        );
     }
 
     async fn serve_fake_app_server<S>(stream: S)
@@ -771,5 +1241,129 @@ mod tests {
         assert_eq!(turn, "turn-456");
         server.await.unwrap();
         let _ = std::fs::remove_file(temp);
+    }
+
+    async fn read_http_request(mut stream: tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let (header_end, content_length) = loop {
+            let n = stream.read(&mut chunk).await.expect("read hook request");
+            assert!(n > 0, "hook request closed before headers");
+            request.extend_from_slice(&chunk[..n]);
+            let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .expect("content length");
+            break (header_end, content_length);
+        };
+        while request.len() < header_end + 4 + content_length {
+            let n = stream.read(&mut chunk).await.expect("read hook body");
+            assert!(n > 0, "hook request closed before body");
+            request.extend_from_slice(&chunk[..n]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("reply to hook request");
+        String::from_utf8(request).expect("UTF-8 hook request")
+    }
+
+    #[tokio::test]
+    async fn lifecycle_subscriber_is_ready_before_registering_thread_started() {
+        use tokio::net::TcpListener as TokioTcpListener;
+
+        let app_listener = TokioTcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake app-server");
+        let app_address = app_listener.local_addr().unwrap();
+        let hook_listener = TokioTcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake hook listener");
+        let hook_address = hook_listener.local_addr().unwrap();
+        let ready_file = std::env::temp_dir().join(format!(
+            "marshal-codex-registration-test-{}.ready",
+            uuid::Uuid::new_v4()
+        ));
+        let (send_notification, receive_notification) = oneshot::channel::<()>();
+
+        let app_server = tokio::spawn(async move {
+            let (stream, _) = app_listener.accept().await.expect("accept bridge");
+            let mut websocket = accept_async(stream).await.expect("WebSocket upgrade");
+            let initialize = websocket.next().await.unwrap().unwrap();
+            let initialize: Value = serde_json::from_str(initialize.to_text().unwrap()).unwrap();
+            assert_eq!(initialize["method"], "initialize");
+            websocket
+                .send(WebSocketMessage::Text(
+                    "{\"id\":1,\"result\":{\"userAgent\":\"test\",\"platformFamily\":\"test\",\"platformOs\":\"test\",\"codexHome\":\"/tmp\"}}"
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let initialized = websocket.next().await.unwrap().unwrap();
+            let initialized: Value = serde_json::from_str(initialized.to_text().unwrap()).unwrap();
+            assert_eq!(initialized["method"], "initialized");
+
+            receive_notification
+                .await
+                .expect("test releases notification");
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "method": "thread/started",
+                        "params": {
+                            "thread": {
+                                "id": "thread-before-prompt",
+                                "sessionId": "session-before-prompt",
+                                "cwd": "/work/before-prompt"
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let hook_server = tokio::spawn(async move {
+            let (stream, _) = hook_listener.accept().await.expect("accept hook request");
+            read_http_request(stream).await
+        });
+        let watcher = tokio::spawn(watch_app_server_registrations(
+            AppServerEndpoint::WebSocket(format!("ws://{app_address}")),
+            format!("http://{hook_address}"),
+            Some(ready_file.clone()),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready_file.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("lifecycle subscriber readiness");
+        send_notification.send(()).unwrap();
+
+        let request = tokio::time::timeout(Duration::from_secs(2), hook_server)
+            .await
+            .expect("eager registration request")
+            .expect("hook server task");
+        assert!(
+            request.starts_with("POST /hook/session-register?"),
+            "unexpected registration request: {request}"
+        );
+        let body = request.split_once("\r\n\r\n").unwrap().1;
+        let body: Value = serde_json::from_str(body).expect("registration JSON");
+        assert_eq!(body["session_id"], "session-before-prompt");
+        assert_eq!(body["cwd"], "/work/before-prompt");
+
+        watcher.abort();
+        app_server.await.unwrap();
+        let _ = fs::remove_file(ready_file);
     }
 }

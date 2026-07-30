@@ -9,12 +9,12 @@
 //!   every reloaded session a fresh grace window.
 //!
 //! - **Pull/hook sessions** (`client_id: None`): an HTTP-MCP agent that
-//!   registered via the `/hook/session-start` endpoint has no WS client at
-//!   all — it would be swept instantly by the client-id rule. Its liveness
-//!   is instead its `last_activity_at` (the hook bumps it every turn) plus
-//!   a long `HOOK_BACKSTOP` grace. The clean teardown path is the explicit
-//!   `/hook/session-end` DEL; this grace is only a backstop for a client
-//!   that crashed without firing SessionEnd. Because `last_activity_at` is
+//!   registered via `/hook/session-register` or `/hook/session-start` has no
+//!   WS client at all — it would be swept instantly by the client-id rule. Its
+//!   liveness is instead its `last_activity_at` (the hooks bump it every turn)
+//!   plus a long `HOOK_BACKSTOP` grace. The clean teardown path is the explicit
+//!   `/hook/session-end` DEL; this grace is only a backstop for a client that
+//!   crashed without firing SessionEnd. Because `last_activity_at` is
 //!   wall-clock and persisted, the backstop survives daemon restarts.
 
 use std::{

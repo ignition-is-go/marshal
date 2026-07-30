@@ -402,11 +402,9 @@ async fn serve() -> Result<()> {
     // Codex gets the hook-injected <marshal_inbox> block (it has no server→model
     // push). Describe the one this agent actually gets.
     let inbound_line = if is_codex {
-        "Inbound peer messages are injected into your turn automatically as a \
-         `<marshal_inbox>` block; reply with `send_message` or `broadcast`."
+        "Inbound direct messages appear as an injected `<marshal_inbox>` block."
     } else {
-        "Inbound peer messages arrive as `notifications/claude/channel` events; \
-         reply with `send_message` or `broadcast`."
+        "Inbound direct messages arrive as `notifications/claude/channel` events."
     };
     // Identity line is harness-aware. Under Codex the shim owns no session id
     // (its `session_id` here is a placeholder), so asserting it would tell the
@@ -414,11 +412,9 @@ async fn serve() -> Result<()> {
     // block the SessionStart hook injects. Claude's shim owns the real id.
     let identity_line = if is_codex {
         format!(
-            "You are a marshal-connected session in {cwd}. Your marshal identity \
-             (session id + nickname) is in the <marshal_session> block injected at \
-             session start; pass that id as `asSession` on write tools and \
-             `?asSession=<id>` on reads — this MCP server isn't told which Codex \
-             session it serves."
+            "You are a marshal-connected Codex session in {cwd}. Use the id from \
+             <marshal_session> as `asSession` on writes and `?asSession=` on \
+             caller-relative reads."
         )
     } else {
         format!("You are marshal session {} in {cwd}.", session_id.0)
@@ -427,24 +423,18 @@ async fn serve() -> Result<()> {
         name: "marshal-shim".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         instructions: format!(
-            "{identity_line} Coordinate with sibling \
-             coding-agent sessions via the marshal daemon.\n\
+            "{identity_line} Coordinate with sibling coding-agent sessions via Marshal.\n\
              \n\
-             Read state via the `marshal://` resources (whoami, roster, rooms, \n\
-             messages) and act via the marshal tools (send_message, broadcast, \n\
-             join_room, leave_room, set_status, ack_messages); each resource and \n\
-             tool documents its own usage.\n\
+             Read state via `marshal://` resources; write via Marshal tools.\n\
              \n\
-             Each session has a memorable `nickname` (e.g. `swift-falcon`) — a \
-             deterministic adjective-noun derived from its session_id, shown in \
-             its statusline and in marshal://roster. Address peers by nickname, \
-             session_id, or session_id prefix (send_message resolves any of \
-             them). To reach a HUMAN rather than one specific agent, address \
-             their operator identity — the email on their roster row, e.g. \
-             `max@lucid.rocks` (or `op:`/`human:`-prefixed) — and it routes to \
-             whichever of their agents is currently most active. The \
-             `swift-falcon` after a peer's path is its nickname, NOT a git \
-             branch or commit.\n\
+             Address peers by nickname, session id, or id prefix. Address a human \
+             by the operator email on the roster; it routes to their most-active \
+             agent.\n\
+             \n\
+             Direct messages interrupt recipients and consume transcript context. \
+             Batch related information and reserve them for action, blockers, or \
+             needed replies. Use an ambient room broadcast without `@mention` for \
+             FYI/progress; an `@mention` is also a direct interrupt.\n\
              \n\
              {inbound_line}",
         ),

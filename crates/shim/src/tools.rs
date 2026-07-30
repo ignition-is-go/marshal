@@ -413,23 +413,6 @@ fn send_message_output(result: &SendMessageResult) -> Value {
     // returns, so `wake=unobserved` is an observation boundary, not a failure.
     let live_push = result.effective_live_push();
     let wake = result.effective_wake();
-    let note = match live_push {
-        marshal_entities::LivePushStatus::Delivered => {
-            "Message persisted; live-channel push delivered. No asynchronous wake was needed."
-        }
-        marshal_entities::LivePushStatus::Unavailable => {
-            "Message persisted; no live-channel push was available. Wake handling, if \
-             configured, is asynchronous and is not observed by this response."
-        }
-        marshal_entities::LivePushStatus::Failed => {
-            "Message persisted; the live-channel push failed. Wake handling, if configured, \
-             is asynchronous and is not observed by this response."
-        }
-        marshal_entities::LivePushStatus::Unknown => {
-            "Message persisted; live-channel push status is unknown. Wake handling is \
-             asynchronous and is not observed by this response."
-        }
-    };
     json!({
         "message_id": result.message_id.0.as_ref(),
         "to_session_id": result.to_session_id.0.as_ref(),
@@ -442,7 +425,6 @@ fn send_message_output(result: &SendMessageResult) -> Value {
         "delivered": true,
         "delivery": if result.delivered_live { "live" } else { "inbox" },
         "delivered_live": result.delivered_live,
-        "note": note,
     })
 }
 
@@ -460,7 +442,48 @@ async fn broadcast(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolErr
     let result = await_command(cell, REQUEST_TIMEOUT)
         .await
         .map_err(ToolError::invalid_params)?;
-    Ok(ToolOutcome::Json(json!(result)))
+    Ok(ToolOutcome::Json(broadcast_message_output(&result)))
+}
+
+const TOOL_RESULT_LIST_MAX: usize = 10;
+
+fn broadcast_message_output(result: &BroadcastMessageResult) -> Value {
+    // Large rooms must not echo one recipient row per member into the sender's
+    // model transcript. Keep totals plus bounded details for the exceptional
+    // cases the caller may need to act on.
+    let failed: Vec<Value> = result
+        .failed
+        .iter()
+        .take(TOOL_RESULT_LIST_MAX)
+        .map(|recipient| {
+            json!({
+                "session_id": recipient.session_id.0.as_ref(),
+                "reason": recipient.reason,
+            })
+        })
+        .collect();
+    let mentioned: Vec<&str> = result
+        .mentioned
+        .iter()
+        .take(TOOL_RESULT_LIST_MAX)
+        .map(|session| session.0.as_ref())
+        .collect();
+    let failed_omitted = result.failed.len().saturating_sub(failed.len());
+    let mentioned_omitted = result.mentioned.len().saturating_sub(mentioned.len());
+    json!({
+        "message_id": result.message_id.0.as_ref(),
+        "to_room_id": result.to_room_id.0.as_ref(),
+        "to_room_name": result.to_room_name,
+        "sent_at": result.sent_at,
+        "total": result.total,
+        "delivered_count": result.delivered.len(),
+        "failed_count": result.failed.len(),
+        "failed": failed,
+        "failed_omitted": failed_omitted,
+        "mentioned_count": result.mentioned.len(),
+        "mentioned": mentioned,
+        "mentioned_omitted": mentioned_omitted,
+    })
 }
 
 async fn join_room(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
@@ -543,7 +566,7 @@ fn write_schema(is_codex: bool, mut properties: Value, required: &[&str]) -> Val
                 "asSession".into(),
                 json!({
                     "type": "string",
-                    "description": "YOUR own marshal session id — copy it from the <marshal_session> block injected at session start. Required so peers see who sent this and can reply to the right session."
+                    "description": "Your session id from <marshal_session>."
                 }),
             );
         }
@@ -567,10 +590,10 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates. Make the body explicit: what you need, any action you expect, and whether you want a reply/decision or are just informing (FYI) — vague or unaddressed asks get misread, ignored, or duplicated. On success `persisted` confirms durable storage, `live_push` reports only the synchronous live-channel push, and `wake` reports whether asynchronous wake was observed. The compatibility fields `delivery` / `delivered_live` describe only `live_push`; `false` does not mean a later wake failed.".into(),
+            description: "Direct messages interrupt one recipient and consume transcript context. Use them for action, blockers, or needed replies; batch related details. Put FYI/progress in an ambient broadcast without @mention. Address by nickname, session id/prefix, or operator email. `persisted` confirms storage; `live_push` covers synchronous delivery; `wake` may remain `unobserved` because wake happens asynchronously.".into(),
             input_schema: write_schema(is_codex,
                 json!({
-                    "to":   { "type": "string", "description": "Recipient: a nickname (e.g. `swift-falcon`), full `session_id`, session_id prefix, or an operator identity/email (e.g. `max@lucid.rocks`) to reach the human via their most-active agent — all from marshal://roster." },
+                    "to":   { "type": "string", "description": "Nickname, session id/prefix, or operator email from the roster." },
                     "body": { "type": "string", "description": "Message body." }
                 }),
                 &["to", "body"],
@@ -578,7 +601,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "broadcast".into(),
-            description: "Ambient fan-out to a room — the message is addressed to the room and surfaced there (marshal UI / `marshal://messages room=…`), NOT injected into members' turns, so it never hijacks anyone's context. To pull a specific peer in, @mention them in the body (`@swift-falcon`, or `@max@lucid.rocks` to reach a human): each resolved handle ALSO gets a real direct message (inbox + live push), even if they aren't in the room — so @mention is a genuine interrupt, not casual chat syntax: use it only for a peer you specifically need to pull in. Returns delivered + the resolved `mentioned` list; errors if the room has no other members.".into(),
+            description: "Ambient room update, preferred for FYI/progress because it is not injected into members' turns. An @mention also creates a direct interrupt, so use one only when that peer needs to act or reply. Returns counts plus bounded failure and mention details.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },
@@ -632,7 +655,7 @@ pub fn resources_def(is_codex: bool) -> Vec<ResourceDef> {
     // caller from its WS connection, so this note is Codex-only. roster/rooms
     // need no caller and are unaffected.
     let codex_as = if is_codex {
-        " Under Codex, pass your own id as `?asSession=<id>` (from the <marshal_session> block) — without it whoami can't name you and messages is rejected."
+        " Under Codex, add `?asSession=<id>` using <marshal_session>."
     } else {
         ""
     };
@@ -796,7 +819,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marshal_entities::{LivePushStatus, WakeStatus};
+    use marshal_entities::{DeliveredRecipient, FailedRecipient, LivePushStatus, WakeStatus};
 
     fn result(
         live_push: LivePushStatus,
@@ -825,10 +848,7 @@ mod tests {
         assert_eq!(output["live_push"], "unavailable");
         assert_eq!(output["wake"], "unobserved");
         assert_eq!(output["delivered_live"], false);
-        let note = output["note"].as_str().expect("note");
-        assert!(note.contains("not observed"));
-        assert!(!note.contains("next turn"));
-        assert!(!note.contains("wake failed"));
+        assert!(output.get("note").is_none());
     }
 
     #[test]
@@ -843,5 +863,42 @@ mod tests {
         assert_eq!(output["live_push"], "delivered");
         assert_eq!(output["wake"], "not_needed");
         assert_eq!(output["delivered_live"], true);
+    }
+
+    #[test]
+    fn broadcast_output_bounds_recipient_details() {
+        let delivered = (0..15)
+            .map(|index| DeliveredRecipient {
+                session_id: SessionId(Arc::from(format!("delivered-{index}"))),
+            })
+            .collect();
+        let failed = (0..15)
+            .map(|index| FailedRecipient {
+                session_id: SessionId(Arc::from(format!("failed-{index}"))),
+                reason: "gone".into(),
+            })
+            .collect();
+        let mentioned = (0..15)
+            .map(|index| SessionId(Arc::from(format!("mentioned-{index}"))))
+            .collect();
+        let output = broadcast_message_output(&BroadcastMessageResult {
+            message_id: MessageId(Arc::from("message-1")),
+            to_room_id: RoomId(Arc::from("everyone")),
+            to_room_name: "Everyone".into(),
+            sent_at: 123,
+            total: 30,
+            delivered,
+            failed,
+            mentioned,
+        });
+
+        assert_eq!(output["delivered_count"], 15);
+        assert_eq!(output["failed_count"], 15);
+        assert_eq!(output["failed"].as_array().unwrap().len(), 10);
+        assert_eq!(output["failed_omitted"], 5);
+        assert_eq!(output["mentioned_count"], 15);
+        assert_eq!(output["mentioned"].as_array().unwrap().len(), 10);
+        assert_eq!(output["mentioned_omitted"], 5);
+        assert!(output.get("delivered").is_none());
     }
 }

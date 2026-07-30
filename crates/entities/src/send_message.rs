@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    message::{Message, MessageId},
+    message::{CONTEXT_BODY_MAX_CHARS, Message, MessageId, context_preview},
     message_read::{MessageRead, MessageReadId},
     notify::NotifyChannel,
     session::{GetAllSessions, Session, SessionId, resolve_caller},
@@ -179,19 +179,21 @@ impl CommandHandler for SendMessage {
         // window before the assignment saga has run. The full id stays in `meta`
         // for exact reply routing; `from_nickname` lets an agent reply by name.
         let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
+        let (context_body, body_truncated) = context_preview(&msg.body, CONTEXT_BODY_MAX_CHARS);
         let live_push = match recipient.client_id.as_ref() {
             Some(cid) if recipient_can_render => {
                 if push_to_client(
                     cid.0.as_ref(),
                     // Concise origin ping only — no leading "marshal:" (Claude
                     // already prefixes the channel name, else it reads "marshal:
-                    // marshal:") and no body (it would just be a truncated banner;
-                    // the full body is in `meta.body`, the persisted Message, and
-                    // the inbox).
+                    // marshal:") and no body (it would just be a truncated
+                    // banner). `meta.body` is a bounded model-context preview;
+                    // the persisted Message retains the complete body.
                     format!("new message from {from_nickname}"),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "new_message",
+                        "message_id": msg.id.0.as_ref(),
                         "from_session": sender.id.0.as_ref(),
                         "from_nickname": from_nickname,
                         "to_session": recipient.id.0.as_ref(),
@@ -199,7 +201,8 @@ impl CommandHandler for SendMessage {
                         // identity: the receiving agent should surface it to that
                         // operator, not treat it as ordinary peer chatter.
                         "to_operator": to_operator,
-                        "body": self.body,
+                        "body": context_body,
+                        "body_truncated": body_truncated,
                         "sent_at": now,
                     }),
                 ) {

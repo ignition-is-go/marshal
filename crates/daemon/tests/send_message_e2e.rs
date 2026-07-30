@@ -250,8 +250,8 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     }
     let push = received.lock().unwrap().take().expect("push");
     // The channel banner is a concise origin ping by the sender's nickname —
-    // NOT the body (which would just be a truncated banner). The full body
-    // travels in meta.body (and the persisted Message / inbox).
+    // NOT the body (which would just be a truncated banner). A bounded preview
+    // travels in meta.body; the persisted Message / inbox retains the full body.
     assert_eq!(
         push.content,
         format!(
@@ -270,6 +270,11 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         push.meta.get("body"),
         Some(&serde_json::json!("hello bravo"))
     );
+    assert_eq!(
+        push.meta.get("body_truncated"),
+        Some(&serde_json::json!(false))
+    );
+    assert!(push.meta.get("message_id").is_some());
     assert_eq!(
         push.meta.get("kind"),
         Some(&serde_json::json!("new_message"))

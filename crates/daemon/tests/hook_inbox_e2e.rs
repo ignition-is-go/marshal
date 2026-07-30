@@ -1,6 +1,8 @@
-//! End-to-end test of the `/hook/*` HTTP listener — the flag-independent
-//! inbox-delivery path. A stored message MUST surface in the
-//! `<marshal_inbox>` block returned by `POST /hook/prompt-submit`.
+//! End-to-end test of the `/hook/*` HTTP listener — registration plus the
+//! flag-independent inbox-delivery path. Eager registration MUST create the
+//! session without consuming context, and a stored message MUST subsequently
+//! surface in the `<marshal_inbox>` block returned by
+//! `POST /hook/prompt-submit`.
 //!
 //! This guards the daemon side of the path whose *deploy* misconfiguration
 //! (hook listener on the wrong port / bound to loopback) silently broke
@@ -14,7 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use marshal_entities::{SendMessage, Session, SessionId};
+use marshal_entities::{GetAllMessages, Message, SendMessage, Session, SessionId};
 use myko::{
     command::{CommandContext, CommandHandler},
     entities::client::ClientId,
@@ -117,16 +119,9 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     let server: &'static CellServer = Box::leak(Box::new(server));
     let _ = server;
 
-    // sender + recipient; store a message for the recipient via the real command.
+    // Seed the sender; the recipient is created through the real eager
+    // registration route below.
     set_session(&ctx, &session("sender", Some("c-sender")));
-    set_session(&ctx, &session("recipient", None));
-    SendMessage {
-        to_session_id: SessionId(Arc::from("recipient")),
-        body: "HOOK-E2E-PROBE-marker".into(),
-        as_session: None,
-    }
-    .execute(cmd_ctx(&ctx, Some("c-sender")))
-    .expect("send persists");
 
     // bring up the real /hook/* HTTP listener on a free port, sharing ctx.
     let port = pick_free_port();
@@ -142,6 +137,33 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         });
     });
     wait_listening(addr);
+
+    // App-server lifecycle discovery creates the hook-owned session before
+    // any user prompt. Registration has no model turn to receive context, so
+    // its response must stay empty.
+    let registration = http_post(
+        addr,
+        "/hook/session-register?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert_eq!(registration, "", "registration must not inject context");
+
+    // The successful send proves the registration route created a routable
+    // Session row. Register it again after the message is stored to prove a
+    // refresh cannot surface or acknowledge that unread message.
+    SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "HOOK-E2E-PROBE-marker".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists to eagerly registered recipient");
+    let refresh = http_post(
+        addr,
+        "/hook/session-register?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert_eq!(refresh, "", "registration refresh must not inject context");
 
     // the recipient's prompt-submit hook must surface the stored message.
     let body = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
@@ -164,6 +186,41 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     assert!(
         !body2.contains("HOOK-E2E-PROBE-marker"),
         "message re-surfaced after a successful hook write — the post-write ack didn't run; got: {body2:?}"
+    );
+
+    // Automatic delivery carries a bounded, UTF-8-safe preview. The complete
+    // durable Message remains queryable even after the preview is acknowledged.
+    let long_body = format!("LONG-{}-TAIL", "é".repeat(3_000));
+    SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: long_body.clone(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists long message");
+    let stored: Vec<Arc<Message>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessages {})
+        .expect("query durable messages");
+    assert!(
+        stored.iter().any(|message| message.body == long_body),
+        "durable Message must retain the complete body"
+    );
+
+    let bounded = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
+    assert!(bounded.contains("LONG-"));
+    assert!(!bounded.contains("-TAIL"), "hook leaked the complete body");
+    assert!(
+        bounded.contains("[truncated; full message"),
+        "hook did not identify the bounded preview: {bounded:?}"
+    );
+    assert!(
+        bounded.chars().count() < 3_000,
+        "automatic inbox context exceeded its per-message bound"
+    );
+    let after_bounded = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
+    assert!(
+        !after_bounded.contains("LONG-"),
+        "bounded preview re-surfaced after successful hook write"
     );
 
     // a wrong /hook path must 404 (the misroute that caused the outage).

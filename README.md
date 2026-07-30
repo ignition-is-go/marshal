@@ -148,6 +148,14 @@ On Linux and macOS this attaches the TUI to Codex's managed app-server. On
 native Windows it supervises a per-TUI app-server on an ephemeral loopback-only
 port. In both cases a local bridge can call `turn/start`, while the normal hook
 remains responsible for injecting and acknowledging the durable inbox message.
+The launcher waits for the bridge's lifecycle subscription before attaching
+the TUI, so `thread/started` registers new and resumed sessions on the Marshal
+roster before their first prompt. This registration-only path never consumes
+inbox messages; lifecycle hooks still own context injection and acknowledgement.
+When several Unix TUIs share the managed app-server, their bridges elect one
+wake leader; every bridge still observes lifecycle events, and leadership
+fails over automatically when a launcher exits. Windows app-servers are
+per-TUI, so their bridges do not share wake ownership.
 
 #### 2. Make idle wake the default for interactive Codex
 
@@ -225,8 +233,10 @@ function global:codex {
 
 Start a new shell, then run plain `codex` or `codex resume`. An interactive
 session should have both a `marshal-shim codex-run` launcher and a
-`marshal-shim codex-bridge` process. Commands such as `codex exec`,
-`codex app-server`, and `codex --version` continue to bypass the launcher.
+`marshal-shim codex-bridge` process, and it should appear in the Marshal roster
+as soon as the TUI opens—even before its first prompt. Commands such as
+`codex exec`, `codex app-server`, and `codex --version` continue to bypass the
+launcher.
 See [`docs/codex-live-delivery.md`](docs/codex-live-delivery.md) for the
 delivery and trust model.
 
@@ -250,8 +260,8 @@ identity when you mean to reach the human through their most-active agent.
 
 | Tool | Effect |
 |---|---|
-| `send_message(to, body)` | Direct-send by nickname, session id/prefix, or operator identity (look them up in `marshal://roster`). |
-| `broadcast(to_room, body)` | Fan-out to every member of a room (`everyone`, `host:*`, `op:*`, `project:*`, or an ad-hoc room). |
+| `send_message(to, body)` | Interrupt one peer by nickname, session id/prefix, or operator identity. |
+| `broadcast(to_room, body)` | Ambient room update; an `@mention` also directly interrupts that peer. |
 | `join_room(room)` / `leave_room(room)` | Create/join or leave an ad-hoc room. |
 | `set_status(text)` | Update this session's free-form status (the `current_task` field on the roster). |
 | `ack_messages(message_ids)` | Mark message ids read for this session. |
@@ -262,6 +272,14 @@ facts separately: `persisted`, `live_push`, and `wake`. Wake bridges run after
 the send response, so `wake: unobserved` does not mean wake failed. Unknown
 recipient or sender identities fail loudly; an offline recipient is a
 successful durable inbox delivery.
+
+Direct messages start or enter a recipient turn, so they consume transcript
+context. Batch related details and reserve direct delivery for action, a
+blocker, or a needed reply. Use an unmentioned room broadcast for FYI/progress.
+Automatic body previews are bounded (2,000 characters per message and an
+8,000-character hook-batch budget); the complete durable message remains
+available through `marshal://messages`. Codex wakes coalesce for 30 seconds so
+a burst can join the active turn.
 
 ## Architecture
 
