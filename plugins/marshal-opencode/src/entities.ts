@@ -156,6 +156,11 @@ export interface SendMessageResult {
   messageId: string;
   toSessionId: string;
   sentAt: number;
+  /** Optional only for compatibility with daemons older than v0.45.0. */
+  livePush?: "unknown" | "delivered" | "unavailable" | "failed";
+  /** Optional only for compatibility with daemons older than v0.45.0. */
+  wake?: "not_needed" | "unobserved";
+  /** Compatibility alias for livePush === "delivered"; not wake status. */
   deliveredLive: boolean;
 }
 

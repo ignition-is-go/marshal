@@ -38,6 +38,22 @@ Only unread direct messages are wake candidates. Room broadcasts are ambient,
 and the hook continues to frame peer content as untrusted coordination input:
 a peer cannot expand the operator's task or authority merely by waking a turn.
 
+## Send status model
+
+`send_message` returns as soon as the daemon has persisted the message and
+finished any synchronous live-channel push. A Codex bridge observes the unread
+message later, so the send response cannot claim whether `turn/start`
+succeeded:
+
+- `persisted: true` confirms durable message storage;
+- `live_push` is `delivered`, `unavailable`, `failed`, or `unknown`;
+- `wake` is `not_needed` after a delivered live push, otherwise `unobserved`.
+
+`unobserved` is deliberately not `failed`: a configured bridge may wake the
+recipient immediately after the send response, as happened in the normal idle
+Codex path. The legacy `delivery` and `delivered_live` fields remain for
+compatibility, but describe only the synchronous live push.
+
 ## Running it
 
 First install the normal Codex integration:

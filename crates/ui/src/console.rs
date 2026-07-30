@@ -16,7 +16,8 @@
 use leptos::prelude::*;
 use marshal_entities::{
     BroadcastMessage, BroadcastMessageResult, GetAllRooms, GetAllSessions, HostInfo, JoinRoom,
-    JoinRoomResult, RoomId, SendMessage, SendMessageResult, Session, SessionId,
+    JoinRoomResult, LivePushStatus, RoomId, SendMessage, SendMessageResult, Session, SessionId,
+    WakeStatus,
 };
 use myko::client::MykoClient;
 use myko::wire::event::{MEvent, MEventType};
@@ -351,7 +352,10 @@ fn Compose(
             },
             move |res| match res {
                 Ok(r) => {
-                    note.set(Some(delivered_note(r.delivered_live)));
+                    note.set(Some(delivered_note(
+                        r.effective_live_push(),
+                        r.effective_wake(),
+                    )));
                     dm_body.set(String::new());
                 }
                 Err(e) => err.set(Some(e)),
@@ -520,7 +524,10 @@ pub fn ReplyBox(target: String) -> impl IntoView {
             },
             move |res| match res {
                 Ok(r) => {
-                    note.set(Some(delivered_note(r.delivered_live)));
+                    note.set(Some(delivered_note(
+                        r.effective_live_push(),
+                        r.effective_wake(),
+                    )));
                     body.set(String::new());
                 }
                 Err(e) => err.set(Some(e)),
@@ -582,14 +589,33 @@ const CONSOLE_CSS: &str = r#"
 .reply-live { display: flex; flex-direction: column; gap: 8px; }
 "#;
 
-/// Human-legible send outcome: did the message wake the agent NOW (a live
-/// channel push landed) or is it queued in the agent's inbox until it next
-/// takes a turn? `delivered_live=false` is normal for a flagless/idle recipient
-/// — the inbox still delivers — so say that instead of a bare boolean.
-fn delivered_note(delivered_live: bool) -> String {
-    if delivered_live {
-        "delivered live ✓ — the agent saw it now".to_string()
-    } else {
-        "queued ✓ — the agent will see it on its next turn (inbox)".to_string()
+/// Human-legible send outcome with the same observation boundary as the wire
+/// result: persistence is certain, live push is synchronous, wake is not.
+fn delivered_note(live_push: LivePushStatus, wake: WakeStatus) -> String {
+    let push = match live_push {
+        LivePushStatus::Delivered => "live push delivered",
+        LivePushStatus::Unavailable => "no live push available",
+        LivePushStatus::Failed => "live push failed",
+        LivePushStatus::Unknown => "live push unknown",
+    };
+    let wake = match wake {
+        WakeStatus::NotNeeded => "wake not needed",
+        WakeStatus::Unobserved => "asynchronous wake unobserved",
+    };
+    format!("stored ✓ — {push}; {wake}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inbox_note_does_not_promise_a_future_turn() {
+        let note = delivered_note(LivePushStatus::Unavailable, WakeStatus::Unobserved);
+        assert_eq!(
+            note,
+            "stored ✓ — no live push available; asynchronous wake unobserved"
+        );
+        assert!(!note.contains("next turn"));
     }
 }

@@ -21,7 +21,8 @@ use std::{
 
 use hyphae::Gettable;
 use marshal_entities::{
-    GetAllSessions, Message, NotifyChannel, SendMessage, SendMessageResult, Session, SessionId,
+    GetAllSessions, LivePushStatus, Message, NotifyChannel, SendMessage, SendMessageResult,
+    Session, SessionId, WakeStatus,
 };
 use myko::{
     client::{ConnectionStatus, MykoClient, MykoProtocol},
@@ -234,6 +235,9 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     }
     let result = response_cell.get().expect("got response").expect("ok");
     assert_eq!(result.to_session_id.0.as_ref(), "sess-bravo");
+    assert_eq!(result.live_push, LivePushStatus::Delivered);
+    assert_eq!(result.wake, WakeStatus::NotNeeded);
+    assert!(result.delivered_live);
 
     // The NotifyChannel push should have landed on B before the response
     // returned (handler emits both inline). Don't wait long — if it isn't
@@ -279,8 +283,8 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         Some(&serde_json::json!(marshal_entities::nickname("sess-alpha")))
     );
 
-    // And the server persisted exactly one Message — only after the push
-    // succeeded.
+    // And the server persisted exactly one Message. Persistence happens before
+    // the best-effort push so a failed push cannot lose the message.
     assert_eq!(
         message_count(&server.ctx),
         1,
@@ -373,6 +377,8 @@ fn live_client_with_channels_off_is_not_delivered_live() {
         !result.delivered_live,
         "channels-off recipient must report delivered_live=false (queued to inbox), not a phantom live delivery"
     );
+    assert_eq!(result.live_push, LivePushStatus::Unavailable);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
     // No push should have been emitted (it'd be dropped anyway).
     thread::sleep(Duration::from_millis(200));
     assert!(

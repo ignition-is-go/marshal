@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { MarshalDaemon } from "../src/daemon.js";
+import type { NotifyChannelMeta } from "../src/entities.js";
 import type { Identity } from "../src/identity.js";
 
 function resolveDaemonBin(): string | null {
@@ -159,27 +160,33 @@ suite("marshal-opencode ↔ real marshal-daemon", () => {
     expect(a?.project).toBe("marshal-opencode");
   }, 20_000);
 
-  test("a sent message lands in the recipient's inbox, then acks", async () => {
+  test("a sent message reports live push separately and does not duplicate into the inbox", async () => {
+    const seen: NotifyChannelMeta[] = [];
+    daemonB.onNotify((meta) => seen.push(meta));
+
     const res = await daemonA.sendMessage(A, B, "hello from alice");
     expect(res.messageId).toBeString();
     expect(res.toSessionId).toBe(B);
-    // SendMessageResult.deliveredLive — assert the field exists with its real
-    // type so a Rust-side rename/retype of the result is caught here.
-    expect(typeof res.deliveredLive).toBe("boolean");
+    // The result separates synchronous live push from asynchronous wake.
+    expect(res.livePush).toBe("delivered");
+    expect(res.wake).toBe("not_needed");
+    // Compatibility alias remains while older plugin consumers migrate.
+    expect(res.deliveredLive).toBe(true);
+    expect(
+      await waitFor(() => seen.some((meta) => meta.body === "hello from alice"), 5_000),
+    ).toBe(true);
 
     // The sender is labeled by its daemon-ASSIGNED handle now (the plugin reads
     // it from the roster, it doesn't recompute). Wait for the assignment to
-    // reach our cache, then assert a real adjective-noun handle shows.
+    // reach our cache, then assert the push carried that handle.
     await waitFor(() => daemonB.nicknameFor(A) !== A, 5000);
     const aHandle = daemonB.nicknameFor(A);
-    const inbox = await daemonB.drainInbox(B);
-    expect(inbox).toContain("hello from alice");
     expect(aHandle).toContain("-");
-    expect(inbox).toContain(aHandle);
+    expect(seen.find((meta) => meta.body === "hello from alice")?.from_nickname).toBe(aHandle);
 
-    // Acked on first drain → second drain is empty.
-    const again = await daemonB.drainInbox(B);
-    expect(again).toBeNull();
+    // A delivered live push marks the durable copy read, preventing a second
+    // delivery when the next user turn drains the inbox.
+    expect(await daemonB.drainInbox(B)).toBeNull();
   }, 20_000);
 
   test("inbound message pushes a real-time NotifyChannel to the recipient", async () => {
@@ -218,8 +225,8 @@ suite("marshal-opencode ↔ real marshal-daemon", () => {
     expect(res!.total).toBeGreaterThanOrEqual(1);
     expect(res!.delivered.length).toBeGreaterThanOrEqual(1);
 
-    const inboxB = await daemonB.drainInbox(B);
-    expect(inboxB).toContain("hello everyone");
+    // Room broadcasts are ambient history, not direct inbox messages.
+    expect(await daemonB.drainInbox(B)).toBeNull();
   }, 20_000);
 
   test("set_status surfaces on the roster", async () => {

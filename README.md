@@ -1,10 +1,13 @@
 # marshal
 
-A coordination service that lets multiple Claude Code sessions — on one machine or spread across a network — see each other and pass messages. After install, the `roster` resource shows every other live session, `send_message` reaches them, and inbound peer messages surface in your transcript as `<channel>` blocks.
+A coordination service that lets Claude Code, Codex, and opencode sessions—on
+one machine or spread across a network—see each other and pass messages. After
+install, the `roster` resource shows every live session, `send_message` reaches
+them, and harness-specific delivery surfaces inbound peer messages.
 
 ## Install
 
-Three steps — install the binaries, run the daemon, register the plugin.
+Install the binaries, run the daemon, then wire the harnesses you use.
 
 ### 1. Install the binaries
 
@@ -89,39 +92,150 @@ Without the flag, `roster` and `send_message` still work — peer messages just 
 
 We're submitting marshal for inclusion in the official allowlist; once approved, plain `claude` will accept the notifications and the flag becomes unnecessary.
 
-### Codex: immediate delivery to idle agents
+### Codex: local setup without Ansible
 
-`marshal-shim codex-setup --daemon ws://<marshal-host>:6155` installs the
-Marshal MCP server and Codex lifecycle hooks. With a normal `codex` launch,
-those hooks inject direct messages at the next prompt or tool boundary.
+These steps give a laptop, workstation, or manually managed VM the same
+Marshal behavior as an infrastructure-managed host. You need a reachable
+`marshal-daemon`: use the daemon from step 2 above, or substitute the address
+of a shared daemon. Install the Codex CLI itself first and confirm that `codex`
+is on `PATH`.
 
-To let a direct message start a turn while the agent is idle, launch the
-interactive CLI through:
+#### 1. Install and wire the shim
+
+On Linux x86-64 or macOS, the release installer downloads the correct shim,
+copies it to `~/.local/bin`, adds the Marshal MCP server and lifecycle hooks to
+`~/.codex/config.toml`, seeds the coordination instructions in
+`~/.codex/AGENTS.md`, and pre-trusts the hooks:
+
+```bash
+curl -fsSL \
+  https://github.com/ignition-is-go/marshal/releases/latest/download/install-codex.sh \
+  | sh -s -- --daemon ws://<marshal-host>:6155
+```
+
+On Windows x64, run this from PowerShell:
+
+```powershell
+$download = Join-Path $env:TEMP 'marshal-shim.exe'
+Invoke-WebRequest `
+  -Uri 'https://github.com/ignition-is-go/marshal/releases/latest/download/marshal-shim-x86_64-pc-windows-gnu.exe' `
+  -OutFile $download
+& $download codex-setup --daemon 'ws://<marshal-host>:6155'
+```
+
+Windows installs the stable copy under
+`%LOCALAPPDATA%\marshal\bin` and adds that directory to the user `PATH`.
+Restart the shell after setup. Both commands are idempotent; rerun them to
+refresh the shim, hooks, or daemon address.
+
+For a source build, install `marshal-shim` with Cargo and run the same setup
+command:
+
+```bash
+cargo install marshal-shim
+marshal-shim codex-setup --daemon ws://<marshal-host>:6155
+```
+
+A normal `codex` launch now gets the Marshal tools and pulls direct messages
+at prompt and tool boundaries. For a message to start a turn while Codex is
+idle, the interactive CLI must run through:
 
 ```bash
 marshal-shim codex-run [CODEX_ARGS...]
 ```
 
-On Unix this starts Codex's managed app-server, attaches the TUI with
-`codex --remote unix://`, and runs a local bridge for the lifetime of the TUI.
-On native Windows it supervises a per-TUI app-server on an ephemeral
-loopback-only WebSocket port. In both cases the bridge can start a turn when a
-direct Marshal message arrives; it exits with the TUI.
-The message remains durable and unread until the existing
-`UserPromptSubmit` hook injects its `<marshal_inbox>` block, so a failed wake
-does not lose it. Room broadcasts remain ambient.
+On Linux and macOS this attaches the TUI to Codex's managed app-server. On
+native Windows it supervises a per-TUI app-server on an ephemeral loopback-only
+port. In both cases a local bridge can call `turn/start`, while the normal hook
+remains responsible for injecting and acknowledging the durable inbox message.
 
-There is currently no Codex `config.toml` key equivalent to the `--remote`
-flag. To make immediate delivery the default for fleet-managed agents, point
-the interactive Codex launcher at `marshal-shim codex-run`; keep
-non-interactive commands such as `codex exec` on the real Codex binary. See
-[`docs/codex-live-delivery.md`](docs/codex-live-delivery.md) for the rollout
-and trust model. The managed Unix control socket makes this path Linux/macOS
-only for now.
+#### 2. Make idle wake the default for interactive Codex
+
+Codex does not currently expose the shared app-server choice as a
+`config.toml` setting, so make `codex-run` the interactive shell launcher.
+Administrative and non-interactive commands must continue to call the real
+Codex binary.
+
+For Bash, add the following to `~/.bashrc`. For Zsh, add it to `~/.zshrc` and
+replace `type -P codex` with `whence -p codex`:
+
+```bash
+export MARSHAL_CODEX_BIN="$(type -P codex)"
+
+codex() {
+    local arg direct=0
+    for arg in "$@"; do
+        case "$arg" in
+            exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|a|archive|delete|unarchive|cloud|exec-server|features|help|-h|--help|-V|--version|--remote|--remote=*)
+                direct=1
+                ;;
+        esac
+    done
+
+    if [ "$direct" -eq 1 ]; then
+        "$MARSHAL_CODEX_BIN" "$@"
+    else
+        "$HOME/.local/bin/marshal-shim" codex-run "$@"
+    fi
+}
+```
+
+For Windows PowerShell, add this to
+`$PROFILE.CurrentUserAllHosts` after opening a fresh shell:
+
+```powershell
+$script:MarshalCodexBin = (Get-Command codex -CommandType Application).Source
+$script:MarshalShimBin = (Get-Command marshal-shim -CommandType Application).Source
+
+function global:codex {
+    $directCommands = @(
+        'exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin',
+        'mcp-server', 'app-server', 'remote-control', 'completion', 'update',
+        'doctor', 'sandbox', 'debug', 'apply', 'a', 'archive', 'delete',
+        'unarchive', 'cloud', 'exec-server', 'features', 'help', '-h',
+        '--help', '-V', '--version'
+    )
+    $direct = $false
+    foreach ($argument in $args) {
+        $value = [string]$argument
+        if (
+            $directCommands -contains $value -or
+            $value -eq '--remote' -or
+            $value.StartsWith('--remote=')
+        ) {
+            $direct = $true
+            break
+        }
+    }
+
+    if ($direct) {
+        & $script:MarshalCodexBin @args
+        return
+    }
+
+    $previous = $env:MARSHAL_CODEX_BIN
+    try {
+        $env:MARSHAL_CODEX_BIN = $script:MarshalCodexBin
+        & $script:MarshalShimBin codex-run @args
+    } finally {
+        $env:MARSHAL_CODEX_BIN = $previous
+    }
+}
+```
+
+Start a new shell, then run plain `codex` or `codex resume`. An interactive
+session should have both a `marshal-shim codex-run` launcher and a
+`marshal-shim codex-bridge` process. Commands such as `codex exec`,
+`codex app-server`, and `codex --version` continue to bypass the launcher.
+See [`docs/codex-live-delivery.md`](docs/codex-live-delivery.md) for the
+delivery and trust model.
 
 ## What you get
 
-Reads are MCP **resources**; writes are MCP **tools**. Sessions have **no nickname** — compose any display label yourself from `host` + cwd basename + `session_id[:8]`, and address peers by `session_id`.
+Reads are MCP **resources**; writes are MCP **tools**. Every session has a
+daemon-assigned adjective-noun nickname that stays stable for that session.
+Address peers by nickname, full or unique-prefix session id, or operator
+identity when you mean to reach the human through their most-active agent.
 
 **Resources** (`resources/read`):
 
@@ -136,13 +250,18 @@ Reads are MCP **resources**; writes are MCP **tools**. Sessions have **no nickna
 
 | Tool | Effect |
 |---|---|
-| `send_message(to, body)` | Direct-send to a peer by `session_id` (look it up in `marshal://roster`). |
+| `send_message(to, body)` | Direct-send by nickname, session id/prefix, or operator identity (look them up in `marshal://roster`). |
 | `broadcast(to_room, body)` | Fan-out to every member of a room (`everyone`, `host:*`, `op:*`, `project:*`, or an ad-hoc room). |
 | `join_room(room)` / `leave_room(room)` | Create/join or leave an ad-hoc room. |
 | `set_status(text)` | Update this session's free-form status (the `current_task` field on the roster). |
 | `ack_messages(message_ids)` | Mark message ids read for this session. |
 
-A peer's `send_message` lands in your session as a `notifications/claude/channel` event, which Claude Code surfaces inline. Delivery is fail-loud: if the recipient session id doesn't exist, is offline, or has a stale client binding, the daemon returns a `CommandError` with a clear reason — your message is never silently dropped.
+A peer's `send_message` is persisted first, then Marshal attempts a synchronous
+live-channel push when the recipient supports one. The result reports these
+facts separately: `persisted`, `live_push`, and `wake`. Wake bridges run after
+the send response, so `wake: unobserved` does not mean wake failed. Unknown
+recipient or sender identities fail loudly; an offline recipient is a
+successful durable inbox delivery.
 
 ## Architecture
 

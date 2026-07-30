@@ -402,27 +402,48 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
     let result = await_command(cell, REQUEST_TIMEOUT)
         .await
         .map_err(ToolError::invalid_params)?;
-    // The daemon persists the message to the recipient's inbox BEFORE deciding on a
-    // live push, so reaching here (no command error) means it WAS delivered. Say so
-    // explicitly: a bare `delivered_live:false` reads as a FAILURE when it only means
-    // "went to the inbox, not a live push" — that ambiguity has repeatedly triggered
-    // false "marshal is broken" alarms. `delivered_live` stays for compatibility.
-    let delivered_live = result.delivered_live;
-    Ok(ToolOutcome::Json(json!({
+    Ok(ToolOutcome::Json(send_message_output(&result)))
+}
+
+fn send_message_output(result: &SendMessageResult) -> Value {
+    // A successful command means the Message SET is durable. Keep the old
+    // `delivery` / `delivered_live` fields for compatibility, but make their
+    // narrow meaning explicit with `live_push`: they cover only the synchronous
+    // NotifyChannel path. A Codex bridge may start a turn after this command
+    // returns, so `wake=unobserved` is an observation boundary, not a failure.
+    let live_push = result.effective_live_push();
+    let wake = result.effective_wake();
+    let note = match live_push {
+        marshal_entities::LivePushStatus::Delivered => {
+            "Message persisted; live-channel push delivered. No asynchronous wake was needed."
+        }
+        marshal_entities::LivePushStatus::Unavailable => {
+            "Message persisted; no live-channel push was available. Wake handling, if \
+             configured, is asynchronous and is not observed by this response."
+        }
+        marshal_entities::LivePushStatus::Failed => {
+            "Message persisted; the live-channel push failed. Wake handling, if configured, \
+             is asynchronous and is not observed by this response."
+        }
+        marshal_entities::LivePushStatus::Unknown => {
+            "Message persisted; live-channel push status is unknown. Wake handling is \
+             asynchronous and is not observed by this response."
+        }
+    };
+    json!({
         "message_id": result.message_id.0.as_ref(),
         "to_session_id": result.to_session_id.0.as_ref(),
         "sent_at": result.sent_at,
+        "persisted": true,
+        "live_push": live_push,
+        "wake": wake,
+        // Compatibility fields. `delivery=live` and `delivered_live=true`
+        // mean only that the live-channel push landed.
         "delivered": true,
-        "delivery": if delivered_live { "live" } else { "inbox" },
-        "delivered_live": delivered_live,
-        "note": if delivered_live {
-            "Delivered and live-pushed into the recipient's current turn."
-        } else {
-            "Delivered to the recipient's marshal inbox — they read it on their next \
-             turn. delivered_live=false is normal here (the recipient has no live \
-             channel open); it is NOT a failure."
-        },
-    })))
+        "delivery": if result.delivered_live { "live" } else { "inbox" },
+        "delivered_live": result.delivered_live,
+        "note": note,
+    })
 }
 
 async fn broadcast(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
@@ -546,7 +567,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates. Make the body explicit: what you need, any action you expect, and whether you want a reply/decision or are just informing (FYI) — vague or unaddressed asks get misread, ignored, or duplicated. On success `delivered` is always true; `delivery` is `live` (pushed into the recipient's active turn) or `inbox` (they read it on their next turn) — `inbox`/`delivered_live:false` is normal, NOT a failure.".into(),
+            description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates. Make the body explicit: what you need, any action you expect, and whether you want a reply/decision or are just informing (FYI) — vague or unaddressed asks get misread, ignored, or duplicated. On success `persisted` confirms durable storage, `live_push` reports only the synchronous live-channel push, and `wake` reports whether asynchronous wake was observed. The compatibility fields `delivery` / `delivered_live` describe only `live_push`; `false` does not mean a later wake failed.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to":   { "type": "string", "description": "Recipient: a nickname (e.g. `swift-falcon`), full `session_id`, session_id prefix, or an operator identity/email (e.g. `max@lucid.rocks`) to reach the human via their most-active agent — all from marshal://roster." },
@@ -769,5 +790,58 @@ where
             "command timed out after {} ms (daemon unresponsive?)",
             timeout.as_millis()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marshal_entities::{LivePushStatus, WakeStatus};
+
+    fn result(
+        live_push: LivePushStatus,
+        wake: WakeStatus,
+        delivered_live: bool,
+    ) -> SendMessageResult {
+        SendMessageResult {
+            message_id: MessageId(Arc::from("message-1")),
+            to_session_id: SessionId(Arc::from("recipient-1")),
+            sent_at: 123,
+            live_push,
+            wake,
+            delivered_live,
+        }
+    }
+
+    #[test]
+    fn inbox_send_does_not_claim_wake_failure_or_future_delivery() {
+        let output = send_message_output(&result(
+            LivePushStatus::Unavailable,
+            WakeStatus::Unobserved,
+            false,
+        ));
+
+        assert_eq!(output["persisted"], true);
+        assert_eq!(output["live_push"], "unavailable");
+        assert_eq!(output["wake"], "unobserved");
+        assert_eq!(output["delivered_live"], false);
+        let note = output["note"].as_str().expect("note");
+        assert!(note.contains("not observed"));
+        assert!(!note.contains("next turn"));
+        assert!(!note.contains("wake failed"));
+    }
+
+    #[test]
+    fn live_send_reports_wake_as_not_needed() {
+        let output = send_message_output(&result(
+            LivePushStatus::Delivered,
+            WakeStatus::NotNeeded,
+            true,
+        ));
+
+        assert_eq!(output["persisted"], true);
+        assert_eq!(output["live_push"], "delivered");
+        assert_eq!(output["wake"], "not_needed");
+        assert_eq!(output["delivered_live"], true);
     }
 }
