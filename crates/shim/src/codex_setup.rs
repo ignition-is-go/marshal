@@ -535,11 +535,11 @@ mod tests {
         );
         let mut command = std::process::Command::new("cmd.exe");
         command
-            .args(["/D", "/S", "/C"])
-            // `cmd.exe` parses the command tail itself rather than with the
-            // CRT argv rules used by `Command::arg`. Hand it the hook command
-            // verbatim so the executable quotes are syntax, not literal `\"`.
-            .raw_arg(&hooks.pre);
+            .arg("/C")
+            // Mirror Codex's Windows hook runner: cmd.exe parses a raw,
+            // outer-quoted command tail itself. The outer pair survives cmd's
+            // command-string parsing; the inner pair protects the executable.
+            .raw_arg(format!(r#""{}""#, hooks.pre));
         let status = command
             .status()
             .expect("run quoted command through cmd.exe");
