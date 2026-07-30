@@ -1,6 +1,8 @@
-//! End-to-end test of the `/hook/*` HTTP listener — the flag-independent
-//! inbox-delivery path. A stored message MUST surface in the
-//! `<marshal_inbox>` block returned by `POST /hook/prompt-submit`.
+//! End-to-end test of the `/hook/*` HTTP listener — registration plus the
+//! flag-independent inbox-delivery path. Eager registration MUST create the
+//! session without consuming context, and a stored message MUST subsequently
+//! surface in the `<marshal_inbox>` block returned by
+//! `POST /hook/prompt-submit`.
 //!
 //! This guards the daemon side of the path whose *deploy* misconfiguration
 //! (hook listener on the wrong port / bound to loopback) silently broke
@@ -117,16 +119,9 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     let server: &'static CellServer = Box::leak(Box::new(server));
     let _ = server;
 
-    // sender + recipient; store a message for the recipient via the real command.
+    // Seed the sender; the recipient is created through the real eager
+    // registration route below.
     set_session(&ctx, &session("sender", Some("c-sender")));
-    set_session(&ctx, &session("recipient", None));
-    SendMessage {
-        to_session_id: SessionId(Arc::from("recipient")),
-        body: "HOOK-E2E-PROBE-marker".into(),
-        as_session: None,
-    }
-    .execute(cmd_ctx(&ctx, Some("c-sender")))
-    .expect("send persists");
 
     // bring up the real /hook/* HTTP listener on a free port, sharing ctx.
     let port = pick_free_port();
@@ -142,6 +137,33 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         });
     });
     wait_listening(addr);
+
+    // App-server lifecycle discovery creates the hook-owned session before
+    // any user prompt. Registration has no model turn to receive context, so
+    // its response must stay empty.
+    let registration = http_post(
+        addr,
+        "/hook/session-register?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert_eq!(registration, "", "registration must not inject context");
+
+    // The successful send proves the registration route created a routable
+    // Session row. Register it again after the message is stored to prove a
+    // refresh cannot surface or acknowledge that unread message.
+    SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "HOOK-E2E-PROBE-marker".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists to eagerly registered recipient");
+    let refresh = http_post(
+        addr,
+        "/hook/session-register?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert_eq!(refresh, "", "registration refresh must not inject context");
 
     // the recipient's prompt-submit hook must surface the stored message.
     let body = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);

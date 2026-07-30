@@ -8,9 +8,24 @@ Codex app-server provides the missing control plane. Multiple clients can
 attach to one app-server, and any client can issue `turn/start` for an idle
 thread. The original TUI receives that turn's normal streamed events.
 
+It also provides the earliest authoritative session lifecycle signal.
+`codex-run` connects the bridge first and waits until its app-server
+subscription is ready before launching the TUI. The TUI's `thread/started`
+notification contains the canonical root `sessionId` and cwd, so the bridge
+registers that session with Marshal immediately—without waiting for a first
+prompt or `SessionStart` hook.
+
 ## Delivery path
 
 ```text
+codex-run ──wait for subscriber──> local Codex bridge
+                                      ▲
+                                      │ thread/started(sessionId, cwd)
+                                      │
+                               shared app-server <── attached TUI
+                                      │
+                                      └── /hook/session-register ──> roster
+
 sender ──send_message──> marshal daemon ──durable unread Message
                                       │
                                       ▼
@@ -27,6 +42,12 @@ sender ──send_message──> marshal daemon ──durable unread Message
 The Marshal session id supplied to hooks is the Codex app-server thread id.
 That lets the bridge target the thread without guessing from cwd, process age,
 or rollout files.
+
+Eager registration uses the dedicated `/hook/session-register` endpoint. It
+only creates or refreshes the roster row; it never surfaces or acknowledges
+inbox messages because there is no model turn available to receive them.
+`SessionStart` remains the identity/context injection path and a fallback for
+Codex launches that do not use `codex-run`.
 
 The bridge deliberately does not mark the message read. The existing hook
 acknowledges it only after the daemon successfully writes the
@@ -72,8 +93,10 @@ marshal-shim codex-run resume --last
 On Linux and macOS, `codex-run` performs three actions:
 
 1. idempotently starts `codex app-server daemon`;
-2. starts `marshal-shim codex-bridge`;
-3. runs `codex --remote unix:// ...`.
+2. starts `marshal-shim codex-bridge` and waits until its lifecycle
+   subscription is ready;
+3. runs `codex --remote unix:// ...`; the resulting `thread/started` event
+   registers the session before any prompt is required.
 
 Codex does not provide that managed daemon on native Windows. There,
 `codex-run` instead starts one `codex app-server` child on an ephemeral

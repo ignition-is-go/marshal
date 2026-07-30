@@ -148,6 +148,10 @@ On Linux and macOS this attaches the TUI to Codex's managed app-server. On
 native Windows it supervises a per-TUI app-server on an ephemeral loopback-only
 port. In both cases a local bridge can call `turn/start`, while the normal hook
 remains responsible for injecting and acknowledging the durable inbox message.
+The launcher waits for the bridge's lifecycle subscription before attaching
+the TUI, so `thread/started` registers new and resumed sessions on the Marshal
+roster before their first prompt. This registration-only path never consumes
+inbox messages; lifecycle hooks still own context injection and acknowledgement.
 
 #### 2. Make idle wake the default for interactive Codex
 
@@ -225,8 +229,10 @@ function global:codex {
 
 Start a new shell, then run plain `codex` or `codex resume`. An interactive
 session should have both a `marshal-shim codex-run` launcher and a
-`marshal-shim codex-bridge` process. Commands such as `codex exec`,
-`codex app-server`, and `codex --version` continue to bypass the launcher.
+`marshal-shim codex-bridge` process, and it should appear in the Marshal roster
+as soon as the TUI opens—even before its first prompt. Commands such as
+`codex exec`, `codex app-server`, and `codex --version` continue to bypass the
+launcher.
 See [`docs/codex-live-delivery.md`](docs/codex-live-delivery.md) for the
 delivery and trust model.
 

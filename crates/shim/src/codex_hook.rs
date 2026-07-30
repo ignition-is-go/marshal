@@ -80,6 +80,36 @@ pub fn run(ep: &str, base_override: Option<&str>) {
     println!("{out}");
 }
 
+/// Register a Codex app-server thread without asking the daemon to surface
+/// context. The long-lived bridge calls this from `thread/started`, before the
+/// first prompt; normal lifecycle hooks remain responsible for context
+/// injection and inbox acknowledgement.
+pub(crate) fn register_session(base: &str, session_id: &str, cwd: &str) -> bool {
+    let body = format!(
+        "{{\"session_id\":{},\"cwd\":{}}}",
+        json_str(session_id),
+        json_str(cwd)
+    );
+    let path = format!(
+        "/hook/session-register?host={}&operator={}&harness=codex",
+        url_q(&short_host()),
+        url_q(&operator())
+    );
+    http_post(base, &path, &body).is_some()
+}
+
+/// Resolve the hook listener used by a bridge that already resolved its daemon
+/// WebSocket address. `MARSHAL_BASE_URL` remains the explicit override for
+/// non-standard hook ports.
+pub(crate) fn registration_base(daemon: &str) -> String {
+    if let Ok(base) = std::env::var("MARSHAL_BASE_URL")
+        && !base.is_empty()
+    {
+        return base.trim_end_matches('/').to_string();
+    }
+    base_from_daemon(daemon)
+}
+
 /// Resolve the daemon hook base URL: explicit arg → `MARSHAL_BASE_URL` env →
 /// derived from the shim's daemon-address (`ws://host:6155` → `http://host:6156`)
 /// → localhost default.
@@ -98,15 +128,29 @@ fn resolve_base(base_override: Option<&str>) -> String {
         .ok()
         .or_else(crate::read_address_from_config_file)
         .unwrap_or_default();
-    let hostport = ws
+    base_from_daemon(&ws)
+}
+
+fn base_from_daemon(daemon: &str) -> String {
+    let authority = daemon
         .strip_prefix("ws://")
-        .or_else(|| ws.strip_prefix("wss://"))
-        .unwrap_or("");
-    let host = hostport
-        .split(['/', ':'])
+        .or_else(|| daemon.strip_prefix("wss://"))
+        .unwrap_or("")
+        .split('/')
         .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("localhost");
+        .unwrap_or("");
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.find(']')
+            .map(|end| &authority[..=end + 1])
+            .unwrap_or(authority)
+    } else {
+        authority
+            .rsplit_once(':')
+            .filter(|(_, port)| port.parse::<u16>().is_ok())
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    };
+    let host = if host.is_empty() { "localhost" } else { host };
     format!("http://{host}:{HOOK_PORT}")
 }
 
@@ -133,6 +177,10 @@ fn http_post(base: &str, path: &str, body: &str) -> Option<String> {
     stream.read_to_end(&mut buf).ok()?;
     let text = String::from_utf8_lossy(&buf);
     let idx = text.find("\r\n\r\n")?;
+    let status = text[..idx].lines().next()?.split_whitespace().nth(1)?;
+    if !status.starts_with('2') {
+        return None;
+    }
     Some(text[idx + 4..].to_string())
 }
 
@@ -178,4 +226,23 @@ fn url_q(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_hook_base_from_daemon_authority() {
+        assert_eq!(
+            base_from_daemon("ws://marshal.example:6155"),
+            "http://marshal.example:6156"
+        );
+        assert_eq!(
+            base_from_daemon("wss://marshal.example:443/myko/mcp"),
+            "http://marshal.example:6156"
+        );
+        assert_eq!(base_from_daemon("ws://[::1]:6155"), "http://[::1]:6156");
+        assert_eq!(base_from_daemon(""), "http://localhost:6156");
+    }
 }

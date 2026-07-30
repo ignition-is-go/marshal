@@ -1,4 +1,4 @@
-//! Claude Code hook logic — all of it server-side.
+//! Agent hook logic — all of it server-side.
 //!
 //! These run behind marshal's own plain-HTTP listener (`http_listener`),
 //! not myko's MCP endpoint: the hook command on every platform is a dumb
@@ -71,6 +71,7 @@ pub fn dispatch(
     ctx: &Arc<CellServerCtx>,
 ) -> Option<HookOutcome> {
     match path {
+        "/hook/session-register" => Some(handle_session_register(query, body, ctx)),
         "/hook/session-start" => Some(handle_session_start(query, body, ctx)),
         "/hook/prompt-submit" => Some(handle_prompt_submit(body, ctx)),
         "/hook/session-end" => Some(handle_session_end(body, ctx)),
@@ -100,13 +101,69 @@ pub fn ack_surfaced(ctx: &Arc<CellServerCtx>, session: &SessionId, ids: Vec<Mess
     }
 }
 
+/// Register or refresh a hook-owned session without surfacing its inbox.
+///
+/// Codex's app-server bridge calls this as soon as it observes
+/// `thread/started`, before the TUI can submit its first prompt. Keeping this
+/// separate from `/hook/session-start` is important: the eager registration
+/// request has no model turn to receive context, so surfacing (and later
+/// acknowledging) unread messages here would lose them.
+fn handle_session_register(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
+    let _ = register_hook_session(query, body, ctx);
+    HookOutcome::text(String::new())
+}
+
 fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
-    let Some(body) = parse_body(body) else {
+    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx) else {
         return HookOutcome::text(String::new());
     };
-    let Some(sid) = body.get("session_id").and_then(|v| v.as_str()) else {
-        return HookOutcome::text(String::new());
+
+    // Inject the agent's own marshal identity for context — recognising
+    // itself in the roster, addressing self-sends. Persists in context across
+    // the session; re-injected on resume. The `asSession` guidance is
+    // harness-specific: Claude reaches marshal through the shim, which resolves
+    // the sender from its WS connection, so the agent does NOT pass it. Codex's
+    // MCP server has no connection identity (Codex never tells it the session),
+    // so the Codex agent must name itself explicitly on every write.
+    // The agent's own handle — so it recognises itself in the roster and can say
+    // who it is. Authoritative (assigned handle, else the computed candidate the
+    // assigner would use), matching what peers see in marshal://roster.
+    let q = parse_query(query);
+    let nick = nickname_for(&cmd_ctx, &sid).unwrap_or_else(|_| marshal_entities::nickname(&sid));
+    let mut out = if q.get("harness").map(String::as_str) == Some("codex") {
+        format!(
+            "<marshal_session>You are marshal {nick} (session_id {sid}). On EVERY marshal write \
+             tool (send_message, broadcast, join_room, leave_room, set_status, ack_messages) pass \
+             this id as the `asSession` argument — peers need it to know who sent the message \
+             and to reply to you.</marshal_session>\n"
+        )
+    } else {
+        format!(
+            "<marshal_session>You are marshal {nick} (session_id {sid}). Your marshal tools attach \
+             this identity automatically — you never pass it yourself.</marshal_session>\n"
+        )
     };
+    let (inbox, ids) = surface_unread(&cmd_ctx, &sid);
+    out.push_str(&inbox);
+    HookOutcome {
+        body: out,
+        deferred_ack: (!ids.is_empty()).then(|| (SessionId(Arc::from(sid)), ids)),
+    }
+}
+
+/// Parse hook metadata and SET the corresponding pull-owned Session.
+///
+/// Returns the canonical session id plus the command context used for the SET
+/// so `/hook/session-start` can immediately render identity and inbox state
+/// against the same registry view.
+fn register_hook_session(
+    query: &str,
+    body: &[u8],
+    ctx: &Arc<CellServerCtx>,
+) -> Option<(String, CommandContext)> {
+    let body = parse_body(body)?;
+    let sid = body.get("session_id").and_then(|v| v.as_str())?;
+    let sid = sid.to_string();
     let q = parse_query(query);
     let cwd = body
         .get("cwd")
@@ -140,7 +197,7 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> H
 
     let cmd_ctx = internal_cmd_ctx(ctx);
     let existing: Vec<Arc<Session>> = cmd_ctx.exec_query(GetAllSessions {}).unwrap_or_default();
-    let sid_typed = SessionId(Arc::from(sid));
+    let sid_typed = SessionId(Arc::from(sid.as_str()));
     let prior = existing.iter().find(|s| s.id == sid_typed);
     let now = chrono::Utc::now().timestamp_millis();
     // Preserve shim-owned fields (client_id, pid, git_branch, last_tool*)
@@ -190,37 +247,7 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> H
     if let Err(e) = cmd_ctx.emit_set(&session) {
         log::warn!("[hook] session-start SET failed for {sid}: {e:?}");
     }
-
-    // Inject the agent's own marshal identity for context — recognising
-    // itself in the roster, addressing self-sends. Persists in context across
-    // the session; re-injected on resume. The `asSession` guidance is
-    // harness-specific: Claude reaches marshal through the shim, which resolves
-    // the sender from its WS connection, so the agent does NOT pass it. Codex's
-    // MCP server has no connection identity (Codex never tells it the session),
-    // so the Codex agent must name itself explicitly on every write.
-    // The agent's own handle — so it recognises itself in the roster and can say
-    // who it is. Authoritative (assigned handle, else the computed candidate the
-    // assigner would use), matching what peers see in marshal://roster.
-    let nick = nickname_for(&cmd_ctx, sid).unwrap_or_else(|_| marshal_entities::nickname(sid));
-    let mut out = if q.get("harness").map(String::as_str) == Some("codex") {
-        format!(
-            "<marshal_session>You are marshal {nick} (session_id {sid}). On EVERY marshal write \
-             tool (send_message, broadcast, join_room, leave_room, set_status, ack_messages) pass \
-             this id as the `asSession` argument — peers need it to know who sent the message \
-             and to reply to you.</marshal_session>\n"
-        )
-    } else {
-        format!(
-            "<marshal_session>You are marshal {nick} (session_id {sid}). Your marshal tools attach \
-             this identity automatically — you never pass it yourself.</marshal_session>\n"
-        )
-    };
-    let (inbox, ids) = surface_unread(&cmd_ctx, sid);
-    out.push_str(&inbox);
-    HookOutcome {
-        body: out,
-        deferred_ack: (!ids.is_empty()).then(|| (SessionId(Arc::from(sid)), ids)),
-    }
+    Some((sid, cmd_ctx))
 }
 
 fn handle_prompt_submit(body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
