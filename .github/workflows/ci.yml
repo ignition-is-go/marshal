@@ -57,3 +57,17 @@ jobs:
           sudo apt-get install -y -o Acquire::Retries=3 mingw-w64
       - name: Cross-compile the Windows shim
         run: cargo check -p marshal-shim --target x86_64-pc-windows-gnu
+
+  # Cross-compilation catches cfg(windows) build failures, but it cannot prove
+  # the launcher/bridge behavior. Run the real multi-process wake canary on a
+  # native Windows host as well: Windows Codex TUIs own isolated loopback
+  # app-servers, so each bridge must wake only the thread its endpoint owns.
+  windows-native-wake:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run native Windows Codex wake canary
+        run: cargo test -p marshal-shim -- --nocapture

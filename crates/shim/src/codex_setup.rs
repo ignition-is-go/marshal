@@ -80,20 +80,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let config_path = home.join("config.toml");
     let agents_path = home.join("AGENTS.md");
 
-    // The exact command strings Codex will run (and hash). command == command_windows,
-    // so the trust hash is platform-independent. SessionStart injects identity;
+    // The exact command strings Codex will run (and hash). Quote the executable
+    // at the command-shell layer: the fleet Windows path lives under
+    // `C:\Program Files`, and an unquoted command is truncated to `C:\Program`
+    // before marshal-shim ever starts. command == command_windows, so the trust
+    // hash is derived from the same quoted command Codex executes. SessionStart injects identity;
     // SessionEnd removes the roster row; the other three surface the inbox —
     // UserPromptSubmit on a user prompt, and
     // the two tool-use hooks between tool calls so an actively-working agent picks
     // up peer messages mid-task. `codex-run` adds true idle-turn wakeups through
     // the shared app-server; these hooks remain the durable injection/ack path.
-    let hooks = HookCmds {
-        ss: format!("{exe} codex-hook session-start {hook_base}"),
-        end: format!("{exe} codex-hook session-end {hook_base}"),
-        ups: format!("{exe} codex-hook prompt-submit {hook_base}"),
-        pre: format!("{exe} codex-hook pre-tool-use {hook_base}"),
-        post: format!("{exe} codex-hook post-tool-use {hook_base}"),
-    };
+    let hooks = hook_commands(&exe, &hook_base, cfg!(windows));
     let block = config_block(&exe, &ws, &hooks) + &trust_block(&config_path, &hooks);
     write_managed(&config_path, CFG_BEGIN, CFG_END, &block)?;
     write_managed(&agents_path, MD_BEGIN, MD_END, AGENTS_BLOCK)?;
@@ -263,6 +260,30 @@ struct HookCmds {
     ups: String,
     pre: String,
     post: String,
+}
+
+fn hook_commands(exe: &str, hook_base: &str, windows: bool) -> HookCmds {
+    let exe = shell_quote_executable(exe, windows);
+    HookCmds {
+        ss: format!("{exe} codex-hook session-start {hook_base}"),
+        end: format!("{exe} codex-hook session-end {hook_base}"),
+        ups: format!("{exe} codex-hook prompt-submit {hook_base}"),
+        pre: format!("{exe} codex-hook pre-tool-use {hook_base}"),
+        post: format!("{exe} codex-hook post-tool-use {hook_base}"),
+    }
+}
+
+fn shell_quote_executable(exe: &str, windows: bool) -> String {
+    if windows {
+        // `"` is not legal in a Windows path, so no inner escaping is
+        // necessary. cmd.exe needs these outer quotes when the path contains
+        // spaces (the fleet install is C:\Program Files\marshal\...).
+        format!("\"{exe}\"")
+    } else {
+        // POSIX shell single-quote, including the standard close/escaped
+        // quote/reopen sequence for the uncommon path containing `'`.
+        format!("'{}'", exe.replace('\'', "'\"'\"'"))
+    }
 }
 
 fn config_block(exe: &str, ws: &str, h: &HookCmds) -> String {
@@ -444,7 +465,7 @@ the `marshal` MCP server as `marshal__send_message`, `marshal__broadcast`,\n\
 mod tests {
     use super::*;
 
-    fn hook_commands() -> HookCmds {
+    fn test_hook_commands() -> HookCmds {
         HookCmds {
             ss: "shim codex-hook session-start http://host:6156".into(),
             end: "shim codex-hook session-end http://host:6156".into(),
@@ -456,7 +477,7 @@ mod tests {
 
     #[test]
     fn generated_config_wires_and_pretrusts_session_end() {
-        let hooks = hook_commands();
+        let hooks = test_hook_commands();
         let config = config_block("shim", "ws://host:6155", &hooks);
         assert!(config.contains("[[hooks.SessionEnd]]"));
         assert!(config.contains("command = \"shim codex-hook session-end http://host:6156\""));
@@ -469,5 +490,51 @@ mod tests {
             hook_hash("session_end", None, &hooks.end, 3),
             hook_hash("session_end", None, &hooks.end, 600)
         );
+    }
+
+    #[test]
+    fn windows_hook_commands_quote_program_files_executable_and_hash_that_identity() {
+        let exe = r"C:\Program Files\marshal\marshal-shim.exe";
+        let hooks = hook_commands(exe, "http://host:6156", true);
+        assert_eq!(
+            hooks.pre,
+            r#""C:\Program Files\marshal\marshal-shim.exe" codex-hook pre-tool-use http://host:6156"#
+        );
+
+        let config = config_block(exe, "ws://host:6155", &hooks);
+        assert!(config.contains(&format!("command_windows = {}", q(&hooks.pre))));
+        let quoted_hash = hook_hash("pre_tool_use", None, &hooks.pre, 600);
+        let unquoted_hash = hook_hash(
+            "pre_tool_use",
+            None,
+            r"C:\Program Files\marshal\marshal-shim.exe codex-hook pre-tool-use http://host:6156",
+            600,
+        );
+        assert_ne!(quoted_hash, unquoted_hash);
+        assert!(
+            trust_block(Path::new(r"C:\Users\test\.codex\config.toml"), &hooks)
+                .contains(&q(&quoted_hash))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_quoted_hook_command_survives_cmd_exe_parsing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spaced_dir = temp.path().join("Program Files").join("marshal");
+        std::fs::create_dir_all(&spaced_dir).expect("create spaced path");
+        let executable = spaced_dir.join("marshal-shim.cmd");
+        std::fs::write(&executable, "@exit /b 0\r\n").expect("write command fixture");
+
+        let hooks = hook_commands(
+            &executable.display().to_string(),
+            "http://127.0.0.1:1",
+            true,
+        );
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", &hooks.pre])
+            .status()
+            .expect("run quoted command through cmd.exe");
+        assert!(status.success());
     }
 }
