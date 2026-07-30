@@ -60,7 +60,11 @@ function eventSessionId(event: Event): string | undefined {
   return undefined;
 }
 
-export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) => {
+export const MarshalPlugin: Plugin = async (input) => {
+  const { client, $, directory, worktree } = input;
+  const ui = (input as typeof input & {
+    ui?: { invalidate(input: { surface: "sidebar" | "statusline" }): void };
+  }).ui;
   const cwd = worktree || directory || process.cwd();
   const address = process.env.MARSHAL_DAEMON_ADDRESS || process.env.MYKO_ADDRESS || DEFAULT_ADDRESS;
   const identity = await resolveIdentity($, cwd);
@@ -78,22 +82,34 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
   // message, so the chat.message fallback below won't re-deliver it.
   daemon.onNotify(async (meta) => {
     const who = meta.from_nickname ?? meta.from_session ?? "a sibling session";
+    daemon.recordCommunication(meta.to_session ?? "", meta.from_session);
     void client.tui
       .showToast({ body: { message: `marshal: new message from ${who}`, variant: "info" } })
       .catch(() => {});
     const sid = meta.to_session;
     if (!sid) return;
     log(`marshal: inbound push for session ${sid}`);
-    const inbox = await daemon.drainInbox(sid);
-    if (!inbox) {
-      log(`marshal: inbound push for ${sid} but inbox drained empty`);
+    // NotifyChannel already carries the body. Inject it immediately instead of
+    // racing the daemon's eventually-consistent inbox projection. Drain after
+    // the prompt only to acknowledge the persisted message.
+    const text = meta.body ? `new message from ${who}: ${meta.body}` : await daemon.drainInbox(sid);
+    if (!text) {
+      log(`marshal: inbound push for ${sid} had no body and inbox was empty`);
       return;
     }
-    log(`marshal: auto-advancing ${sid} (${inbox.length} chars)`);
+    log(`marshal: auto-advancing ${sid} (${text.length} chars)`);
     await client.session
-      .prompt({ path: { id: sid }, body: { parts: [{ type: "text", text: inbox }] } })
-      .then(() => log(`marshal: auto-advanced session ${sid}`))
+      .prompt({ path: { id: sid }, body: { parts: [{ type: "text", text }] } })
+      .then(async () => {
+        await daemon.drainInbox(sid);
+        log(`marshal: auto-advanced session ${sid}`);
+      })
       .catch((e: unknown) => log(`marshal: auto-advance prompt failed: ${String(e)}`));
+  });
+  daemon.onRosterChanged(() => ui?.invalidate({ surface: "sidebar" }));
+  daemon.onConnectionChanged(() => {
+    ui?.invalidate({ surface: "sidebar" });
+    ui?.invalidate({ surface: "statusline" });
   });
 
   daemon.start();
@@ -312,7 +328,43 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
     },
   };
 
-  return hooks;
+  // sidebar + statusline hooks — served by the ignition-is-go/opencode fork via
+  // GET /experimental/sidebar|statusline (see plugins/marshal-opencode README).
+  // Stock @opencode-ai/plugin types don't carry these hooks yet, so merge them
+  // in via Object.assign + a downcast instead of the Hooks object literal (which
+  // would trip the excess-property check against the un-forked types).
+  type Status = "success" | "warning" | "error" | "info";
+  const sidebar = () => {
+    const connected = daemon.isConnected();
+    const current = daemon.currentNickname() ?? "(starting)";
+    const recent = daemon
+      .recentCollaborators()
+      .slice(0, 3);
+    const blocks = [
+      { type: "row" as const, label: "nickname", value: current, status: "success" as Status },
+      { type: "row" as const, label: "status", value: connected ? "online" : "offline", status: connected ? "success" as Status : "error" as Status },
+      { type: "separator" as const },
+      {
+        type: "section" as const,
+        title: "Recent collaboration",
+        blocks: recent.map((session) => ({
+          type: "row" as const,
+          label: daemon.nicknameFor(session.id),
+          value: `${session.project ?? session.cwd.split(/[/\\]/).filter(Boolean).pop() ?? "?"} (${session.operator ?? "?"})`,
+          status: "info" as Status,
+        })),
+      },
+    ];
+    return [{ id: "marshal", title: "marshal", items: [], blocks }];
+  };
+
+  const statusline = () => {
+    const connected = daemon.isConnected();
+    if (!connected) return [{ text: "marshal:offline", status: "error" as Status }];
+    return [{ text: `marshal:${daemon.rosterSync().length}`, status: "success" as Status }];
+  };
+
+  return Object.assign(hooks, { sidebar, statusline }) as Hooks;
 };
 
 export default MarshalPlugin;

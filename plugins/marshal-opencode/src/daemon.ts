@@ -82,10 +82,13 @@ export class MarshalDaemon {
    *  can host several sessions; they share this one WS (and thus one server
    *  client_id), and inbound pushes are routed by `meta.to_session`. */
   private readonly sessions = new Map<string, SessionItem>();
+  private readonly communicated = new Map<string, Set<string>>();
+  private lastSessionId: string | undefined;
 
   /** Latest roster snapshot, kept warm by a standing query subscription so
    *  inbox rendering can label senders without a per-turn fetch. */
   private roster: SessionItem[] = [];
+  private rosterFingerprint = "";
 
   /** Daemon-assigned handles, kept warm the same way. Read instead of
    *  recomputing, so a wordlist change never desyncs us from the roster. */
@@ -99,6 +102,9 @@ export class MarshalDaemon {
   private notifyHandler: NotifyHandler | null = null;
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private started = false;
+  private connected = false;
+  private rosterChangedHandler: (() => void) | null = null;
+  private connectionChangedHandler: ((connected: boolean) => void) | null = null;
 
   constructor(cfg: DaemonConfig) {
     this.cfg = cfg;
@@ -114,9 +120,13 @@ export class MarshalDaemon {
     // the daemon's roster is in-memory and a restart drops every row.
     this.client.connectionStatus$.subscribe((status) => {
       if (status === ConnectionStatus.Connected) {
+        this.connected = true;
+        this.connectionChangedHandler?.(true);
         this.log(`connected to ${this.cfg.address}; re-publishing ${this.sessions.size} session(s)`);
         for (const item of this.sessions.values()) this.emitSet(item);
       } else if (status === ConnectionStatus.Disconnected) {
+        this.connected = false;
+        this.connectionChangedHandler?.(false);
         this.log("disconnected from daemon");
       }
     });
@@ -137,6 +147,20 @@ export class MarshalDaemon {
     // Keep a warm roster snapshot for sender labelling.
     this.watch(getAllSessions()).subscribe((items) => {
       this.roster = items;
+      const fingerprint = JSON.stringify(
+        items.map((item) => ({
+          id: item.id,
+          cwd: item.cwd,
+          project: item.project,
+          operator: item.operator,
+          host: item.host?.name,
+          branch: item.gitBranch,
+          task: item.currentTask,
+        })),
+      );
+      if (fingerprint === this.rosterFingerprint) return;
+      this.rosterFingerprint = fingerprint;
+      this.rosterChangedHandler?.();
     });
     // …and the daemon-assigned handles, read wherever we show a nickname.
     this.watch(getAllSessionNicknames()).subscribe((items) => {
@@ -148,6 +172,14 @@ export class MarshalDaemon {
 
   onNotify(handler: NotifyHandler): void {
     this.notifyHandler = handler;
+  }
+
+  onRosterChanged(handler: () => void): void {
+    this.rosterChangedHandler = handler;
+  }
+
+  onConnectionChanged(handler: (connected: boolean) => void): void {
+    this.connectionChangedHandler = handler;
   }
 
   /** Tear down: DEL every roster row, stop the heartbeat, and disconnect.
@@ -166,6 +198,7 @@ export class MarshalDaemon {
   /** SET (or refresh) the roster row for an opencode session. Idempotent —
    *  safe to call on every turn to self-heal a dropped row. */
   registerSession(sessionId: string): void {
+    this.lastSessionId = sessionId;
     const existing = this.sessions.get(sessionId);
     const now = Date.now();
     const item: SessionItem = existing ?? {
@@ -207,7 +240,15 @@ export class MarshalDaemon {
   // ── Write tools (each carries asSession = the acting session) ────────────
 
   sendMessage(asSession: string, to: string, body: string): Promise<SendMessageResult> {
+    this.recordCommunication(asSession, to);
     return this.send(sendMessage(asSession, to, body));
+  }
+
+  recordCommunication(sessionId: string, peerSessionId: string | undefined): void {
+    if (!peerSessionId || peerSessionId === sessionId) return;
+    const peers = this.communicated.get(sessionId) ?? new Set<string>();
+    peers.add(peerSessionId);
+    this.communicated.set(sessionId, peers);
   }
 
   broadcast(asSession: string, room: string, body: string): Promise<BroadcastMessageResult> {
@@ -244,6 +285,19 @@ export class MarshalDaemon {
     });
   }
 
+  /** Sync read of the warm roster cache for UI getters (sidebar/statusline
+   *  hooks) that must return immediately. May be empty or stale briefly after
+   *  a reconnect. */
+  rosterSync(): SessionItem[] {
+    return this.roster;
+  }
+
+  /** Whether the daemon WS is currently connected — drives the statusline
+   *  reachability segment. */
+  isConnected(): boolean {
+    return this.connected;
+  }
+
   /** Pull unread inbox messages for a session, ack them, and return a rendered
    *  `<marshal_inbox>` block ready to inject — or null if the inbox is empty.
    *  This is the per-turn delivery path, byte-for-byte the same daemon
@@ -270,7 +324,9 @@ export class MarshalDaemon {
         limit: opts.limit ?? 50,
       }),
     );
-    return result.messages ?? [];
+    const messages = result.messages ?? [];
+    for (const message of messages) this.recordCommunication(asSession, message.fromSessionId);
+    return messages;
   }
 
   /** Mark messages read so they stop surfacing in the inbox. */
@@ -299,19 +355,29 @@ export class MarshalDaemon {
   }
 
   private async drainInboxInner(sessionId: string): Promise<string | null> {
-    let result: ReadMessagesResult;
-    try {
-      // DIRECT-ONLY auto-inject: `toSession` (messages addressed to me
-      // directly), NOT room broadcasts. A broadcast is ambient — surfaced in
-      // the marshal UI / an explicit `read_messages room=…`, never auto-injected
-      // into the turn. Mirrors the daemon hook's surface_unread change.
-      result = await this.send(
-        readMessages({ asSession: sessionId, toSession: sessionId, inbox: false, sent: false, unread: true, limit: INBOX_PULL_LIMIT }),
-      );
-    } catch (e) {
-      this.log(`inbox pull failed: ${String(e)}`);
-      return null;
+    let result: ReadMessagesResult | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        // A NotifyChannel push can race the daemon's message projection. Retry
+        // briefly so the live notification becomes an actual prompt turn.
+        result = await this.send(
+          readMessages({
+            asSession: sessionId,
+            toSession: sessionId,
+            inbox: false,
+            sent: false,
+            unread: true,
+            limit: INBOX_PULL_LIMIT,
+          }),
+        );
+      } catch (e) {
+        this.log(`inbox pull failed: ${String(e)}`);
+        return null;
+      }
+      if (result.messages && result.messages.length > 0) break;
+      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
     }
+    if (!result) return null;
     if (!result.messages || result.messages.length === 0) return null;
 
     const block = this.renderInbox(result.messages);
@@ -351,6 +417,19 @@ export class MarshalDaemon {
    *  (near-instant on a session's first SET). */
   nicknameFor(sessionId: string): string {
     return this.nicknames.find((n) => n.id === sessionId)?.nickname ?? sessionId;
+  }
+
+  currentNickname(): string | undefined {
+    const sessionId = this.lastSessionId ?? (this.sessions.keys().next().value as string | undefined);
+    return sessionId ? this.nicknameFor(sessionId) : undefined;
+  }
+
+  recentCollaborators(): SessionItem[] {
+    if (!this.lastSessionId) return [];
+    const peers = this.communicated.get(this.lastSessionId) ?? new Set<string>();
+    return this.roster
+      .filter((session) => peers.has(session.id))
+      .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
   }
 
   private senderLabel(sessionId: string): string {
