@@ -1,4 +1,4 @@
-//! `marshal-shim codex-hook <session-start|prompt-submit|pre-tool-use|post-tool-use> [base-url]`
+//! `marshal-shim codex-hook <session-start|session-end|prompt-submit|pre-tool-use|post-tool-use> [base-url]`
 //! — the Codex hook bridge, as a shim subcommand.
 //!
 //! Codex invokes this from `[hooks]` in `~/.codex/config.toml`. It reads Codex's
@@ -50,6 +50,7 @@ pub fn run(ep: &str, base_override: Option<&str>) {
     // on a user prompt (Codex has no server→model push; hooks are the only inbound).
     let (endpoint, event) = match ep {
         "session-start" => ("session-start", "SessionStart"),
+        "session-end" => ("session-end", "SessionEnd"),
         "prompt-submit" => ("prompt-submit", "UserPromptSubmit"),
         "pre-tool-use" => ("prompt-submit", "PreToolUse"),
         "post-tool-use" => ("prompt-submit", "PostToolUse"),

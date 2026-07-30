@@ -89,6 +89,33 @@ Without the flag, `roster` and `send_message` still work — peer messages just 
 
 We're submitting marshal for inclusion in the official allowlist; once approved, plain `claude` will accept the notifications and the flag becomes unnecessary.
 
+### Codex: immediate delivery to idle agents
+
+`marshal-shim codex-setup --daemon ws://<marshal-host>:6155` installs the
+Marshal MCP server and Codex lifecycle hooks. With a normal `codex` launch,
+those hooks inject direct messages at the next prompt or tool boundary.
+
+To let a direct message start a turn while the agent is idle, launch the
+interactive CLI through:
+
+```bash
+marshal-shim codex-run [CODEX_ARGS...]
+```
+
+This starts Codex's managed app-server, attaches the TUI with
+`codex --remote unix://`, and runs a local bridge for the lifetime of the TUI.
+The message remains durable and unread until the existing
+`UserPromptSubmit` hook injects its `<marshal_inbox>` block, so a failed wake
+does not lose it. Room broadcasts remain ambient.
+
+There is currently no Codex `config.toml` key equivalent to the `--remote`
+flag. To make immediate delivery the default for fleet-managed agents, point
+the interactive Codex launcher at `marshal-shim codex-run`; keep
+non-interactive commands such as `codex exec` on the real Codex binary. See
+[`docs/codex-live-delivery.md`](docs/codex-live-delivery.md) for the rollout
+and trust model. The managed Unix control socket makes this path Linux/macOS
+only for now.
+
 ## What you get
 
 Reads are MCP **resources**; writes are MCP **tools**. Sessions have **no nickname** — compose any display label yourself from `host` + cwd basename + `session_id[:8]`, and address peers by `session_id`.

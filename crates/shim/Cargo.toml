@@ -36,6 +36,8 @@ notify-debouncer-mini = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 # Used by session_discovery.rs's #[cfg(windows)] parent-process lookup
 # (toolhelp snapshot for parent PID, GetProcessTimes for start time).

@@ -11,6 +11,7 @@
 
 mod activity;
 mod channels;
+mod codex_bridge;
 mod codex_hook;
 mod codex_setup;
 mod mcp;
@@ -105,6 +106,25 @@ fn main() -> Result<()> {
             let rest: Vec<String> = argv.collect();
             codex_setup::run(&rest)?;
             return Ok(());
+        }
+        // Opt-in Codex launcher with real idle-session wakeups. It starts the
+        // managed Codex app-server, runs the local marshal bridge, then attaches
+        // the normal Codex TUI to that shared server. See `codex_bridge`.
+        Some("codex-run") => {
+            let rest: Vec<String> = argv.collect();
+            codex_bridge::run_codex(&rest)?;
+            return Ok(());
+        }
+        // Long-lived local half of Codex live delivery. Normally started by
+        // `codex-run`; exposed as a subcommand so services and tests can run it
+        // independently.
+        Some("codex-bridge") => {
+            let rest: Vec<String> = argv.collect();
+            return tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building tokio runtime")?
+                .block_on(codex_bridge::run(&rest));
         }
         Some(other) => {
             anyhow::bail!("unknown argument: {other}");
