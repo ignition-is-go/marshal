@@ -17,7 +17,9 @@
 use std::sync::Arc;
 
 use hyphae::Gettable;
-use marshal_entities::{Message, SendMessage, Session, SessionId};
+use marshal_entities::{
+    LivePushStatus, Message, SendMessage, SendMessageResult, Session, SessionId, WakeStatus,
+};
 use myko::{
     command::{CommandContext, CommandHandler},
     core::item::Eventable,
@@ -128,6 +130,8 @@ fn offline_recipient_succeeds_and_persists_for_pull() {
         !result.delivered_live,
         "no live client → not delivered live"
     );
+    assert_eq!(result.live_push, LivePushStatus::Unavailable);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
     assert_eq!(message_count(&ctx), 1, "message must persist for pull");
     assert_eq!(only_message(&ctx).body, "hi");
 }
@@ -151,6 +155,8 @@ fn stale_binding_succeeds_and_persists() {
         .expect("stale binding is not a hard failure under the pull model");
 
     assert!(!result.delivered_live);
+    assert_eq!(result.live_push, LivePushStatus::Failed);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
     assert_eq!(message_count(&ctx), 1);
 }
 
@@ -173,9 +179,38 @@ fn self_identified_sender_via_as_session_succeeds() {
         .expect("self-identified send succeeds");
 
     assert!(!result.delivered_live);
+    assert_eq!(result.live_push, LivePushStatus::Unavailable);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
     let msg = only_message(&ctx);
     assert_eq!(msg.from_session_id, SessionId(Arc::from("sender")));
     assert_eq!(msg.body, "from http");
+}
+
+#[test]
+fn legacy_result_deserializes_with_explicit_unknown_status() {
+    let result: SendMessageResult = serde_json::from_value(serde_json::json!({
+        "messageId": "legacy-message",
+        "toSessionId": "recipient",
+        "sentAt": 123,
+        "deliveredLive": false
+    }))
+    .expect("new client must read an older daemon result");
+
+    assert_eq!(result.live_push, LivePushStatus::Unknown);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
+    assert!(!result.delivered_live);
+    assert_eq!(result.effective_live_push(), LivePushStatus::Unknown);
+    assert_eq!(result.effective_wake(), WakeStatus::Unobserved);
+
+    let live_result: SendMessageResult = serde_json::from_value(serde_json::json!({
+        "messageId": "legacy-live-message",
+        "toSessionId": "recipient",
+        "sentAt": 124,
+        "deliveredLive": true
+    }))
+    .expect("new client must normalize an older live result");
+    assert_eq!(live_result.effective_live_push(), LivePushStatus::Delivered);
+    assert_eq!(live_result.effective_wake(), WakeStatus::NotNeeded);
 }
 
 #[test]

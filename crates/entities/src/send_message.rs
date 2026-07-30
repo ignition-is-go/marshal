@@ -11,8 +11,9 @@
 //!   4. if the recipient has a live WS client, best-effort dispatches a
 //!      `NotifyChannel` to surface it immediately (the Track-2 live path);
 //!      otherwise the recipient pulls it next turn,
-//!   5. returns the result, with `deliveredLive` reflecting whether the
-//!      best-effort push landed.
+//!   5. returns separate status for the synchronous live-channel push and
+//!      asynchronous wake boundary. The daemon cannot observe a later Codex
+//!      bridge `turn/start`, so it never claims that wake succeeded.
 //!
 //! Only an unresolvable sender or unknown recipient returns a
 //! `CommandError`; an offline recipient is success.
@@ -58,15 +59,70 @@ pub struct SendMessageResult {
     /// disambiguate by host+cwd in edge cases the client couldn't see).
     pub to_session_id: SessionId,
     pub sent_at: i64,
-    /// `true` only if the recipient had a live WS client AND its session can
-    /// actually render channel pushes (claude launched with
-    /// `--dangerously-load-development-channels`). `false` if the recipient is
-    /// offline OR channels-off — in both cases the message was NOT shown live
-    /// and is picked up via the next hook (inbox). Both are success — the
-    /// message is always persisted. (channels-off was previously mis-reported
-    /// as `true`, so a sender thought a dropped push had landed.)
+    /// Outcome of the synchronous `NotifyChannel` path. This says nothing
+    /// about a later wake bridge attempt.
+    #[serde(default)]
+    pub live_push: LivePushStatus,
+    /// Whether this synchronous response observed an asynchronous wake.
+    ///
+    /// A durable unread message may be noticed by a Codex bridge after this
+    /// command returns. Marshal currently has no bridge acknowledgement path,
+    /// so an inbox result is `Unobserved`, never a false claim of wake failure.
+    #[serde(default)]
+    pub wake: WakeStatus,
+    /// Compatibility alias for clients predating `live_push`.
+    ///
+    /// This is `true` exactly when `live_push == Delivered`. It describes only
+    /// the synchronous channel push; it does not describe asynchronous wake.
     #[serde(default)]
     pub delivered_live: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
+pub enum LivePushStatus {
+    /// Compatibility default when a newer client reads an older daemon result.
+    #[default]
+    Unknown,
+    /// The recipient's live channel accepted the push.
+    Delivered,
+    /// The recipient had no render-capable live channel, so no push was tried.
+    Unavailable,
+    /// A render-capable live channel was advertised, but dispatch failed.
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
+pub enum WakeStatus {
+    /// The live push landed and marked the durable inbox copy read.
+    NotNeeded,
+    /// Wake handling, if configured, happens after this response and is not
+    /// observed by the sender.
+    #[default]
+    Unobserved,
+}
+
+impl SendMessageResult {
+    /// Normalize a response from an older daemon that only populated
+    /// `delivered_live`.
+    pub fn effective_live_push(&self) -> LivePushStatus {
+        match (self.live_push, self.delivered_live) {
+            (LivePushStatus::Unknown, true) => LivePushStatus::Delivered,
+            (status, _) => status,
+        }
+    }
+
+    /// Normalize wake status across mixed daemon/client versions.
+    pub fn effective_wake(&self) -> WakeStatus {
+        if self.effective_live_push() == LivePushStatus::Delivered {
+            WakeStatus::NotNeeded
+        } else {
+            self.wake
+        }
+    }
 }
 
 impl CommandHandler for SendMessage {
@@ -123,30 +179,42 @@ impl CommandHandler for SendMessage {
         // window before the assignment saga has run. The full id stays in `meta`
         // for exact reply routing; `from_nickname` lets an agent reply by name.
         let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
-        let delivered_live = match recipient.client_id.as_ref() {
-            Some(cid) if recipient_can_render => push_to_client(
-                cid.0.as_ref(),
-                // Concise origin ping only — no leading "marshal:" (Claude
-                // already prefixes the channel name, else it reads "marshal:
-                // marshal:") and no body (it would just be a truncated banner;
-                // the full body is in `meta.body`, the persisted Message, and
-                // the inbox).
-                format!("new message from {from_nickname}"),
-                serde_json::json!({
-                    "source": "marshal",
-                    "kind": "new_message",
-                    "from_session": sender.id.0.as_ref(),
-                    "from_nickname": from_nickname,
-                    "to_session": recipient.id.0.as_ref(),
-                    // Present when addressed to a human via their operator
-                    // identity: the receiving agent should surface it to that
-                    // operator, not treat it as ordinary peer chatter.
-                    "to_operator": to_operator,
-                    "body": self.body,
-                    "sent_at": now,
-                }),
-            ),
-            _ => false,
+        let live_push = match recipient.client_id.as_ref() {
+            Some(cid) if recipient_can_render => {
+                if push_to_client(
+                    cid.0.as_ref(),
+                    // Concise origin ping only — no leading "marshal:" (Claude
+                    // already prefixes the channel name, else it reads "marshal:
+                    // marshal:") and no body (it would just be a truncated banner;
+                    // the full body is in `meta.body`, the persisted Message, and
+                    // the inbox).
+                    format!("new message from {from_nickname}"),
+                    serde_json::json!({
+                        "source": "marshal",
+                        "kind": "new_message",
+                        "from_session": sender.id.0.as_ref(),
+                        "from_nickname": from_nickname,
+                        "to_session": recipient.id.0.as_ref(),
+                        // Present when addressed to a human via their operator
+                        // identity: the receiving agent should surface it to that
+                        // operator, not treat it as ordinary peer chatter.
+                        "to_operator": to_operator,
+                        "body": self.body,
+                        "sent_at": now,
+                    }),
+                ) {
+                    LivePushStatus::Delivered
+                } else {
+                    LivePushStatus::Failed
+                }
+            }
+            _ => LivePushStatus::Unavailable,
+        };
+        let delivered_live = live_push == LivePushStatus::Delivered;
+        let wake = if delivered_live {
+            WakeStatus::NotNeeded
+        } else {
+            WakeStatus::Unobserved
         };
 
         // Dedup the pull inbox against a landed live push. A channels-ON
@@ -172,6 +240,8 @@ impl CommandHandler for SendMessage {
             message_id: msg.id,
             to_session_id: recipient.id.clone(),
             sent_at: now,
+            live_push,
+            wake,
             delivered_live,
         })
     }

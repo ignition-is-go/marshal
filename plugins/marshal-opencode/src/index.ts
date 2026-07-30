@@ -171,7 +171,9 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
         async execute(args, ctx) {
           daemon.registerSession(ctx.sessionID);
           const r = await daemon.sendMessage(ctx.sessionID, args.to, args.body);
-          return `sent (message ${r.messageId}; delivered_live=${r.deliveredLive})`;
+          const livePush = r.livePush ?? (r.deliveredLive ? "delivered" : "unknown");
+          const wake = r.wake ?? (r.deliveredLive ? "not_needed" : "unobserved");
+          return `sent (message ${r.messageId}; persisted=true; live_push=${livePush}; wake=${wake})`;
         },
       }),
 
