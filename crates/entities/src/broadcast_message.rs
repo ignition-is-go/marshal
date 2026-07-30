@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    message::{Message, MessageId},
+    message::{CONTEXT_BODY_MAX_CHARS, Message, MessageId, context_preview},
     room::{GetAllRooms, Room, RoomId},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
@@ -217,6 +217,8 @@ impl CommandHandler for BroadcastMessage {
                 sent_at: now,
             };
             ctx.emit_set(&ping)?;
+            let (context_body, body_truncated) =
+                context_preview(&ping.body, CONTEXT_BODY_MAX_CHARS);
             // Best-effort live push, honest about render capability (same rule
             // as SendMessage: a flag-off recipient is inbox-only).
             if target.channels_enabled != Some(false)
@@ -228,12 +230,14 @@ impl CommandHandler for BroadcastMessage {
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "mention",
+                        "message_id": ping.id.0.as_ref(),
                         "from_session": sender.id.0.as_ref(),
                         "from_nickname": from_nickname,
                         "to_session": target.id.0.as_ref(),
                         "to_operator": to_operator,
                         "room": room.id.0.as_ref(),
-                        "body": self.body,
+                        "body": context_body,
+                        "body_truncated": body_truncated,
                         "sent_at": now,
                     }),
                 );

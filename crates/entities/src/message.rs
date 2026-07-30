@@ -2,6 +2,22 @@ use myko::myko_item;
 
 use crate::session::SessionId;
 
+/// Maximum body size placed directly into a model-facing notification.
+///
+/// The durable `Message` always retains the complete body. Delivery paths use
+/// a preview so a mistaken log dump or generated artifact cannot consume an
+/// unbounded amount of the recipient's transcript; the full message remains
+/// available through `marshal://messages`.
+pub const CONTEXT_BODY_MAX_CHARS: usize = 2_000;
+
+/// Return a UTF-8-safe model-context preview and whether it was truncated.
+pub fn context_preview(body: &str, max_chars: usize) -> (String, bool) {
+    let Some((byte_end, _)) = body.char_indices().nth(max_chars) else {
+        return (body.to_string(), false);
+    };
+    (body[..byte_end].to_string(), true)
+}
+
 /// A message in the bus. Polymorphic recipient — either a peer session
 /// (direct send) or a room (broadcast). Exactly one of `to_session_id`
 /// and `to_room_id` is set; serde defaults to `None` on the absent
@@ -57,4 +73,15 @@ pub struct Message {
 
     /// Wall-clock millis when the daemon accepted the message.
     pub sent_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_preview_is_bounded_and_utf8_safe() {
+        assert_eq!(context_preview("short", 10), ("short".into(), false));
+        assert_eq!(context_preview("aé日z", 3), ("aé日".into(), true));
+    }
 }

@@ -20,6 +20,8 @@
 //! app-server to start that thread. The existing `UserPromptSubmit` hook then
 //! injects and acknowledges the `<marshal_inbox>` block before the model runs.
 //! Room broadcasts remain ambient, and a failed wake leaves the message unread.
+//! On Unix, per-TUI bridges attached to the shared app-server elect one
+//! host-local wake leader; every bridge still observes lifecycle events.
 //! The same bridge observes the TUI's authoritative `thread/started` event and
 //! registers its root session id before the first prompt. `codex-run` does not
 //! launch the TUI until this lifecycle subscription is ready.
@@ -41,6 +43,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::{fs::OpenOptions, os::fd::AsRawFd};
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -50,22 +54,24 @@ use marshal_entities::{
 };
 use myko::client::MykoClient;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use sha2::{Digest, Sha256};
 use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::Message as WebSocketMessage};
 #[cfg(unix)]
 use tokio_tungstenite::{client_async, tungstenite::client::IntoClientRequest};
 
 const DEFAULT_POLL: Duration = Duration::from_millis(750);
-const STARTED_COOLDOWN: Duration = Duration::from_secs(30);
+const WAKE_COALESCE_WINDOW: Duration = Duration::from_secs(30);
 const RETRY_COOLDOWN: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const WAKE_LEADER_SETTLE: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(8);
 const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
-const WAKE_PROMPT: &str = "A direct message from a sibling agent arrived through Marshal. \
-Process the <marshal_inbox> block injected into this turn, act only within your existing task \
-and authority, reply to the sender when useful, and then continue. If no <marshal_inbox> block \
-was injected, read your unread direct Marshal messages before proceeding.";
+const WAKE_PROMPT: &str = "Handle the injected <marshal_inbox>; if absent, read unread direct \
+Marshal messages. Then continue your current task.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppServerEndpoint {
@@ -79,6 +85,107 @@ impl std::fmt::Display for AppServerEndpoint {
             Self::Unix(path) => write!(formatter, "unix://{}", path.display()),
             Self::WebSocket(url) => formatter.write_str(url),
         }
+    }
+}
+
+/// Coordinates wake ownership among bridges attached to the same Unix
+/// app-server and Marshal daemon. Lifecycle registration remains active in
+/// every bridge; only model-turn creation is elected.
+///
+/// Unix `codex-run` launchers share one managed app-server, so without this
+/// lock every per-TUI bridge sees the same unread row and submits the same
+/// `turn/start`. Windows launchers own isolated app-servers and therefore do
+/// not contend.
+#[cfg(unix)]
+#[derive(Debug)]
+struct WakeLeadership {
+    lock_path: PathBuf,
+    lock: Option<fs::File>,
+    acquired_at: Option<Instant>,
+}
+
+#[cfg(unix)]
+impl WakeLeadership {
+    fn new(app_server: &AppServerEndpoint, daemon: &str) -> Self {
+        Self::at(wake_lock_path(app_server, daemon))
+    }
+
+    fn at(lock_path: PathBuf) -> Self {
+        Self {
+            lock_path,
+            lock: None,
+            acquired_at: None,
+        }
+    }
+
+    fn ready(&mut self, now: Instant) -> Result<bool> {
+        if self.lock.is_none() {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&self.lock_path)
+                .with_context(|| {
+                    format!("opening wake-leader lock {}", self.lock_path.display())
+                })?;
+            // SAFETY: `file` owns this valid fd for at least the duration of
+            // the call and remains stored in `self.lock` while leadership is
+            // held. Dropping it releases the advisory lock.
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(false);
+                }
+                return Err(error).with_context(|| {
+                    format!("acquiring wake-leader lock {}", self.lock_path.display())
+                });
+            }
+            log::info!(
+                "[codex-bridge] acquired wake leadership via {}",
+                self.lock_path.display()
+            );
+            self.lock = Some(file);
+            self.acquired_at = Some(now);
+        }
+
+        Ok(self
+            .acquired_at
+            .is_some_and(|acquired| now.saturating_duration_since(acquired) >= WAKE_LEADER_SETTLE))
+    }
+}
+
+#[cfg(unix)]
+fn wake_lock_path(app_server: &AppServerEndpoint, daemon: &str) -> PathBuf {
+    let identity = format!("{app_server}\n{daemon}");
+    let digest = Sha256::digest(identity.as_bytes());
+    let suffix: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let directory = match app_server {
+        AppServerEndpoint::Unix(socket) => socket
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+        AppServerEndpoint::WebSocket(_) => std::env::temp_dir(),
+    };
+    directory.join(format!(".marshal-codex-wake-{suffix}.lock"))
+}
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+struct WakeLeadership;
+
+#[cfg(not(unix))]
+impl WakeLeadership {
+    fn new(_app_server: &AppServerEndpoint, _daemon: &str) -> Self {
+        Self
+    }
+
+    fn ready(&mut self, _now: Instant) -> Result<bool> {
+        Ok(true)
     }
 }
 
@@ -157,8 +264,8 @@ pub fn run_codex(args: &[String]) -> Result<()> {
         .with_context(|| format!("running `{codex} --remote {}`", app_server.remote));
 
     // The bridge is scoped to this interactive launcher. Multiple launchers may
-    // coexist; duplicate wake attempts are harmless because app-server accepts
-    // only one active turn per thread.
+    // coexist; Unix bridges elect one wake leader for their shared app-server,
+    // while Windows launchers each own an isolated app-server.
     let _ = bridge.kill();
     let _ = bridge.wait();
     let _ = fs::remove_file(&ready_file);
@@ -309,6 +416,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         args.app_server
     );
 
+    let mut wake_leadership = WakeLeadership::new(&args.app_server, &args.daemon);
     let mut cooldowns: HashMap<SessionId, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(args.poll);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -326,6 +434,16 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
         }
 
+        let now = Instant::now();
+        match wake_leadership.ready(now) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                log::debug!("[codex-bridge] wake leadership unavailable: {error:#}");
+                continue;
+            }
+        }
+
         let session_snapshot = sessions.get();
         let message_snapshot = messages.get();
         let read_snapshot = reads.get();
@@ -335,8 +453,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             &read_snapshot,
             &local_host,
         );
-        let now = Instant::now();
-        cooldowns.retain(|session, until| candidates.contains(session) && *until > now);
+        retain_active_cooldowns(&mut cooldowns, now);
 
         for session_id in candidates {
             if cooldowns.get(&session_id).is_some_and(|until| *until > now) {
@@ -346,7 +463,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             match start_thread(&args.app_server, &session_id).await {
                 Ok(turn_id) => {
                     log::info!("[codex-bridge] woke thread={} turn={turn_id}", session_id.0);
-                    cooldowns.insert(session_id, now + STARTED_COOLDOWN);
+                    cooldowns.insert(session_id, now + WAKE_COALESCE_WINDOW);
                 }
                 Err(error) => {
                     // Busy threads are retried: their normal Pre/PostToolUse
@@ -367,6 +484,14 @@ pub async fn run(args: &[String]) -> Result<()> {
     // Keep the client and watched cells live until the loop exits.
     drop((reads, messages, sessions, client));
     Ok(())
+}
+
+fn retain_active_cooldowns(cooldowns: &mut HashMap<SessionId, Instant>, now: Instant) {
+    // Do not tie the coalescing window to the current unread snapshot. A
+    // successful hook normally acknowledges the message immediately, making
+    // the candidate disappear; retaining the deadline lets related messages
+    // arriving moments later join the active turn instead of creating another.
+    cooldowns.retain(|_, until| *until > now);
 }
 
 fn parse_args(args: &[String]) -> Result<BridgeArgs> {
@@ -916,6 +1041,57 @@ mod tests {
             body: "hello".into(),
             sent_at: 2,
         })
+    }
+
+    #[test]
+    fn wake_cooldown_survives_an_empty_unread_snapshot() {
+        let session = SessionId(Arc::from("thread"));
+        let now = Instant::now();
+        let mut cooldowns = HashMap::from([(session.clone(), now + Duration::from_secs(30))]);
+
+        // The inbox has been acknowledged, but the cooldown remains so a
+        // related message moments later does not create a second turn.
+        retain_active_cooldowns(&mut cooldowns, now + Duration::from_secs(1));
+        assert!(cooldowns.contains_key(&session));
+
+        retain_active_cooldowns(&mut cooldowns, now + Duration::from_secs(31));
+        assert!(cooldowns.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_bridges_elect_one_wake_leader_and_fail_over() {
+        let path = std::env::temp_dir().join(format!(
+            "marshal-codex-leader-test-{}.lock",
+            uuid::Uuid::new_v4()
+        ));
+        let now = Instant::now();
+        let mut first = WakeLeadership::at(path.clone());
+        let mut second = WakeLeadership::at(path.clone());
+
+        assert!(!first.ready(now).expect("first acquires and settles"));
+        assert!(!second.ready(now).expect("second observes held lock"));
+        assert!(
+            first
+                .ready(now + WAKE_LEADER_SETTLE)
+                .expect("first becomes ready")
+        );
+
+        drop(first);
+        let takeover = now + WAKE_LEADER_SETTLE + Duration::from_millis(1);
+        assert!(
+            !second
+                .ready(takeover)
+                .expect("second acquires after first exits")
+        );
+        assert!(
+            second
+                .ready(takeover + WAKE_LEADER_SETTLE)
+                .expect("second becomes ready after settling")
+        );
+
+        drop(second);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

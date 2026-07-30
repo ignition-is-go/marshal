@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use marshal_entities::{SendMessage, Session, SessionId};
+use marshal_entities::{GetAllMessages, Message, SendMessage, Session, SessionId};
 use myko::{
     command::{CommandContext, CommandHandler},
     entities::client::ClientId,
@@ -186,6 +186,41 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     assert!(
         !body2.contains("HOOK-E2E-PROBE-marker"),
         "message re-surfaced after a successful hook write — the post-write ack didn't run; got: {body2:?}"
+    );
+
+    // Automatic delivery carries a bounded, UTF-8-safe preview. The complete
+    // durable Message remains queryable even after the preview is acknowledged.
+    let long_body = format!("LONG-{}-TAIL", "é".repeat(3_000));
+    SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: long_body.clone(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists long message");
+    let stored: Vec<Arc<Message>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessages {})
+        .expect("query durable messages");
+    assert!(
+        stored.iter().any(|message| message.body == long_body),
+        "durable Message must retain the complete body"
+    );
+
+    let bounded = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
+    assert!(bounded.contains("LONG-"));
+    assert!(!bounded.contains("-TAIL"), "hook leaked the complete body");
+    assert!(
+        bounded.contains("[truncated; full message"),
+        "hook did not identify the bounded preview: {bounded:?}"
+    );
+    assert!(
+        bounded.chars().count() < 3_000,
+        "automatic inbox context exceeded its per-message bound"
+    );
+    let after_bounded = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
+    assert!(
+        !after_bounded.contains("LONG-"),
+        "bounded preview re-surfaced after successful hook write"
     );
 
     // a wrong /hook path must 404 (the misroute that caused the outage).

@@ -59,6 +59,34 @@ Only unread direct messages are wake candidates. Room broadcasts are ambient,
 and the hook continues to frame peer content as untrusted coordination input:
 a peer cannot expand the operator's task or authority merely by waking a turn.
 
+## Context and wake bounds
+
+Automatic delivery is intentionally smaller than durable history:
+
+- a live notification or single hook entry carries at most 2,000 body
+  characters;
+- a hook surfaces at most 20 messages and divides an 8,000-character body
+  budget across that batch;
+- truncated entries include their message id, and the complete body remains in
+  `marshal://messages`;
+- successful wakes are coalesced per thread for 30 seconds, including after
+  the first message is acknowledged, so a burst joins the active turn instead
+  of creating one turn per message.
+
+On Linux and macOS, every interactive launcher keeps its lifecycle subscriber,
+but bridges attached to the same app-server and Marshal daemon elect one
+host-local wake leader with an advisory file lock. A new leader waits briefly
+before waking so the old leader's in-flight hook acknowledgement can settle.
+Dropping the leader process releases the lock and another bridge takes over.
+This prevents one unread row from producing duplicate turns when several Codex
+TUIs share the managed app-server. Native Windows launchers use isolated
+app-servers, so each bridge owns wake delivery for its own endpoint.
+
+Direct messages are therefore an interrupt and consume recipient context. Use
+them for an action, blocker, or needed reply and batch related information.
+Use a room broadcast without an `@mention` for FYI/progress; an `@mention`
+intentionally creates a direct interrupt.
+
 ## Send status model
 
 `send_message` returns as soon as the daemon has persisted the message and
@@ -105,8 +133,8 @@ the child when the TUI exits. The bridge refuses non-loopback WebSocket
 endpoints; no unauthenticated app-server listener is exposed to the network.
 
 The bridge exits with that TUI. More than one live launcher may run on a host;
-duplicate bridge observations are safe because app-server accepts only one
-active turn for a thread. Windows launchers use separate ephemeral ports.
+Unix bridges elect one wake leader while all of them continue lifecycle
+registration. Windows launchers use separate ephemeral ports.
 
 For diagnostics or a supervisor-managed deployment, run the bridge directly:
 
