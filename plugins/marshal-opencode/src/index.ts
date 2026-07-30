@@ -349,7 +349,7 @@ export const MarshalPlugin: Plugin = async (input) => {
         title: "Recent collaboration",
         blocks: recent.map((session) => ({
           type: "row" as const,
-          label: daemon.nicknameFor(session.id),
+          label: daemon.nicknameForUi(session.id),
           value: `${session.project ?? session.cwd.split(/[/\\]/).filter(Boolean).pop() ?? "?"} (${session.operator ?? "?"})`,
           status: "info" as Status,
         })),

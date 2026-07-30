@@ -421,7 +421,12 @@ export class MarshalDaemon {
 
   currentNickname(): string | undefined {
     const sessionId = this.lastSessionId ?? (this.sessions.keys().next().value as string | undefined);
-    return sessionId ? this.nicknameFor(sessionId) : undefined;
+    if (!sessionId) return undefined;
+    return this.nicknames.find((item) => item.id === sessionId)?.nickname;
+  }
+
+  nicknameForUi(sessionId: string): string {
+    return this.nicknames.find((item) => item.id === sessionId)?.nickname ?? "(resolving)";
   }
 
   recentCollaborators(): SessionItem[] {
