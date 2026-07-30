@@ -121,8 +121,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
          \n\
            {exe} codex-run [CODEX_ARGS...]\n\
          \n\
-         This attaches the TUI to Codex's managed app-server and runs Marshal's\n\
-         local wake bridge. Plain `codex` keeps hook-boundary inbox delivery."
+         This attaches the TUI to a local Codex app-server and runs Marshal's\n\
+         wake bridge. Plain `codex` keeps hook-boundary inbox delivery."
     );
     Ok(())
 }

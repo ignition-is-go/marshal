@@ -53,15 +53,21 @@ marshal-shim codex-run
 marshal-shim codex-run resume --last
 ```
 
-`codex-run` performs three actions:
+On Linux and macOS, `codex-run` performs three actions:
 
 1. idempotently starts `codex app-server daemon`;
 2. starts `marshal-shim codex-bridge`;
 3. runs `codex --remote unix:// ...`.
 
+Codex does not provide that managed daemon on native Windows. There,
+`codex-run` instead starts one `codex app-server` child on an ephemeral
+`127.0.0.1` WebSocket port, attaches the bridge and TUI to it, then terminates
+the child when the TUI exits. The bridge refuses non-loopback WebSocket
+endpoints; no unauthenticated app-server listener is exposed to the network.
+
 The bridge exits with that TUI. More than one live launcher may run on a host;
 duplicate bridge observations are safe because app-server accepts only one
-active turn for a thread.
+active turn for a thread. Windows launchers use separate ephemeral ports.
 
 For diagnostics or a supervisor-managed deployment, run the bridge directly:
 
@@ -69,6 +75,11 @@ For diagnostics or a supervisor-managed deployment, run the bridge directly:
 marshal-shim codex-bridge \
   --daemon ws://marshal-host:6155 \
   --socket "$CODEX_HOME/app-server-control/app-server-control.sock"
+
+# Native Windows or a manually supervised local app-server:
+marshal-shim codex-bridge \
+  --daemon ws://marshal-host:6155 \
+  --endpoint ws://127.0.0.1:4500
 ```
 
 ## Making it the fleet default
@@ -88,10 +99,10 @@ that path. A fleet launcher or explicit wrapper command is stable across Codex
 updates and avoids recursion when `codex-run` delegates back to the real
 binary.
 
-## Current boundary
+## Platform boundary
 
-The managed local app-server endpoint is a WebSocket connection over a Unix
-domain socket, so the bridge currently targets Linux and macOS. Plain Codex
-continues to receive durable hook-boundary inbox delivery on every supported
-platform. A Windows implementation should use a supported local app-server
-transport rather than opening an unauthenticated network listener.
+The managed app-server daemon and its Unix-domain control socket are
+Unix-only. Native Windows uses Codex's loopback WebSocket transport under the
+launcher-owned process lifecycle described above. It is intentionally not a
+machine-wide daemon: loopback keeps the endpoint private to the host, while
+per-launcher processes avoid port sharing and make cleanup deterministic.

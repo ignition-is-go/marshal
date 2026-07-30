@@ -102,8 +102,11 @@ interactive CLI through:
 marshal-shim codex-run [CODEX_ARGS...]
 ```
 
-This starts Codex's managed app-server, attaches the TUI with
+On Unix this starts Codex's managed app-server, attaches the TUI with
 `codex --remote unix://`, and runs a local bridge for the lifetime of the TUI.
+On native Windows it supervises a per-TUI app-server on an ephemeral
+loopback-only WebSocket port. In both cases the bridge can start a turn when a
+direct Marshal message arrives; it exits with the TUI.
 The message remains durable and unread until the existing
 `UserPromptSubmit` hook injects its `<marshal_inbox>` block, so a failed wake
 does not lose it. Room broadcasts remain ambient.
