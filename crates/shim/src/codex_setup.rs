@@ -520,6 +520,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_quoted_hook_command_survives_cmd_exe_parsing() {
+        use std::os::windows::process::CommandExt;
+
         let temp = tempfile::tempdir().expect("tempdir");
         let spaced_dir = temp.path().join("Program Files").join("marshal");
         std::fs::create_dir_all(&spaced_dir).expect("create spaced path");
@@ -531,8 +533,14 @@ mod tests {
             "http://127.0.0.1:1",
             true,
         );
-        let status = std::process::Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", &hooks.pre])
+        let mut command = std::process::Command::new("cmd.exe");
+        command
+            .args(["/D", "/S", "/C"])
+            // `cmd.exe` parses the command tail itself rather than with the
+            // CRT argv rules used by `Command::arg`. Hand it the hook command
+            // verbatim so the executable quotes are syntax, not literal `\"`.
+            .raw_arg(&hooks.pre);
+        let status = command
             .status()
             .expect("run quoted command through cmd.exe");
         assert!(status.success());
