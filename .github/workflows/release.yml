@@ -16,10 +16,10 @@ on:
 # and pushes it, which cannot be done concurrently: two runs from back-to-back
 # merges race the `git push` and all but one fail non-fast-forward (leaving
 # tags with no built artifacts). `cancel-in-progress: false` QUEUES runs so each
-# starts only after the previous has pushed. Paired with the `git pull --ff-only`
-# in the stamp step (which re-syncs a queued run's now-stale checkout to the
-# just-pushed release commit), a batch of merges yields one successful release
-# per merge instead of failed, artifact-less runs.
+# starts only after the previous has pushed. The release guard first fast-forwards
+# a queued run's stale checkout, then re-checks whether the new tip is already a
+# release commit. Back-to-back merges are therefore folded into the first run
+# that reaches the branch tip; stale queued runs exit successfully.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -57,12 +57,14 @@ jobs:
 
       - run: cargo install cargo-flux
 
-      # Avoid an infinite release-on-release loop: the previous run of
-      # this workflow committed `chore(release): vX`. If we re-trigger
-      # on that push, skip and exit cleanly.
-      - name: Skip if release commit
+      # Re-sync before checking the subject. A serialized run may have been
+      # queued from an older merge while the previous run pushed the release
+      # commit; checking the trigger SHA would incorrectly try to release again.
+      # This also avoids the infinite release-on-release loop.
+      - name: Sync branch tip and skip if already released
         id: check
         run: |
+          git pull --ff-only origin "$GITHUB_REF_NAME"
           if git log -1 --format='%s' | grep -q '^chore(release):'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -82,12 +84,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          # Re-sync to the branch tip before stamping. With runs serialized
-          # (see `concurrency` above), a queued run's checkout is the SHA that
-          # triggered it — now behind the prior run's pushed release commit.
-          # Fast-forward to latest so the version-bump commit below pushes
-          # cleanly instead of being rejected non-fast-forward.
-          git pull --ff-only origin "$GITHUB_REF_NAME"
           VERSION=$(cargo flux version)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           cargo flux stamp "$VERSION"
