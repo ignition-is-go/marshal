@@ -81,10 +81,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let agents_path = home.join("AGENTS.md");
 
     // The exact command strings Codex will run (and hash). Quote the executable
-    // at the command-shell layer: the fleet Windows path lives under
-    // `C:\Program Files`, and an unquoted command is truncated to `C:\Program`
-    // before marshal-shim ever starts. command == command_windows, so the trust
-    // hash is derived from the same quoted command Codex executes. SessionStart injects identity;
+    // at the command-shell layer only when its path requires it. An unquoted
+    // Windows path containing spaces is truncated before marshal-shim starts,
+    // while avoiding unnecessary cmd.exe quote parsing makes a space-free
+    // managed path maximally portable across Codex Windows builds.
+    // command == command_windows, so the trust hash is derived from the exact
+    // command Codex executes. SessionStart injects identity;
     // SessionEnd removes the roster row; the other three surface the inbox —
     // UserPromptSubmit on a user prompt, and
     // the two tool-use hooks between tool calls so an actively-working agent picks
@@ -275,10 +277,21 @@ fn hook_commands(exe: &str, hook_base: &str, windows: bool) -> HookCmds {
 
 fn shell_quote_executable(exe: &str, windows: bool) -> String {
     if windows {
-        // `"` is not legal in a Windows path, so no inner escaping is
-        // necessary. cmd.exe needs these outer quotes when the path contains
-        // spaces (the fleet install is C:\Program Files\marshal\...).
-        format!("\"{exe}\"")
+        // Avoid quotes for simple paths. Codex delegates hooks to cmd.exe and
+        // some Windows builds mishandle the nested outer+inner quote form even
+        // though current Codex releases support it. Fleet installs therefore
+        // use C:\ProgramData\marshal; keep quoting as the necessary fallback
+        // for user paths containing whitespace or cmd metacharacters.
+        let needs_quotes = exe
+            .chars()
+            .any(|c| c.is_whitespace() || "&()[]{}^=;!'+,`~".contains(c));
+        if needs_quotes {
+            // `"` is not legal in a Windows path, so no inner escaping is
+            // necessary.
+            format!("\"{exe}\"")
+        } else {
+            exe.to_string()
+        }
     } else {
         // POSIX shell single-quote, including the standard close/escaped
         // quote/reopen sequence for the uncommon path containing `'`.
@@ -517,6 +530,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn windows_hook_commands_leave_space_free_executable_unquoted() {
+        let exe = r"C:\ProgramData\marshal\marshal-shim.exe";
+        let hooks = hook_commands(exe, "http://host:6156", true);
+        assert_eq!(
+            hooks.pre,
+            r"C:\ProgramData\marshal\marshal-shim.exe codex-hook pre-tool-use http://host:6156"
+        );
+
+        let config = config_block(exe, "ws://host:6155", &hooks);
+        assert!(config.contains(&format!("command_windows = {}", q(&hooks.pre))));
+        assert!(
+            trust_block(Path::new(r"C:\Users\test\.codex\config.toml"), &hooks)
+                .contains(&q(&hook_hash("pre_tool_use", None, &hooks.pre, 600)))
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_quoted_hook_command_survives_cmd_exe_parsing() {
@@ -543,6 +573,41 @@ mod tests {
         let status = command
             .status()
             .expect("run quoted command through cmd.exe");
+        assert!(status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_space_free_hook_command_survives_cmd_exe_parsing() {
+        use std::os::windows::process::CommandExt;
+
+        // Exercise the exact space-free root used by the managed Windows
+        // install. Windows' default temp path may use a short-name component
+        // containing `~`, which is intentionally treated as shell-sensitive.
+        let temp = tempfile::Builder::new()
+            .prefix("marshal-hook-")
+            .tempdir_in(r"C:\ProgramData")
+            .expect("tempdir under managed install root");
+        let executable = temp.path().join("marshal-shim.cmd");
+        let executable = executable.display().to_string();
+        assert!(
+            !executable.chars().any(char::is_whitespace),
+            "Windows CI temp path must be space-free for this regression test"
+        );
+        std::fs::write(&executable, "@exit /b 0\r\n").expect("write command fixture");
+
+        let hooks = hook_commands(&executable, "http://127.0.0.1:1", true);
+        assert!(!hooks.pre.starts_with('"'));
+
+        let mut command = std::process::Command::new("cmd.exe");
+        command
+            .arg("/C")
+            // Mirror Codex's Windows hook runner. The command tail needs no
+            // nested executable quotes when the installed path has no spaces.
+            .raw_arg(format!(r#""{}""#, hooks.pre));
+        let status = command
+            .status()
+            .expect("run space-free command through cmd.exe");
         assert!(status.success());
     }
 }
