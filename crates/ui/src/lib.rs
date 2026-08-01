@@ -17,8 +17,8 @@
 use leptos::prelude::*;
 use leptos_meta::{Title, provide_meta_context};
 use mullion::{
-    ActivityDef, ActivityIcon, ActivityId, Category, CategoryId, MullionRoot, MullionTheme,
-    PaneEvent, PaneId, PaneNode, SplitDirection,
+    ActivityDef, ActivityIcon, ActivityId, ActivityNode, Category, CategoryId, MullionRoot,
+    MullionTheme, PaneEvent, PaneId, PaneNode, SplitDirection,
 };
 use pulse_leptos_ui::{BaseStyle, Status, StatusVariant};
 use serde::{Deserialize, Serialize};
@@ -144,7 +144,7 @@ pub fn App() -> impl IntoView {
             <main class="app-main">
                 <MullionRoot
                     initial_tree=load_layout()
-                    categories=categories()
+                    items=items()
                     on_event=|ev| {
                         // Persist the full tree after every mutation so drags,
                         // resizes, splits, and view-switches survive a reload.
@@ -177,62 +177,59 @@ struct Slot;
 /// renders inside a `pane-scroll` wrapper because the pane content area clips
 /// overflow — the view scrolls within its pane. `render` is a non-capturing fn
 /// (the panel component pulls its own context), so no closure state is needed.
-fn categories() -> Vec<Category<Slot>> {
-    vec![Category {
+fn items() -> Vec<ActivityNode<Slot>> {
+    vec![ActivityNode::category(Category {
         id: CategoryId::new("views"),
         name: "Views".into(),
-        order: 0,
         icon: ActivityIcon::Svg(ICON_APP.to_string()),
         color: "var(--color-primary)".into(),
-        activities: vec![
-            ActivityDef {
-                id: ActivityId::new("roster"),
-                name: "Roster".into(),
-                icon: ActivityIcon::Svg(ICON_USERS.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
+        children: vec![
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("roster"),
+                "Roster",
+                ActivityIcon::Svg(ICON_USERS.to_string()),
+                |_| true,
+                |_p, _d| {
                     view! { <div class="pane-scroll"><roster::RosterPanel /></div> }.into_any()
                 },
-            },
-            ActivityDef {
-                id: ActivityId::new("messages"),
-                name: "Messages".into(),
-                icon: ActivityIcon::Svg(ICON_CHAT.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("messages"),
+                "Messages",
+                ActivityIcon::Svg(ICON_CHAT.to_string()),
+                |_| true,
+                |_p, _d| {
                     view! { <div class="pane-scroll"><messages::MessagesPanel /></div> }.into_any()
                 },
-            },
-            ActivityDef {
-                id: ActivityId::new("rooms"),
-                name: "Rooms".into(),
-                icon: ActivityIcon::Svg(ICON_HASH.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
-                    view! { <div class="pane-scroll"><rooms::RoomsPanel /></div> }.into_any()
-                },
-            },
-            ActivityDef {
-                id: ActivityId::new("session"),
-                name: "Session".into(),
-                icon: ActivityIcon::Svg(ICON_ID.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("rooms"),
+                "Rooms",
+                ActivityIcon::Svg(ICON_HASH.to_string()),
+                |_| true,
+                |_p, _d| view! { <div class="pane-scroll"><rooms::RoomsPanel /></div> }.into_any(),
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("session"),
+                "Session",
+                ActivityIcon::Svg(ICON_ID.to_string()),
+                |_| true,
+                |_p, _d| {
                     view! { <div class="pane-scroll"><session_detail::SessionDetail /></div> }
                         .into_any()
                 },
-            },
-            ActivityDef {
-                id: ActivityId::new("console"),
-                name: "Console".into(),
-                icon: ActivityIcon::Svg(ICON_SEND.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("console"),
+                "Console",
+                ActivityIcon::Svg(ICON_SEND.to_string()),
+                |_| true,
+                |_p, _d| {
                     view! { <div class="pane-scroll"><console::ConsolePanel /></div> }.into_any()
                 },
-            },
+            )),
         ],
-    }]
+    })]
 }
 
 /// localStorage key for the persisted pane layout.
