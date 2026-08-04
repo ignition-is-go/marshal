@@ -257,9 +257,9 @@ pub fn run_codex(args: &[String]) -> Result<()> {
         return Err(error);
     }
 
-    let status = Command::new(&codex)
-        .args(["--remote", &app_server.remote])
-        .args(args)
+    let cwd = std::env::current_dir().context("getting codex-run cwd")?;
+    let mut command = codex_tui_command(&codex, &app_server.remote, args, &cwd);
+    let status = command
         .status()
         .with_context(|| format!("running `{codex} --remote {}`", app_server.remote));
 
@@ -276,6 +276,31 @@ pub fn run_codex(args: &[String]) -> Result<()> {
         anyhow::bail!("Codex exited with {status}");
     }
     Ok(())
+}
+
+fn codex_tui_command(codex: &str, remote: &str, args: &[String], cwd: &Path) -> Command {
+    let mut command = Command::new(codex);
+    command.args(["--remote", remote]);
+    if !has_explicit_cwd(args) {
+        // The managed app-server is shared across launchers and retains the
+        // directory where it first started. Tell each attached TUI which
+        // workspace this invocation came from so new threads do not inherit a
+        // different launcher's stale cwd.
+        command.arg("--cd").arg(cwd);
+    }
+    command.args(args);
+    command
+}
+
+fn has_explicit_cwd(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| {
+            arg == "-C"
+                || arg == "--cd"
+                || arg.starts_with("-C") && arg.len() > 2
+                || arg.starts_with("--cd=")
+        })
 }
 
 fn wait_for_bridge_ready(bridge: &mut Child, ready_file: &Path) -> Result<()> {
@@ -1004,6 +1029,59 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
     use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn detects_explicit_codex_working_directory_arguments() {
+        assert!(has_explicit_cwd(&["-C".into(), "/work/one".into()]));
+        assert!(has_explicit_cwd(&["-C/work/two".into()]));
+        assert!(has_explicit_cwd(&["--cd".into(), "/work/three".into()]));
+        assert!(has_explicit_cwd(&["--cd=/work/four".into()]));
+        assert!(!has_explicit_cwd(&["resume".into(), "--last".into()]));
+        assert!(!has_explicit_cwd(&[
+            "--".into(),
+            "--cd=/prompt-text".into(),
+        ]));
+    }
+
+    #[test]
+    fn codex_tui_uses_the_launchers_working_directory_by_default() {
+        let command = codex_tui_command(
+            "codex",
+            "unix://",
+            &["resume".into(), "--last".into()],
+            Path::new("/work/myko"),
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--remote",
+                "unix://",
+                "--cd",
+                "/work/myko",
+                "resume",
+                "--last"
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_tui_preserves_an_explicit_working_directory() {
+        let command = codex_tui_command(
+            "codex",
+            "unix://",
+            &["--cd=/work/override".into()],
+            Path::new("/work/myko"),
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["--remote", "unix://", "--cd=/work/override"]);
+    }
 
     fn session(id: &str, host: &str, hook_owned: bool) -> Arc<Session> {
         Arc::new(Session {
