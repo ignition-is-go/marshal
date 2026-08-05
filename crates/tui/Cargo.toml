@@ -1,6 +1,6 @@
 [package]
 name = "marshal-tui"
-version = "0.48.1"
+version = "0.48.2"
 edition.workspace = true
 license.workspace = true
 description = "Terminal UI for the marshal coordination daemon — live roster + message stream."
