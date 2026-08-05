@@ -18,9 +18,9 @@ use leptos::prelude::*;
 use leptos_meta::{Title, provide_meta_context};
 use mullion::{
     ActivityDef, ActivityIcon, ActivityId, ActivityNode, Category, CategoryId, MullionRoot,
-    MullionTheme, PaneEvent, PaneId, PaneNode, SplitDirection,
+    PaneEvent, PaneId, PaneNode, SplitDirection,
 };
-use pulse_leptos_ui::{BaseStyle, Status, StatusVariant};
+use pulse_leptos_ui::{BaseStyle, PULSE_MULLION_CLASS, PulseMullionStyle, Status, StatusVariant};
 use serde::{Deserialize, Serialize};
 use styleable::Styleable;
 
@@ -104,6 +104,7 @@ pub fn App() -> impl IntoView {
 
     // Inject the pulse-leptos-ui design tokens + reset once at root.
     let base_css = BaseStyle::default().css();
+    let mullion_css = PulseMullionStyle.css();
 
     // One shared 1 Hz clock for the whole console — drives every freshness age.
     time::provide_now();
@@ -122,29 +123,17 @@ pub fn App() -> impl IntoView {
     });
     notify::provide_notifications();
 
-    // mullion workspace theme — wired straight to the pulse-leptos-ui BaseStyle
-    // tokens (injected at root) so the panes use the brand palette. The `--ml-*`
-    // vars just alias the `--color-*` brand tokens.
-    provide_context(MullionTheme {
-        bg: "var(--color-base-100)".into(),
-        surface: "var(--color-base-200)".into(),
-        border: "var(--color-border)".into(),
-        accent: "var(--color-base-250)".into(),
-        highlight: "var(--color-base-300)".into(),
-        text: "var(--color-text-primary)".into(),
-        text_muted: "var(--color-text-secondary)".into(),
-        drop_indicator: "color-mix(in oklch, var(--color-primary) 22%, transparent)".into(),
-    });
-
     view! {
         <Title text="marshal"/>
         <style>{base_css}</style>
+        <style>{mullion_css}</style>
         <div class="app-shell">
             <Header connected=connected.into() addr=address.clone() />
-            <main class="app-main">
+            <main class=format!("app-main {PULSE_MULLION_CLASS}")>
                 <MullionRoot
                     initial_tree=load_layout()
                     items=items()
+                    show_focus_indicator=true
                     on_event=|ev| {
                         // Persist the full tree after every mutation so drags,
                         // resizes, splits, and view-switches survive a reload.

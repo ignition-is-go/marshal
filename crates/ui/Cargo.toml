@@ -36,9 +36,9 @@ marshal-entities = { workspace = true }
 # CSR and inject their own scoped CSS at runtime — nothing to add to the trunk
 # asset pipeline. mullion is git-only (unpublished); the committed Cargo.lock
 # pins the exact rev so release + deploy stay reproducible.
-pulse-leptos-ui = { version = "0.9", features = ["csr"] }
+pulse-leptos-ui = { version = "0.10.1", features = ["csr"] }
 styleable = "0.1"
-mullion = { git = "https://github.com/ignition-is-go/mullion.git" }
+mullion = { git = "https://github.com/ignition-is-go/mullion.git", rev = "e8bfe0344b2d1bebff2bdd1fa65a86319c71df20" }
 
 # Slot payload + persisted mullion layout (localStorage) are (de)serialized.
 serde = { workspace = true }
