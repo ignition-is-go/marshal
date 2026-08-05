@@ -70,4 +70,6 @@ myko::register_ts_export!(
     MessageView,
     RoomKind,
     AutoSource,
+    LivePushStatus,
+    WakeStatus,
 );

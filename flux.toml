@@ -10,24 +10,32 @@ dev = { channel = "canary", prerelease = true }
 
 [tasks.check]
 workspace_batchable = true
+depends_on = ["gen"]
 cargo = ["cargo", "check", "--all-targets"]
 
 [tasks.build]
 workspace_batchable = true
+depends_on = ["gen"]
 cargo = ["cargo", "build"]
 
 [tasks.test]
 workspace_batchable = true
+depends_on = ["gen"]
 cargo = ["cargo", "test"]
 
 [tasks.lint]
+depends_on = ["gen"]
 cargo = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.gen]
+default = ["cargo", "run", "-p", "marshal-entities", "--no-default-features", "--features", "codegen", "--bin", "typegen", "--", "plugins/marshal-pi/src/generated"]
 
 [tasks.publish]
 # `cascade = "all"` makes flux walk every crate that opted into the
-# `publish` task; `depends_on = ["build"]` ensures the build task runs
-# first so we don't publish a workspace that doesn't compile.
+# `publish` task; `depends_on = ["build", "gen"]` ensures the build
+# task runs first and TS types are fresh before npm publish.
 cascade = "all"
 autoapply = "inherit"
-depends_on = ["build"]
+depends_on = ["build", "gen"]
 cargo = ["cargo", "publish"]
+npm = "npm publish --provenance --access public"

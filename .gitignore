@@ -2,3 +2,7 @@
 **/*.rs.bk
 Cargo.lock.bak
 .claude/
+
+# marshal-pi plugin
+plugins/marshal-pi/node_modules/
+plugins/marshal-pi/src/generated/
