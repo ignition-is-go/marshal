@@ -83,10 +83,6 @@ async function init(pi: ExtensionAPI) {
   let daemon: MarshalDaemon | undefined;
   let sessionId: string | undefined;
   let sessionCtx: { hasUI?: boolean; ui: { notify(m: string, v?: string): void; setStatus(k: string, v: string): void } } | undefined;
-  let agentActive = false;
-  let statusTimer: ReturnType<typeof setInterval> | null = null;
-  let currentStatus = "";
-  const STATUS_HEARTBEAT_MS = 180_000; // 3 minutes
 
   // ── Inbound live push ──────────────────────────────────────────────────
 
