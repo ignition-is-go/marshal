@@ -1,5 +1,5 @@
 {
   "name": "marshal-shim",
   "description": "Stdio MCP server that connects this Claude Code session to the marshal coordination daemon — exposes whoami/roster/rooms/messages resources and send_message/broadcast/join_room/leave_room/set_status/ack_messages tools, and surfaces inbound peer messages as channel notifications.",
-  "version": "0.46.4"
+  "version": "0.46.5"
 }
