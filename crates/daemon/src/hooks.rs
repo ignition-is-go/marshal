@@ -76,7 +76,7 @@ pub fn dispatch(
     match path {
         "/hook/session-register" => Some(handle_session_register(query, body, ctx)),
         "/hook/session-start" => Some(handle_session_start(query, body, ctx)),
-        "/hook/prompt-submit" => Some(handle_prompt_submit(body, ctx)),
+        "/hook/prompt-submit" => Some(handle_prompt_submit(query, body, ctx)),
         "/hook/session-end" => Some(handle_session_end(body, ctx)),
         _ => None,
     }
@@ -246,36 +246,22 @@ fn register_hook_session(
         },
     };
     if let Err(e) = cmd_ctx.emit_set(&session) {
-        log::warn!("[hook] session-start SET failed for {sid}: {e:?}");
+        log::warn!("[hook] session SET failed for {sid}: {e:?}");
     }
     Some((sid, cmd_ctx))
 }
 
-fn handle_prompt_submit(body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
-    let Some(body) = parse_body(body) else {
+fn handle_prompt_submit(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
+    // A live Codex TUI may outlast a daemon deployment or an older daemon's
+    // time-based hook-session cleanup. Re-run the same idempotent registration
+    // used by SessionStart so this prompt repairs a missing row in place before
+    // inbox lookup. Codex supplies the authoritative session_id + cwd in every
+    // hook body; host/operator remain on the hook query string.
+    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx) else {
         return HookOutcome::text(String::new());
     };
-    let Some(sid) = body.get("session_id").and_then(|v| v.as_str()) else {
-        return HookOutcome::text(String::new());
-    };
-    let cmd_ctx = internal_cmd_ctx(ctx);
 
-    // Bump liveness so the sweeper's backstop doesn't reap an actively-used
-    // session between turns. The session-start hook created the row; here
-    // we only refresh `last_activity_at`. If the row is somehow missing
-    // (start hook never fired) we skip — prompt-submit alone can't rebuild
-    // the host/operator/cwd metadata, and the next start/resume will.
-    let sid_typed = SessionId(Arc::from(sid));
-    let existing: Vec<Arc<Session>> = cmd_ctx.exec_query(GetAllSessions {}).unwrap_or_default();
-    if let Some(prior) = existing.iter().find(|s| s.id == sid_typed) {
-        let mut bumped = (**prior).clone();
-        bumped.last_activity_at = Some(chrono::Utc::now().timestamp_millis());
-        if let Err(e) = cmd_ctx.emit_set(&bumped) {
-            log::warn!("[hook] prompt-submit liveness bump failed for {sid}: {e:?}");
-        }
-    }
-
-    let (inbox, ids) = surface_unread(&cmd_ctx, sid);
+    let (inbox, ids) = surface_unread(&cmd_ctx, &sid);
     HookOutcome {
         body: inbox,
         deferred_ack: (!ids.is_empty()).then(|| (SessionId(Arc::from(sid)), ids)),

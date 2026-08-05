@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use marshal_entities::{GetAllMessages, Message, SendMessage, Session, SessionId};
+use marshal_entities::{GetAllMessages, GetAllSessions, Message, SendMessage, Session, SessionId};
 use myko::{
     command::{CommandContext, CommandHandler},
     entities::client::ClientId,
@@ -147,6 +147,37 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
     );
     assert_eq!(registration, "", "registration must not inject context");
+
+    // Reproduce a still-running Codex TUI whose hook-owned row was removed by
+    // an older daemon's idle-session backstop. Its next prompt must recreate
+    // the same canonical row in place, without restarting the TUI or changing
+    // its session id.
+    let deleted = MEvent::from_item(
+        &session("recipient", None),
+        MEventType::DEL,
+        &Uuid::new_v4().to_string(),
+    );
+    ctx.apply_event_batch(vec![deleted])
+        .expect("delete recipient session");
+    let repaired = http_post(
+        addr,
+        "/hook/prompt-submit?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert_eq!(repaired, "", "repair without inbox must inject no context");
+    let sessions: Vec<Arc<Session>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllSessions {})
+        .expect("query repaired sessions");
+    let recipient = sessions
+        .iter()
+        .find(|session| session.id.0.as_ref() == "recipient")
+        .expect("prompt-submit must recreate a missing session row");
+    assert_eq!(recipient.cwd, "/work/repo");
+    assert_eq!(recipient.operator.as_deref(), Some("test-op"));
+    assert_eq!(
+        recipient.host.as_ref().map(|host| host.name.as_str()),
+        Some("test-host")
+    );
 
     // The successful send proves the registration route created a routable
     // Session row. Register it again after the message is stored to prove a
