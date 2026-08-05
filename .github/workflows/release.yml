@@ -1,12 +1,10 @@
 name: Release
 
-# Single workflow that stamps the next version, tags it, creates a
-# GitHub Release, and publishes the marshal-* crates to crates.io —
-# all in one job. Combined because GITHUB_TOKEN-created `release:
-# published` events don't trigger downstream workflows; chaining a
-# separate publish.yml would silently never fire. (Switching to a
-# GitHub App or PAT would unlock that path; for now the single-job
-# flow is simpler and reliable.)
+# Single workflow that stamps the next version, tags it, creates a GitHub
+# Release, and fans out binary builds and registry publication. The Linux
+# deploy artifacts are uploaded before package publication begins: a registry
+# credential or availability failure must never leave a valid release tag with
+# no binaries for pulse-deploy to install.
 
 on:
   push:
@@ -27,9 +25,8 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # Backstop: this single job does crates.io publish + apt + cross-build +
-    # the marshal-ui WASM bundle + upload. A flaky apt mirror hung it ~2h on
-    # 2026-06-18; fail in minutes.
+    # Backstop: this job does apt + cross-build + the marshal-ui WASM bundle +
+    # upload. A flaky apt mirror hung it ~2h on 2026-06-18; fail in minutes.
     timeout-minutes: 40
     permissions:
       contents: write
@@ -77,12 +74,11 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-      - name: Stamp, commit, tag, push, release, and publish
+      - name: Stamp, commit, tag, push, release, and upload Linux assets
         id: stamp
         if: steps.check.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           VERSION=$(cargo flux version)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -104,9 +100,6 @@ jobs:
           else
             gh release create "v$VERSION" --title "v$VERSION" --generate-notes --prerelease
           fi
-          # Publish marshal-* crates to crates.io in workspace dep order.
-          cargo flux run publish
-
           # Publish prebuilt binaries as release assets so deployers download
           # instead of compiling — this is what lets the daemon and shims
           # track ONE released version off a single artifact source (no
@@ -141,6 +134,30 @@ jobs:
             marshal-shim-x86_64-pc-windows-gnu.exe \
             marshal-ui-dist.tar.gz \
             scripts/install-codex.sh
+
+  # Registry publication is deliberately downstream of the deploy artifacts.
+  # It remains a required job (so missing credentials are visible), but cannot
+  # strand a GitHub Release without the binaries used by pulse-deploy.
+  publish-packages:
+    needs: release
+    if: needs.release.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-flux
+      - name: Publish crates and plugins
+        run: cargo flux run publish
 
   # marshal-shim for macOS — the ONLY marshal binary a Mac needs (the daemon +
   # UI run on the Linux marshal LXC; a Mac is purely a Codex/Claude CLIENT).
