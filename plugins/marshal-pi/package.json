@@ -1,0 +1,44 @@
+{
+  "name": "marshal-pi",
+  "version": "0.47.0",
+  "description": "pi extension that connects a pi coding-agent session to the marshal coordination daemon — roster registration, send_message/broadcast/join_room/leave_room/set_status tools, and real-time + per-turn delivery of sibling-agent messages. The pi-native counterpart of the Claude Code marshal-shim, built on pi's extension API instead of a shim binary.",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "pi-package",
+    "marshal",
+    "agent-coordination"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "flux": {
+    "bridges": [
+      "cargo:marshal-entities"
+    ],
+    "tasks": [
+      "gen",
+      "publish"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@myko/core": "^4.24.4"
+  }
+}

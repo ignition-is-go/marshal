@@ -1,0 +1,7 @@
+{
+  "name": "marshal",
+  "private": true,
+  "workspaces": [
+    "plugins/marshal-pi"
+  ]
+}
