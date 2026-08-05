@@ -29,7 +29,7 @@
   ],
   "license": "MIT OR Apache-2.0",
   "main": "./src/index.ts",
-  "name": "marshal-pi",
+  "name": "@agent-marshal/marshal-pi",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
