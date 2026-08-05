@@ -10,12 +10,10 @@
 //!
 //! - **Pull/hook sessions** (`client_id: None`): an HTTP-MCP agent that
 //!   registered via `/hook/session-register` or `/hook/session-start` has no
-//!   WS client at all — it would be swept instantly by the client-id rule. Its
-//!   liveness is instead its `last_activity_at` (the hooks bump it every turn)
-//!   plus a long `HOOK_BACKSTOP` grace. The clean teardown path is the explicit
-//!   `/hook/session-end` DEL; this grace is only a backstop for a client that
-//!   crashed without firing SessionEnd. Because `last_activity_at` is
-//!   wall-clock and persisted, the backstop survives daemon restarts.
+//!   WS client at all. The daemon therefore cannot distinguish a live, idle
+//!   Codex TUI from a crashed one. These sessions are removed only by the
+//!   explicit `/hook/session-end` lifecycle hook; time-based cleanup would make
+//!   a still-running agent unroutable and cascade-delete its direct messages.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -50,13 +48,6 @@ pub const MESSAGE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 /// O(all messages); at one tick per `TICK_INTERVAL`, every 100 ticks (~5 min)
 /// bounds growth without paying the scan each tick.
 const MESSAGE_SWEEP_EVERY: u64 = 100;
-
-/// How long a pull/hook session (no WS client) may go without any hook
-/// activity before the backstop DELs it. Generous: merely-idle sessions
-/// re-register on their next turn, so this only needs to be short enough
-/// to eventually reclaim sessions whose client crashed without firing
-/// `/hook/session-end`. 60 min.
-pub const HOOK_BACKSTOP: Duration = Duration::from_secs(60 * 60);
 
 /// How often the sweeper wakes up to check for stale sessions. Anything
 /// roughly under `STALE_AFTER` is fine; the trade-off is reaction latency
@@ -186,8 +177,6 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
         .collect();
 
     let now = Instant::now();
-    let now_ms = Utc::now().timestamp_millis();
-    let backstop_ms = HOOK_BACKSTOP.as_millis() as i64;
     let mut to_delete: Vec<Arc<str>> = Vec::new();
     let mut still_disconnected: HashSet<Arc<str>> = HashSet::new();
 
@@ -197,15 +186,11 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
         };
 
         match session.client_id.as_ref() {
-            // Pull/hook session: no WS client by design. Liveness is hook
-            // activity + the long backstop; the SessionEnd hook is the
-            // clean DEL path. Not subject to the WS reconnect grace.
-            None => {
-                let last = session.last_activity_at.unwrap_or(session.connected_at);
-                if now_ms.saturating_sub(last) >= backstop_ms {
-                    to_delete.push(id);
-                }
-            }
+            // Pull/hook session: no WS client by design, so elapsed time cannot
+            // tell a crashed client from a live idle TUI. SessionEnd owns its
+            // lifecycle; retaining it preserves nickname routing and unread
+            // direct messages while the Codex process remains open.
+            None => {}
             // WS shim session bound to a live client: healthy.
             Some(cid) if live_client_ids.contains(&cid.0) => {
                 disconnected_since.remove(&id);
@@ -257,6 +242,58 @@ mod tests {
         let ctx = server.ctx();
         Box::leak(Box::new(server));
         ctx
+    }
+
+    fn set_hook_session(ctx: &CellServerCtx, id: &str) {
+        let session = Session {
+            id: SessionId(Arc::from(id)),
+            client_id: None,
+            pid: 0,
+            cwd: "/repo".into(),
+            git_branch: None,
+            current_task: None,
+            session_name: None,
+            activity: None,
+            kind: None,
+            connected_at: 0,
+            last_activity_at: Some(0),
+            last_tool: None,
+            last_tool_at: None,
+            operator: None,
+            host: None,
+            project: None,
+            channels_enabled: None,
+        };
+        let event = MEvent::from_item(&session, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![event])
+            .expect("apply hook Session SET");
+    }
+
+    fn session_ids(ctx: &CellServerCtx) -> HashSet<String> {
+        ctx.registry
+            .get(Session::ENTITY_NAME_STATIC)
+            .map(|store| {
+                store
+                    .entries()
+                    .get()
+                    .into_iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sweep_preserves_idle_hook_sessions_until_session_end() {
+        let ctx = setup();
+        set_hook_session(&ctx, "idle-codex");
+
+        sweep_once(&ctx, &mut HashMap::new());
+
+        assert!(
+            session_ids(&ctx).contains("idle-codex"),
+            "elapsed time cannot distinguish a live idle Codex TUI from a crash"
+        );
     }
 
     fn set_room(ctx: &CellServerCtx, id: &str, kind: RoomKind) {
