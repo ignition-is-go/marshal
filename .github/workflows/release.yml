@@ -48,6 +48,9 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - uses: Swatinem/rust-cache@v2
       # Prebuilt trunk (fast) — builds the marshal-ui WASM bundle shipped as a
       # release asset below.
