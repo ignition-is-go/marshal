@@ -1,0 +1,48 @@
+{
+  "name": "@agent-marshal/marshal-prime-agent",
+  "version": "0.48.4",
+  "description": "Prime Agent extension that connects live conversations to the marshal coordination daemon with native tools and real-time steering delivery of sibling-agent messages.",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "prime-agent-package",
+    "prime-agent",
+    "marshal",
+    "agent-coordination"
+  ],
+  "dependencies": {
+    "@myko/core": "^4.24.4"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "flux": {
+    "bridges": [
+      "cargo:marshal-entities"
+    ],
+    "tasks": [
+      "gen",
+      "publish"
+    ]
+  },
+  "scripts": {
+    "gen": "cargo run -p marshal-entities --no-default-features --features codegen --bin typegen -- src/generated"
+  }
+}

@@ -92,6 +92,33 @@ Without the flag, `roster` and `send_message` still work — peer messages just 
 
 We're submitting marshal for inclusion in the official allowlist; once approved, plain `claude` will accept the notifications and the flag becomes unnecessary.
 
+### Prime Agent: live conversation bridge
+
+Install the Prime Agent extension package after starting a reachable daemon:
+
+```bash
+prime-agent package install npm:@agent-marshal/marshal-prime-agent
+```
+
+Restart Prime Agent. The extension registers every conversation on the roster,
+adds native `marshal_*` tools, and subscribes to direct-message pushes in-process.
+An incoming message is inserted into the visible transcript with Prime Agent's
+extension API and delivered as steering input; it starts a turn immediately when
+the recipient is idle. Messages received while disconnected are pulled from the
+durable inbox before the next turn.
+
+This is a dedicated Prime Agent package, separate from `marshal-pi`; no MCP shim
+or launcher wrapper is needed. To use a remote daemon:
+
+```bash
+export MARSHAL_DAEMON_ADDRESS=ws://<marshal-host>:6155
+prime-agent
+```
+
+Use `/marshal-status` in Prime Agent to verify the connection. See
+[`plugins/marshal-prime-agent/README.md`](plugins/marshal-prime-agent/README.md) for tools,
+development loading, and delivery details.
+
 ### Codex: local setup without Ansible
 
 These steps give a laptop, workstation, or manually managed VM the same
@@ -284,16 +311,16 @@ a burst can join the active turn.
 ## Architecture
 
 ```
-Claude Code ─┐
-             ├─ marshal-shim (stdio MCP) ─┐
-Claude Code ─┤                            │
-             ├─ marshal-shim (stdio MCP) ─┼─── ws://localhost:6155 ─── marshal-daemon
-Claude Code ─┤                            │                              (roster + event log)
-             └─ marshal-shim (stdio MCP) ─┘
+Claude Code ── marshal-shim (stdio MCP) ──┐
+Codex ─────── marshal-shim hooks/bridge ──┤
+opencode ──── marshal-opencode plugin ────┼── ws://localhost:6155 ── marshal-daemon
+Prime Agent ─ marshal-prime-agent extension ───────┘                           (roster + event log)
 ```
 
 - **`marshal-daemon`** owns the live roster and the event log under `~/.local/state/marshal/events.jsonl`. One daemon serves every session that points its shim at it (local or remote). Run it under your favorite supervisor (or just `marshal-daemon &` in a terminal).
 - **`marshal-shim`** is the per-session stdio MCP server Claude Code spawns. It announces the session to the daemon on connect, watches for inbound messages, and forwards them onto stdout as channel notifications.
+- **`marshal-prime-agent`** is the in-process Prime Agent extension that registers conversations, exposes tools, and injects live direct messages.
+- **`marshal-opencode`** provides the equivalent in-process opencode integration.
 - **`marshal-tui`** (optional) is a live ratatui dashboard of the roster + recent messages.
 
 ## Configuring the daemon address
@@ -314,13 +341,15 @@ The daemon's bind address is set with `MARSHAL_BIND` (default `0.0.0.0:6155` —
 
 ## Workspace layout
 
-| Crate | Description |
+| Component | Description |
 |---|---|
 | [`marshal-entities`](crates/entities/) | Shared entity types and the `SendMessage` server command. |
 | [`marshal-daemon`](crates/daemon/) | Coordination daemon — roster store, event log, sweeper. |
 | [`marshal-shim`](crates/shim/) | Stdio MCP shim that bridges Claude Code to the daemon. |
 | [`marshal-tui`](crates/tui/) | Live terminal dashboard. |
 | [`marshal-ui`](crates/ui/) | Leptos operator dashboard (build target only — not published). |
+| [`@agent-marshal/marshal-prime-agent`](plugins/marshal-prime-agent/) | Prime Agent live-conversation extension. |
+| [`marshal-opencode`](plugins/marshal-opencode/) | opencode native plugin. |
 
 Releases are driven by [`cargo-flux`](https://github.com/ignition-is-go/cargo-flux): conventional-commit `feat:` / `fix:` / breaking changes on `main` cut a stable release; the same on `dev` cuts a prerelease. See `flux.toml` and `.github/workflows/release.yml`.
 
