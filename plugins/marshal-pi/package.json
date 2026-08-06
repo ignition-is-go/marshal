@@ -40,5 +40,8 @@
     ]
   },
   "type": "module",
-  "version": "0.48.4"
+  "version": "0.48.4",
+  "scripts": {
+    "gen": "cargo run -p marshal-entities --no-default-features --features codegen --bin typegen -- src/generated"
+  }
 }

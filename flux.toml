@@ -28,7 +28,7 @@ depends_on = ["gen"]
 cargo = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
 
 [tasks.gen]
-default = ["cargo", "run", "-p", "marshal-entities", "--no-default-features", "--features", "codegen", "--bin", "typegen", "--", "plugins/marshal-pi/src/generated"]
+npm = "npm run gen"
 
 [tasks.publish]
 # `cascade = "all"` makes flux walk every crate that opted into the

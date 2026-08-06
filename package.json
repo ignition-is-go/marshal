@@ -2,6 +2,7 @@
   "name": "marshal",
   "private": true,
   "workspaces": [
-    "plugins/marshal-pi"
+    "plugins/marshal-pi",
+    "plugins/marshal-prime-agent"
   ]
 }
