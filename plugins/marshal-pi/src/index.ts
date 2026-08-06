@@ -19,7 +19,10 @@
 // MARSHAL_OPERATOR (optional) in the environment pi runs under.
 
 import { createHash, randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { MarshalDaemon } from "./daemon.ts";
@@ -27,6 +30,7 @@ import { resolveIdentity, type Identity } from "./identity.ts";
 import type { NotifyChannelMeta, SessionItem } from "./entities.ts";
 
 const DEFAULT_ADDRESS = "ws://localhost:6155";
+type MarshalToolResult = AgentToolResult<Record<string, unknown>>;
 
 // @myko/core emits an unconditional ws-timing diagnostic via console.info every
 // 250ms on any WS traffic. Drop those lines so they don't flood the log.
@@ -332,7 +336,7 @@ async function init(pi: ExtensionAPI) {
     description: "Show THIS pi session's marshal coordination identity — its nickname, host, operator, project, git branch, and session id (how peers see and address you).",
     promptSnippet: "Show your marshal identity",
     parameters: Type.Object({}),
-    async execute() {
+    async execute(): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       const nick = daemon.nicknameFor(sessionId);
       const host = identity.host.name;
@@ -361,7 +365,7 @@ async function init(pi: ExtensionAPI) {
     description: "List every live agent session on the marshal roster — host, cwd, operator, branch, and session id (use the id to send_message).",
     promptSnippet: "List live peer sessions on the marshal roster",
     parameters: Type.Object({}),
-    async execute(): Promise<{ content: { type: "text"; text: string }[]; details: {} }> {
+    async execute(): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       const sessions = await daemon.roster_snapshot();
@@ -387,7 +391,10 @@ async function init(pi: ExtensionAPI) {
       to: Type.String({ description: "recipient session id or nickname" }),
       body: Type.String({ description: "message text" }),
     }),
-    async execute(_toolCallId: string, params: { to: string; body: string }) {
+    async execute(
+      _toolCallId: string,
+      params: { to: string; body: string },
+    ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -399,11 +406,7 @@ async function init(pi: ExtensionAPI) {
           details: { messageId: r.messageId, livePush, wake },
         };
       } catch (e: unknown) {
-        return {
-          content: [{ type: "text", text: `marshal_send_message failed: ${String(e)}` }],
-          details: {},
-          isError: true,
-        };
+        throw new Error(`marshal_send_message failed: ${String(e)}`);
       }
     },
   });
@@ -417,7 +420,10 @@ async function init(pi: ExtensionAPI) {
       room: Type.String({ description: "room id/name (e.g. everyone, host:myhost, op:user@example.com, project:marshal)" }),
       body: Type.String({ description: "message text" }),
     }),
-    async execute(_toolCallId: string, params: { room: string; body: string }) {
+    async execute(
+      _toolCallId: string,
+      params: { room: string; body: string },
+    ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -427,11 +433,7 @@ async function init(pi: ExtensionAPI) {
           details: { toRoom: r.toRoomName, delivered: r.delivered.length, total: r.total },
         };
       } catch (e: unknown) {
-        return {
-          content: [{ type: "text", text: `marshal_broadcast failed: ${String(e)}` }],
-          details: {},
-          isError: true,
-        };
+        throw new Error(`marshal_broadcast failed: ${String(e)}`);
       }
     },
   });
@@ -445,7 +447,10 @@ async function init(pi: ExtensionAPI) {
       name: Type.String({ description: "room name" }),
       description: Type.Optional(Type.String({ description: "optional room description" })),
     }),
-    async execute(_toolCallId: string, params: { name: string; description?: string }) {
+    async execute(
+      _toolCallId: string,
+      params: { name: string; description?: string },
+    ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -455,11 +460,7 @@ async function init(pi: ExtensionAPI) {
           details: { room: r.name, joined: r.joined, created: r.created },
         };
       } catch (e: unknown) {
-        return {
-          content: [{ type: "text", text: `marshal_join_room failed: ${String(e)}` }],
-          details: {},
-          isError: true,
-        };
+        throw new Error(`marshal_join_room failed: ${String(e)}`);
       }
     },
   });
@@ -472,7 +473,10 @@ async function init(pi: ExtensionAPI) {
     parameters: Type.Object({
       room: Type.String({ description: "room id/name" }),
     }),
-    async execute(_toolCallId: string, params: { room: string }) {
+    async execute(
+      _toolCallId: string,
+      params: { room: string },
+    ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -482,11 +486,7 @@ async function init(pi: ExtensionAPI) {
           details: { room: r.roomId, left: r.left },
         };
       } catch (e: unknown) {
-        return {
-          content: [{ type: "text", text: `marshal_leave_room failed: ${String(e)}` }],
-          details: {},
-          isError: true,
-        };
+        throw new Error(`marshal_leave_room failed: ${String(e)}`);
       }
     },
   });
@@ -499,18 +499,17 @@ async function init(pi: ExtensionAPI) {
     parameters: Type.Object({
       text: Type.String({ description: "status text shown on the roster" }),
     }),
-    async execute(_toolCallId: string, params: { text: string }) {
+    async execute(
+      _toolCallId: string,
+      params: { text: string },
+    ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         await daemon.setStatus(sessionId, params.text);
         return { content: [{ type: "text", text: `status set: ${params.text}` }], details: {} };
       } catch (e: unknown) {
-        return {
-          content: [{ type: "text", text: `marshal_set_status failed: ${String(e)}` }],
-          details: {},
-          isError: true,
-        };
+        throw new Error(`marshal_set_status failed: ${String(e)}`);
       }
     },
   });
@@ -522,10 +521,19 @@ async function init(pi: ExtensionAPI) {
     promptSnippet: "Read marshal message history",
     parameters: Type.Object({
       room: Type.Optional(Type.String({ description: "room id to read (e.g. project:marshal, everyone); omit for your inbox" })),
-      since: Type.Optional(Type.Number({ description: "only messages after this unix-millis timestamp" })),
-      limit: Type.Optional(Type.Number({ description: "max messages (default 50)" })),
+      since: Type.Optional(Type.Integer({
+        description: "only messages after this unix-millis timestamp",
+        minimum: 0,
+      })),
+      limit: Type.Optional(Type.Integer({
+        description: "max messages (default 50)",
+        minimum: 1,
+      })),
     }),
-    async execute(_toolCallId: string, params: { room?: string; since?: number; limit?: number }) {
+    async execute(
+      _toolCallId: string,
+      params: { room?: string; since?: number; limit?: number },
+    ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -538,11 +546,7 @@ async function init(pi: ExtensionAPI) {
         const lines = msgs.map((m) => daemon!.formatMessageLine(m));
         return { content: [{ type: "text", text: lines.join("\n") }], details: { count: msgs.length } };
       } catch (e: unknown) {
-        return {
-          content: [{ type: "text", text: `marshal_messages failed: ${String(e)}` }],
-          details: {},
-          isError: true,
-        };
+        throw new Error(`marshal_messages failed: ${String(e)}`);
       }
     },
   });
@@ -555,18 +559,17 @@ async function init(pi: ExtensionAPI) {
     parameters: Type.Object({
       message_ids: Type.Array(Type.String(), { description: "message ids to mark read" }),
     }),
-    async execute(_toolCallId: string, params: { message_ids: string[] }) {
+    async execute(
+      _toolCallId: string,
+      params: { message_ids: string[] },
+    ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         const n = await daemon.ackMessages(sessionId, params.message_ids);
         return { content: [{ type: "text", text: `acked ${n} message(s)` }], details: { acked: n } };
       } catch (e: unknown) {
-        return {
-          content: [{ type: "text", text: `marshal_ack failed: ${String(e)}` }],
-          details: {},
-          isError: true,
-        };
+        throw new Error(`marshal_ack failed: ${String(e)}`);
       }
     },
   });

@@ -12,6 +12,7 @@ dev = { channel = "canary", prerelease = true }
 workspace_batchable = true
 depends_on = ["gen"]
 cargo = ["cargo", "check", "--all-targets"]
+npm = "npm run check"
 
 [tasks.build]
 workspace_batchable = true
