@@ -40,6 +40,11 @@
       "./src/index.ts"
     ]
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ignition-is-go/marshal",
+    "directory": "plugins/marshal-prime-agent"
+  },
   "scripts": {
     "gen": "cargo run -p marshal-entities --no-default-features --features codegen --bin typegen -- src/generated"
   },
