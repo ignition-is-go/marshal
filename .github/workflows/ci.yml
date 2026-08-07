@@ -26,6 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo install cargo-flux
+      - run: npm ci --prefix plugins/marshal-pi
       - run: cargo flux run check
       - run: cargo flux run lint
       - run: cargo flux run test

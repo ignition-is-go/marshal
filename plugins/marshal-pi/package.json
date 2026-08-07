@@ -4,6 +4,7 @@
   },
   "description": "pi extension that connects a pi coding-agent session to the marshal coordination daemon — roster registration, send_message/broadcast/join_room/leave_room/set_status tools, and real-time + per-turn delivery of sibling-agent messages. The pi-native counterpart of the Claude Code marshal-shim, built on pi's extension API instead of a shim binary.",
   "devDependencies": {
+    "@types/node": "^24.0.0",
     "typescript": "^5.3.3"
   },
   "exports": {
