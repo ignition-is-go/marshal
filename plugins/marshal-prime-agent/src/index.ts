@@ -72,7 +72,14 @@ async function init(pi: ExtensionAPI) {
 
   let daemon: MarshalDaemon | undefined;
   let sessionId: string | undefined;
-  let sessionCtx: { hasUI?: boolean; ui: { notify(m: string, v?: string): void; setStatus(k: string, v: string): void } } | undefined;
+  let sessionCtx: {
+    hasUI?: boolean;
+    ui: {
+      notify(m: string, v?: string): void;
+      setStatus(k: string, v: string): void;
+      setWidget(k: string, content: string[], options?: { placement?: "aboveEditor" | "belowEditor" }): void;
+    };
+  } | undefined;
 
   // ── Inbound live push ──────────────────────────────────────────────────
 
@@ -124,12 +131,18 @@ async function init(pi: ExtensionAPI) {
 
   function footerText(): string {
     const nick = daemon?.isConnected() ? daemon?.currentNickname() : undefined;
-    const label = nick ?? "offline";
+    const label = `marshal:${nick ?? "offline"}`;
     return currentStatus ? `${label}  ${currentStatus}` : label;
   }
 
   function refreshFooter() {
-    if (sessionCtx) sessionCtx.ui.setStatus("marshal", footerText());
+    if (!sessionCtx) return;
+    const text = footerText();
+    sessionCtx.ui.setStatus("marshal", text);
+    // Prime Agent's daemon-backed default footer is intentionally empty and
+    // does not render setStatus() entries. Mirror the text into a serializable
+    // below-editor widget so it remains visible in the normal TUI.
+    sessionCtx.ui.setWidget("marshal-statusline", [text], { placement: "belowEditor" });
   }
 
   let agentActive = false;
