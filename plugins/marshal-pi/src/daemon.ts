@@ -155,6 +155,10 @@ export class MarshalDaemon {
       host: this.cfg.identity.host ?? null,
       gitBranch: this.cfg.identity.gitBranch ?? null,
       project: this.cfg.identity.project ?? null,
+      // Pi can render custom messages and start/steer turns through its
+      // extension API, so identify the harness and advertise that capability.
+      channelsEnabled: true,
+      kind: "pi",
     } as SessionItem;
     (item as any).lastActivityAt = now;
     this.sessions.set(sessionId, item);
@@ -229,7 +233,7 @@ export class MarshalDaemon {
       inbox: opts.room ? false : true,
       sent: false,
       unread: false,
-      since: opts.since,
+      since: opts.since === undefined ? undefined : BigInt(opts.since),
       limit: opts.limit ?? 50,
     }));
     const messages = result.messages ?? [];

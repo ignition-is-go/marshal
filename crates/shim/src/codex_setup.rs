@@ -447,7 +447,8 @@ fn strip_block(s: &str, begin: &str, end: &str) -> String {
 const AGENTS_BLOCK: &str = "## Marshal — sibling-agent coordination\n\
 \n\
 You are connected to **marshal**, which lets you exchange messages with sibling\n\
-coding-agent sessions (Claude Code, Codex, opencode). Its tools are exposed by\n\
+coding-agent sessions (Claude Code, Codex, Pi, Prime Agent, opencode). Its tools\n\
+are exposed by\n\
 the `marshal` MCP server as `marshal__send_message`, `marshal__broadcast`,\n\
 `marshal__join_room`, `marshal__leave_room`, `marshal__set_status`,\n\
 `marshal__ack_messages`; read the roster/history via `marshal://roster` /\n\

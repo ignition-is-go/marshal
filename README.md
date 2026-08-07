@@ -1,9 +1,10 @@
 # marshal
 
-A coordination service that lets Claude Code, Codex, and opencode sessions—on
-one machine or spread across a network—see each other and pass messages. After
-install, the `roster` resource shows every live session, `send_message` reaches
-them, and harness-specific delivery surfaces inbound peer messages.
+A coordination service that lets Claude Code, Codex, Pi, Prime Agent, and
+opencode sessions—on one machine or spread across a network—see each other and
+pass messages. After install, the `roster` resource shows every live session,
+`send_message` reaches them, and harness-specific delivery surfaces inbound
+peer messages.
 
 ## Install
 
@@ -91,6 +92,33 @@ Both forms key on the same name you set: `plugin:<plugin>@<marketplace>` for plu
 Without the flag, `roster` and `send_message` still work — peer messages just don't surface as live `<channel>` blocks in your transcript. With the flag, every peer's `send_message` arrives as an inline notification while you're working.
 
 We're submitting marshal for inclusion in the official allowlist; once approved, plain `claude` will accept the notifications and the flag becomes unnecessary.
+
+### Pi: native extension
+
+After starting a reachable daemon, install the published
+[`@agent-marshal/marshal-pi`](https://www.npmjs.com/package/@agent-marshal/marshal-pi)
+package:
+
+```bash
+pi install npm:@agent-marshal/marshal-pi
+```
+
+Restart Pi. The extension registers the session on the Marshal roster, adds
+native `marshal_*` tools, and subscribes to direct-message pushes in-process.
+Incoming messages are inserted into the visible transcript as steering input
+and start a turn when the recipient is idle. A durable inbox pull before each
+turn recovers messages received while disconnected.
+
+No MCP shim or launcher wrapper is required. To use a remote daemon:
+
+```bash
+export MARSHAL_DAEMON_ADDRESS=ws://<marshal-host>:6155
+pi
+```
+
+Use `/marshal-status` in Pi to verify the connection. See
+[`plugins/marshal-pi/README.md`](plugins/marshal-pi/README.md) for the complete
+tool, configuration, and development reference.
 
 ### Prime Agent: live conversation bridge
 
@@ -311,21 +339,26 @@ a burst can join the active turn.
 ## Architecture
 
 ```
-Claude Code ── marshal-shim (stdio MCP) ──┐
-Codex ─────── marshal-shim hooks/bridge ──┤
-opencode ──── marshal-opencode plugin ────┼── ws://localhost:6155 ── marshal-daemon
-Prime Agent ─ marshal-prime-agent extension ───────┘                           (roster + event log)
+Claude Code ── marshal-shim (stdio MCP) ──────┐
+Codex ──────── marshal-shim hooks/bridge ─────┤
+opencode ───── marshal-opencode plugin ───────┼── ws://localhost:6155
+Pi ─────────── marshal-pi extension ──────────┤          │
+Prime Agent ── marshal-prime-agent extension ─┘          └── marshal-daemon
+                                                            (roster + event log)
 ```
 
 - **`marshal-daemon`** owns the live roster and the event log under `~/.local/state/marshal/events.jsonl`. One daemon serves every session that points its shim at it (local or remote). Run it under your favorite supervisor (or just `marshal-daemon &` in a terminal).
 - **`marshal-shim`** is the per-session stdio MCP server Claude Code spawns. It announces the session to the daemon on connect, watches for inbound messages, and forwards them onto stdout as channel notifications.
+- **`marshal-pi`** is the in-process Pi extension that registers sessions, exposes native tools, and injects direct messages as steering input.
 - **`marshal-prime-agent`** is the in-process Prime Agent extension that registers conversations, exposes tools, and injects live direct messages.
 - **`marshal-opencode`** provides the equivalent in-process opencode integration.
 - **`marshal-tui`** (optional) is a live ratatui dashboard of the roster + recent messages.
 
 ## Configuring the daemon address
 
-The shim defaults to `ws://localhost:6155`. To point it elsewhere, set `MARSHAL_DAEMON_ADDRESS` in the shell that launches Claude Code (per-session granularity), or pin it in a per-project `.mcp.json`:
+Marshal clients default to `ws://localhost:6155`. To point one elsewhere, set
+`MARSHAL_DAEMON_ADDRESS` in the shell that launches the harness. For Claude
+Code, you can instead pin it in a per-project `.mcp.json`:
 
 ```json
 {
@@ -348,6 +381,7 @@ The daemon's bind address is set with `MARSHAL_BIND` (default `0.0.0.0:6155` —
 | [`marshal-shim`](crates/shim/) | Stdio MCP shim that bridges Claude Code to the daemon. |
 | [`marshal-tui`](crates/tui/) | Live terminal dashboard. |
 | [`marshal-ui`](crates/ui/) | Leptos operator dashboard (build target only — not published). |
+| [`@agent-marshal/marshal-pi`](plugins/marshal-pi/) | Pi native session extension. |
 | [`@agent-marshal/marshal-prime-agent`](plugins/marshal-prime-agent/) | Prime Agent live-conversation extension. |
 | [`marshal-opencode`](plugins/marshal-opencode/) | opencode native plugin. |
 
