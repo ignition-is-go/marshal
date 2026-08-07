@@ -41,10 +41,10 @@
       "./src/index.ts"
     ]
   },
-  "type": "module",
-  "version": "0.48.4",
   "scripts": {
     "check": "tsc --noEmit",
     "gen": "cargo run -p marshal-entities --no-default-features --features codegen --bin typegen -- src/generated"
-  }
+  },
+  "type": "module",
+  "version": "0.49.0"
 }
