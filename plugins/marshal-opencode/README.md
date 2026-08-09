@@ -72,14 +72,19 @@ Tools (call them like any other opencode tool):
 
 Inbound peer messages arrive two ways: an instant TUI toast (real-time) and, authoritatively, as a `<marshal_inbox>` block injected at the start of your next turn (untrusted-input framed, then acked).
 
+Marshal is optional enrichment, not a turn dependency. If the daemon is
+disconnected or an inbox command does not complete promptly, the hook skips
+inbox injection and lets the OpenCode turn continue; unread messages remain in
+Marshal for a later connected turn.
+
 ## Testing
 
 ```bash
 bun test                              # unit + integration
-bun test test/entities.test.ts        # unit only (wire-shape contract)
+bun test test/entities.test.ts test/daemon.test.ts  # unit only
 ```
 
-- **Unit** (`test/entities.test.ts`) pins the marshal wire shapes — command/query ids, camelCase payloads, `asSession` — so an edit to `entities.ts` that drifts from the Rust `marshal-entities` serde fails here, no daemon needed.
+- **Unit** (`test/entities.test.ts`, `test/daemon.test.ts`) pins the marshal wire shapes and proves a disconnected coordination daemon cannot block an OpenCode turn.
 - **Integration** (`test/integration.test.ts`) spins up a **real `marshal-daemon` binary** and round-trips the plugin's actual `MarshalDaemon` (the `@myko/core` client) against it over the real myko WS wire: roster registration + entity fields, send → inbox-pull + ack, the real-time `NotifyChannel` push, `join_room` + `broadcast` delivery, and `set_status`. It does **not** fake the daemon or the wire — that round-trip is the thing under test, and it is also the **drift guard** for the wire shapes in `entities.ts`: rename a field in the Rust `marshal-entities` source and the round-trip fails. The suite skips (loudly) if no daemon binary is found; enable it with:
 
   ```bash
