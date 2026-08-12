@@ -741,9 +741,23 @@ where
 {
     initialize_app_server(websocket).await?;
     if let Some(path) = ready_file.as_ref() {
+        // codex-run deliberately starts its TUI only after this marker, so the
+        // initial thread/started event cannot race us and no snapshot is needed.
+        // Do not make launcher readiness depend on optional thread/list support.
         fs::write(path, b"ready")
             .with_context(|| format!("writing bridge readiness file {}", path.display()))?;
         ready_file.take();
+    } else {
+        if let Err(error) = snapshot_loaded_threads(websocket, pending).await {
+            // Thread discovery is an optimization over the authoritative lifecycle
+            // notifications. Keep the subscription alive against older app-server
+            // versions that do not implement thread/list or thread/read.
+            log::warn!("[codex-bridge] could not snapshot loaded threads: {error:#}");
+        }
+        let session_ids: Vec<String> = pending.keys().cloned().collect();
+        for session_id in session_ids {
+            try_pending_registration(hook_base, pending, &session_id).await;
+        }
     }
 
     let mut retry = tokio::time::interval(REGISTRATION_RETRY);
@@ -792,11 +806,98 @@ where
     }
 }
 
+/// Discover threads that were already started before this lifecycle subscriber
+/// connected. Omnigent starts the app-server and TUI independently, so relying
+/// only on `thread/started` leaves a real startup race. Runtime status keeps us
+/// from registering historical, unloaded threads from a shared CODEX_HOME.
+async fn snapshot_loaded_threads<S>(
+    websocket: &mut WebSocketStream<S>,
+    pending: &mut HashMap<String, ThreadRegistration>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut cursor: Option<String> = None;
+    let mut request_id = 100_i64;
+
+    loop {
+        write_rpc(
+            websocket,
+            &json!({
+                "id": request_id,
+                "method": "thread/list",
+                "params": {
+                    "cursor": cursor,
+                    "limit": 100,
+                    "sortKey": "updated_at",
+                },
+            }),
+        )
+        .await?;
+        let (page, notifications) = read_response_collecting(websocket, request_id).await?;
+        apply_lifecycle_notifications(pending, notifications);
+        request_id += 1;
+
+        let loaded_ids: Vec<String> = page
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|thread| {
+                thread.pointer("/status/type").and_then(Value::as_str) != Some("notLoaded")
+            })
+            .filter_map(|thread| thread.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+
+        for thread_id in loaded_ids {
+            write_rpc(
+                websocket,
+                &json!({
+                    "id": request_id,
+                    "method": "thread/read",
+                    "params": { "threadId": thread_id, "includeTurns": false },
+                }),
+            )
+            .await?;
+            let (result, notifications) = read_response_collecting(websocket, request_id).await?;
+            apply_lifecycle_notifications(pending, notifications);
+            request_id += 1;
+            if let Some(registration) = result.get("thread").and_then(thread_value_registration) {
+                pending.insert(registration.session_id.clone(), registration);
+            }
+        }
+
+        cursor = page
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if cursor.is_none() {
+            return Ok(());
+        }
+    }
+}
+
+fn apply_lifecycle_notifications(
+    pending: &mut HashMap<String, ThreadRegistration>,
+    notifications: Vec<Value>,
+) {
+    for message in notifications {
+        if let Some(registration) = thread_registration(&message) {
+            pending.insert(registration.session_id.clone(), registration);
+        } else if let Some(thread_id) = closed_thread_id(&message) {
+            pending.retain(|_, registration| registration.thread_id != thread_id);
+        }
+    }
+}
+
 fn thread_registration(message: &Value) -> Option<ThreadRegistration> {
     if message.get("method").and_then(Value::as_str) != Some("thread/started") {
         return None;
     }
-    let thread = message.pointer("/params/thread")?;
+    thread_value_registration(message.pointer("/params/thread")?)
+}
+
+fn thread_value_registration(thread: &Value) -> Option<ThreadRegistration> {
     let thread_id = thread.get("id")?.as_str()?.to_string();
     let session_id = thread
         .get("sessionId")
@@ -1019,6 +1120,55 @@ where
             .get("result")
             .cloned()
             .context("app-server response omitted result");
+    }
+}
+
+/// Read an RPC response without losing lifecycle notifications that race the
+/// response. Other response IDs belong to unrelated subscribers and are
+/// ignored; notifications are returned to the registration state machine.
+async fn read_response_collecting<S>(
+    websocket: &mut WebSocketStream<S>,
+    wanted_id: i64,
+) -> Result<(Value, Vec<Value>)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut notifications = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(RPC_TIMEOUT, websocket.next())
+            .await
+            .context("timed out waiting for app-server response")?
+            .context("Codex app-server closed the control connection")?
+            .context("reading app-server response")?;
+        let text = match frame {
+            WebSocketMessage::Text(text) => text,
+            WebSocketMessage::Ping(payload) => {
+                websocket
+                    .send(WebSocketMessage::Pong(payload))
+                    .await
+                    .context("answering app-server WebSocket ping")?;
+                continue;
+            }
+            WebSocketMessage::Close(_) => {
+                anyhow::bail!("Codex app-server closed the control connection")
+            }
+            _ => continue,
+        };
+        let message: Value =
+            serde_json::from_str(text.as_ref()).context("decoding app-server response")?;
+        if message.get("id").and_then(Value::as_i64) == Some(wanted_id) {
+            if let Some(error) = message.get("error") {
+                anyhow::bail!("Codex app-server rejected request: {error}");
+            }
+            let result = message
+                .get("result")
+                .cloned()
+                .context("app-server response omitted result")?;
+            return Ok((result, notifications));
+        }
+        if message.get("method").and_then(Value::as_str).is_some() {
+            notifications.push(message);
+        }
     }
 }
 
@@ -1443,5 +1593,102 @@ mod tests {
         watcher.abort();
         app_server.await.unwrap();
         let _ = fs::remove_file(ready_file);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_subscriber_registers_thread_started_before_it_connected() {
+        use tokio::net::TcpListener as TokioTcpListener;
+
+        let app_listener = TokioTcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake app-server");
+        let app_address = app_listener.local_addr().unwrap();
+        let hook_listener = TokioTcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake hook listener");
+        let hook_address = hook_listener.local_addr().unwrap();
+
+        let app_server = tokio::spawn(async move {
+            let (stream, _) = app_listener.accept().await.expect("accept bridge");
+            let mut websocket = accept_async(stream).await.expect("WebSocket upgrade");
+            let initialize = websocket.next().await.unwrap().unwrap();
+            let initialize: Value = serde_json::from_str(initialize.to_text().unwrap()).unwrap();
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({ "id": initialize["id"], "result": {} })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let initialized = websocket.next().await.unwrap().unwrap();
+            let initialized: Value = serde_json::from_str(initialized.to_text().unwrap()).unwrap();
+            assert_eq!(initialized["method"], "initialized");
+
+            let list = websocket.next().await.unwrap().unwrap();
+            let list: Value = serde_json::from_str(list.to_text().unwrap()).unwrap();
+            assert_eq!(list["method"], "thread/list");
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "id": list["id"],
+                        "result": {
+                            "data": [{
+                                "id": "already-running-thread",
+                                "status": { "type": "idle" }
+                            }],
+                            "nextCursor": null
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let read = websocket.next().await.unwrap().unwrap();
+            let read: Value = serde_json::from_str(read.to_text().unwrap()).unwrap();
+            assert_eq!(read["method"], "thread/read");
+            assert_eq!(read["params"]["threadId"], "already-running-thread");
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "id": read["id"],
+                        "result": {
+                            "thread": {
+                                "id": "already-running-thread",
+                                "sessionId": "already-running-session",
+                                "cwd": "/work/already-running",
+                                "status": { "type": "idle" }
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let hook_server = tokio::spawn(async move {
+            let (stream, _) = hook_listener.accept().await.expect("accept hook request");
+            read_http_request(stream).await
+        });
+        let watcher = tokio::spawn(watch_app_server_registrations(
+            AppServerEndpoint::WebSocket(format!("ws://{app_address}")),
+            format!("http://{hook_address}"),
+            None,
+        ));
+
+        let request = tokio::time::timeout(Duration::from_secs(2), hook_server)
+            .await
+            .expect("snapshot registration request")
+            .expect("hook server task");
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1)
+            .expect("registration JSON");
+        assert_eq!(body["session_id"], "already-running-session");
+        assert_eq!(body["cwd"], "/work/already-running");
+
+        watcher.abort();
+        app_server.await.unwrap();
     }
 }
