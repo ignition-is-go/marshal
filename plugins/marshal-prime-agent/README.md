@@ -5,9 +5,12 @@
 `marshal-pi` package and targets Prime Agent's conversation lifecycle and canonical
 session identities.
 
-The extension runs inside each Prime Agent conversation. It:
+The extension runs inside each top-level Prime Agent conversation. Prime Agent
+RLM sub-agents stay part of their parent's Marshal session and are not added to the
+roster independently. It:
 
-- registers the conversation on the Marshal roster using Prime Agent's session ID;
+- registers the top-level conversation on the Marshal roster using Prime Agent's
+  session ID;
 - exposes native `marshal_*` tools to the model;
 - subscribes to Marshal's live notification stream; and
 - injects incoming direct messages with

@@ -25,6 +25,7 @@ import { Type } from "typebox";
 import { MarshalDaemon } from "./daemon.ts";
 import { resolveIdentity, type Identity } from "./identity.ts";
 import type { NotifyChannelMeta, SessionItem } from "./entities.ts";
+import { shouldRegisterPrimeAgentSession } from "./runtime.ts";
 
 const DEFAULT_ADDRESS = "ws://localhost:6155";
 
@@ -218,6 +219,15 @@ async function init(pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    // Prime Agent loads extensions for RLM children too. The persisted header's
+    // RLM depth is the canonical distinction; parentSession alone is not enough
+    // because ordinary top-level forks also have a parent.
+    const header = ctx.sessionManager.getHeader() as { rlmDepth?: unknown } | null;
+    if (!shouldRegisterPrimeAgentSession(header)) {
+      log("RLM sub-agent detected; skipping Marshal session registration");
+      return;
+    }
+
     sessionCtx = ctx;
     sessionId = ctx.sessionManager.getSessionId();
 
@@ -309,6 +319,10 @@ async function init(pi: ExtensionAPI) {
   // ── Per-turn context injection ─────────────────────────────────────────
 
   pi.on("before_agent_start", async (event, _ctx) => {
+    // A skipped RLM child has no Marshal identity. Do not tell it that it is
+    // connected or inject any coordination context intended for its parent.
+    if (!sessionId) return;
+
     const result: { systemPrompt?: string; message?: { customType: string; content: string; display: boolean } } = {};
 
     // Add marshal system prompt context (once per turn, before the LLM call).

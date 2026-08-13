@@ -46,7 +46,8 @@
     "url": "https://github.com/ignition-is-go/marshal"
   },
   "scripts": {
-    "gen": "cargo run -p marshal-entities --no-default-features --features codegen --bin typegen -- src/generated"
+    "gen": "cargo run -p marshal-entities --no-default-features --features codegen --bin typegen -- src/generated",
+    "test": "bun test"
   },
   "type": "module",
   "version": "0.49.2"
