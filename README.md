@@ -128,8 +128,10 @@ Install the Prime Agent extension package after starting a reachable daemon:
 prime-agent package install npm:@agent-marshal/marshal-prime-agent
 ```
 
-Restart Prime Agent. The extension registers every conversation on the roster,
-adds native `marshal_*` tools, and subscribes to direct-message pushes in-process.
+Restart Prime Agent. The extension registers each top-level conversation on the
+roster, adds native `marshal_*` tools, and subscribes to direct-message pushes
+in-process. RLM sub-agents remain part of their parent's Marshal session instead of
+appearing as separate roster entries.
 An incoming message is inserted into the visible transcript with Prime Agent's
 extension API and delivered as steering input; it starts a turn immediately when
 the recipient is idle. Messages received while disconnected are pulled from the
