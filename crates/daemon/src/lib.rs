@@ -11,6 +11,7 @@ pub mod auto_rooms;
 pub mod cleanup;
 pub mod hooks;
 pub mod http_listener;
+pub mod liveness_filter;
 pub mod nickname_assign;
 
 pub fn link() {
