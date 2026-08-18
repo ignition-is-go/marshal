@@ -10,10 +10,12 @@
 //!
 //! - **Pull/hook sessions** (`client_id: None`): an HTTP-MCP agent that
 //!   registered via `/hook/session-register` or `/hook/session-start` has no
-//!   WS client at all. The daemon therefore cannot distinguish a live, idle
-//!   Codex TUI from a crashed one. These sessions are removed only by the
-//!   explicit `/hook/session-end` lifecycle hook; time-based cleanup would make
-//!   a still-running agent unroutable and cascade-delete its direct messages.
+//!   WS client at all, so short-horizon elapsed time cannot distinguish a
+//!   live, idle Codex TUI from a crashed one. The explicit
+//!   `/hook/session-end` lifecycle hook owns clean removal, and the
+//!   `PULL_STALE_AFTER` activity backstop reaps rows whose every hook signal
+//!   has been silent for a day — without it, uncleanly-dead agents accrete
+//!   durable sessions without bound (lv-6731).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -36,6 +38,21 @@ use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 /// dead session just lingers that long (and the roster's liveness fields show
 /// it going stale).
 pub const STALE_AFTER: Duration = Duration::from_secs(60);
+
+/// Activity backstop for pull/hook sessions (`client_id: None`). They have no
+/// WS client whose loss marks them dead, and `SessionEnd` only fires on a
+/// clean exit — a crashed or discarded Codex/hook agent leaves its row
+/// forever, which is how production accumulated ~2M durable sessions
+/// (lv-6731). A pull session with no hook signal for this long is reaped.
+///
+/// Safe by construction: every prompt-submit hook idempotently re-registers
+/// the session (see `hooks::register_hook_session`), so a live TUI idle past
+/// the backstop gets its row repaired on its next prompt. The cost of a
+/// false-positive reap is bounded — unread direct messages older than the
+/// backstop cascade away with the row — while the cost of no backstop is
+/// unbounded store growth. Sized generously above any plausible think-time
+/// gap of a live session.
+pub const PULL_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Messages older than this are pruned by `sweep_messages`, regardless of
 /// recipient. Direct messages already cascade away with a DEL'd recipient
@@ -186,11 +203,30 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
         };
 
         match session.client_id.as_ref() {
-            // Pull/hook session: no WS client by design, so elapsed time cannot
-            // tell a crashed client from a live idle TUI. SessionEnd owns its
-            // lifecycle; retaining it preserves nickname routing and unread
-            // direct messages while the Codex process remains open.
-            None => {}
+            // Pull/hook session: no WS client by design, so short-horizon
+            // elapsed time cannot tell a crashed client from a live idle TUI —
+            // `SessionEnd` owns the prompt lifecycle and retaining the row
+            // preserves nickname routing and unread direct messages while the
+            // Codex process remains open. But an uncleanly-dead agent never
+            // sends SessionEnd, so `PULL_STALE_AFTER` backstops it: reap when
+            // every hook signal has been silent that long. A live TUI that
+            // trips it is repaired on its next prompt (idempotent hook
+            // re-registration).
+            None => {
+                let last_signal_ms = [
+                    session.last_activity_at,
+                    session.last_tool_at,
+                    Some(session.connected_at),
+                ]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(0);
+                let now_ms = Utc::now().timestamp_millis();
+                if now_ms.saturating_sub(last_signal_ms) >= PULL_STALE_AFTER.as_millis() as i64 {
+                    to_delete.push(id);
+                }
+            }
             // WS shim session bound to a live client: healthy.
             Some(cid) if live_client_ids.contains(&cid.0) => {
                 disconnected_since.remove(&id);
@@ -244,7 +280,7 @@ mod tests {
         ctx
     }
 
-    fn set_hook_session(ctx: &CellServerCtx, id: &str) {
+    fn set_hook_session(ctx: &CellServerCtx, id: &str, last_activity_at: i64) {
         let session = Session {
             id: SessionId(Arc::from(id)),
             client_id: None,
@@ -256,7 +292,7 @@ mod tests {
             activity: None,
             kind: None,
             connected_at: 0,
-            last_activity_at: Some(0),
+            last_activity_at: Some(last_activity_at),
             last_tool: None,
             last_tool_at: None,
             operator: None,
@@ -284,16 +320,47 @@ mod tests {
     }
 
     #[test]
-    fn sweep_preserves_idle_hook_sessions_until_session_end() {
+    fn sweep_preserves_idle_hook_sessions_within_the_backstop() {
         let ctx = setup();
-        set_hook_session(&ctx, "idle-codex");
+        set_hook_session(&ctx, "idle-codex", Utc::now().timestamp_millis());
 
         sweep_once(&ctx, &mut HashMap::new());
 
         assert!(
             session_ids(&ctx).contains("idle-codex"),
-            "elapsed time cannot distinguish a live idle Codex TUI from a crash"
+            "short-horizon elapsed time cannot distinguish a live idle Codex TUI from a crash"
         );
+    }
+
+    /// Seed a Client row so the sweeper's warm-up gate (no Client store yet ⇒
+    /// no delete decisions) sees a live snapshot, as in production.
+    fn set_client(ctx: &CellServerCtx, id: &str) {
+        let client = myko::entities::client::Client {
+            id: myko::entities::client::ClientId(Arc::from(id)),
+            server_id: myko::entities::server::ServerId(Arc::from("srv")),
+            address: None,
+            windback: None,
+        };
+        let ev = MEvent::from_item(&client, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![ev]).expect("apply Client SET");
+    }
+
+    #[test]
+    fn sweep_reaps_hook_sessions_past_the_activity_backstop() {
+        let ctx = setup();
+        set_client(&ctx, "ws-client");
+        let stale = Utc::now().timestamp_millis() - PULL_STALE_AFTER.as_millis() as i64 - 60_000;
+        set_hook_session(&ctx, "dead-codex", stale);
+        set_hook_session(&ctx, "live-codex", Utc::now().timestamp_millis());
+
+        sweep_once(&ctx, &mut HashMap::new());
+
+        let ids = session_ids(&ctx);
+        assert!(
+            !ids.contains("dead-codex"),
+            "a pull session silent past PULL_STALE_AFTER is unboundedly-retained garbage (lv-6731)"
+        );
+        assert!(ids.contains("live-codex"));
     }
 
     fn set_room(ctx: &CellServerCtx, id: &str, kind: RoomKind) {

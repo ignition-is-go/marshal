@@ -24,7 +24,8 @@ tasks = ["check", "build", "test", "lint", "publish"]
 # the workspace no longer pins unicode-width =0.2.0 and this resolves in-tree.)
 # `ts-export` pulls `ts-rs` itself — the macros emit `#[derive(ts_rs::TS)]`, so
 # the crate must be in scope; pinned to myko's exact 11.1 so the `TS` trait is
-# the same type myko's codegen walks.
+# the same type myko's codegen walks. (myko 6 folds `ts-export`/`codegen` into
+# one `codegen-ts` umbrella and moves to ts-rs 12 — adjust both when migrating.)
 ts-export = ["dep:ts-rs", "myko/ts-export"]
 codegen = ["ts-export", "myko/codegen"]
 

@@ -47,10 +47,16 @@ async fn main() -> Result<()> {
     // so connection bookkeeping never lands in durable storage (a replayed
     // Client would reference a WS connection that no longer exists).
     let blackhole: Arc<dyn myko::server::Persister> = Arc::new(BlackholePersister);
+    // Session is durable but its liveness fields churn on a seconds-scale
+    // heartbeat; the filter drops liveness-only SETs from the durable path so
+    // the event table grows with session lifecycle, not with heartbeats
+    // (lv-6731). Late-bound to the Postgres producer after build below.
+    let session_filter = Arc::new(daemon::liveness_filter::SessionLivenessFilter::new());
     let mut builder = CellServer::builder()
         .with_bind_addr(bind_addr)
         .with_persister_override("Client", blackhole.clone())
         .with_persister_override("Server", blackhole.clone())
+        .with_persister_override("Session", session_filter.clone())
         .with_server_info(marshal_server_info());
 
     // Persistence: Postgres via myko when `MYKO_POSTGRES_URL` is set — durable,
@@ -78,6 +84,13 @@ async fn main() -> Result<()> {
     };
 
     let server = builder.build();
+
+    // Bind the Session filter to the real durable persister now that the
+    // builder has constructed it. In ephemeral mode there is none and the
+    // filter keeps dropping, matching the blackhole default.
+    if let Some(handle) = server.postgres_producer.clone() {
+        session_filter.bind(Arc::new(handle));
+    }
 
     // Spawn the periodic sweeper. WS-shim sessions reap on client loss +
     // grace; pull/hook sessions reap on the activity backstop. See cleanup.
