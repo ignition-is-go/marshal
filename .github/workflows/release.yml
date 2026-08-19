@@ -106,18 +106,34 @@ jobs:
           # cargo-install-from-pinned-tag for the daemon, no local
           # target/release build for the shims). Triple-suffixed so a fetch
           # can pick the right platform.
-          rustup target add x86_64-pc-windows-gnu
-          # Bounded apt (Acquire timeouts + retries) so a flaky Ubuntu mirror
-          # can't hang the release — the failure mode that stalled v0.16.0 ~2h.
-          sudo apt-get update \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
-          sudo apt-get install -y -o Acquire::Retries=3 mingw-w64
+          #
+          # The Linux deploy artifacts build and upload FIRST, before any
+          # toolchain this job does not control (rustup targets, apt mirrors)
+          # gets a chance to hang it. v0.49.6 and v0.49.7 both hit the 40-min
+          # backstop inside the mingw apt install — the mirror TRICKLED bytes,
+          # which Acquire's stall timeouts never trip — and v0.49.7 was left
+          # as a valid tag with zero assets: exactly the stranding this
+          # workflow's design promises to prevent. Uploading the Linux assets
+          # here restores that promise; a Windows/UI failure below is a
+          # visible job failure with the fleet-deployable assets already up.
           cargo build --release -p marshal-daemon
           cargo build --release -p marshal-shim
-          cargo build --release -p marshal-shim --target x86_64-pc-windows-gnu
           cp target/release/marshal-daemon  marshal-daemon-x86_64-unknown-linux-gnu
           cp target/release/marshal-shim    marshal-shim-x86_64-unknown-linux-gnu
+          gh release upload "v$VERSION" \
+            marshal-daemon-x86_64-unknown-linux-gnu \
+            marshal-shim-x86_64-unknown-linux-gnu \
+            scripts/install-codex.sh
+
+          rustup target add x86_64-pc-windows-gnu
+          # Bounded apt: Acquire timeouts + retries bound connection stalls,
+          # and the hard `timeout` bounds a mirror that keeps trickling bytes
+          # (the 2026-08-19 failure mode — 33 min inside one apt install).
+          sudo timeout 8m apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          sudo timeout 8m apt-get install -y -o Acquire::Retries=3 mingw-w64
+          cargo build --release -p marshal-shim --target x86_64-pc-windows-gnu
           cp target/x86_64-pc-windows-gnu/release/marshal-shim.exe marshal-shim-x86_64-pc-windows-gnu.exe
 
           # marshal-ui: build the Leptos/WASM dashboard to a static bundle and
@@ -129,11 +145,8 @@ jobs:
           tar -czf marshal-ui-dist.tar.gz -C crates/ui/dist .
 
           gh release upload "v$VERSION" \
-            marshal-daemon-x86_64-unknown-linux-gnu \
-            marshal-shim-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-pc-windows-gnu.exe \
-            marshal-ui-dist.tar.gz \
-            scripts/install-codex.sh
+            marshal-ui-dist.tar.gz
 
   # Registry publication is deliberately downstream of the deploy artifacts.
   # It remains a required job (so missing credentials are visible), but cannot
