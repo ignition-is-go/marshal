@@ -143,6 +143,14 @@ fn main() -> Result<()> {
 }
 
 async fn serve() -> Result<()> {
+    // Capture the spawner's pid FIRST — before any other startup work — so
+    // the parent-death watchdog below baselines against the real spawner.
+    // Captured later, a spawner that died during our own startup would have
+    // already reparented us and the watchdog would baseline against the
+    // subreaper instead, never firing.
+    #[cfg(unix)]
+    let initial_ppid = unsafe { libc::getppid() };
+
     init_logging();
     marshal_entities::link();
 
@@ -379,6 +387,36 @@ async fn serve() -> Result<()> {
     // All queries / handlers / connection subscribers are registered.
     // Now it's safe to start the WS handshake.
     client.set_address(Some(daemon_address));
+
+    // Parent-death watchdog — defense in depth beside the exit-on-EOF path.
+    // Stdin EOF is the primary death signal, but it never arrives when a
+    // duplicated pipe fd survives in some other process, or when a long-lived
+    // app-server keeps holding the stdin of a finished conversation's server.
+    // Our spawner dying reparents us; once that happens no MCP client can
+    // ever reach us again, so fold into the same deregister+exit path.
+    #[cfg(unix)]
+    {
+        // A ppid of 1 at process start means the spawner is already gone (or
+        // this is a deliberately daemonized launch): reparenting is
+        // undetectable there, so the watchdog would either misfire or never
+        // fire — skip and rely on the exit-on-EOF path alone.
+        if initial_ppid > 1 {
+            let client_for_watchdog = Arc::clone(&client);
+            let session_for_watchdog = Arc::clone(&session);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    let ppid = unsafe { libc::getppid() };
+                    if ppid != initial_ppid {
+                        log::warn!(
+                            "[marshal-shim] parent {initial_ppid} exited (reparented to {ppid}); shutting down"
+                        );
+                        deregister_and_exit(&client_for_watchdog, &session_for_watchdog, is_codex);
+                    }
+                }
+            });
+        }
+    }
 
     let host = Arc::new(tools::ToolHost {
         client: Arc::clone(&client),
@@ -778,7 +816,7 @@ async fn serve() -> Result<()> {
     });
 
     let notify_rx = Mutex::new(Some(notify_rx));
-    mcp::serve_stdio(config, handler, Arc::clone(&activity), move |notifier| {
+    let served = mcp::serve_stdio(config, handler, Arc::clone(&activity), move |notifier| {
         // Spawn a task that drains the NotifyChannel buffer and emits each
         // one onto stdout via the MCP writer. The buffer accumulated any
         // notifications that fired before MCP init.
@@ -791,7 +829,41 @@ async fn serve() -> Result<()> {
             log::info!("[marshal-shim] notification drain task started");
         }
     })
-    .await
+    .await;
+
+    // Stdin EOF: our MCP client is gone and no one will ever speak to us
+    // again. Take our roster row down now (the daemon's staleness sweep is
+    // only a lagging backstop) and exit the process.
+    if let Err(e) = &served {
+        log::warn!("[marshal-shim] MCP serve ended with error: {e}");
+    }
+    log::info!("[marshal-shim] stdin closed; deregistering and exiting");
+    deregister_and_exit(&client, &session, is_codex);
+}
+
+/// Best-effort roster deregistration followed by a hard process exit.
+///
+/// `std::process::exit` (not a plain return) is deliberate. Returning would
+/// drop the tokio runtime, whose Drop blocks on in-flight blocking-pool work
+/// (tokio's stdin reader among it), and the MykoClient's OS threads would
+/// keep reconnecting regardless — the process would outlive its session
+/// indefinitely. Orphaned shims accumulated by the hundreds on agent exec
+/// hosts until the memcg OOM killer took out unrelated services (netbird
+/// included); exiting unconditionally here is one half of that fix, the
+/// bounded writer drain in `mcp::serve` is the other.
+fn deregister_and_exit(client: &MykoClient, session: &Arc<Mutex<Session>>, is_codex: bool) -> ! {
+    // Under Codex the shim owns no Session (the SessionStart hook registers
+    // the authoritative one) — nothing to deregister.
+    if !is_codex && let Ok(guard) = session.lock() {
+        let snapshot = guard.clone();
+        drop(guard);
+        if let Err(e) = emit_session_del(client, &snapshot) {
+            log::warn!("[marshal-shim] roster DEL on shutdown failed: {e}");
+        }
+        // One beat for the client's write thread to flush the DEL frame.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    std::process::exit(0);
 }
 
 /// SET our Session entity. Used both on initial connect and on every
