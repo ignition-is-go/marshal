@@ -484,8 +484,20 @@ where
         }
     }
 
-    drop(notifier); // close the channel so the writer task exits
-    let _ = writer_task.await;
+    // Dropping our notifier alone does NOT close the writer channel: the
+    // `on_ready` drain task holds a Notifier clone for the life of the
+    // process, so awaiting the writer unboundedly here never returned.
+    // That was the orphaned-shim leak — every shim whose client died
+    // lived on (hundreds per exec host, until the memcg OOM killer took
+    // out unrelated services). Nobody reads our stdout after EOF anyway:
+    // give pending writes one beat to flush, then abandon the writer.
+    drop(notifier);
+    if tokio::time::timeout(std::time::Duration::from_secs(2), writer_task)
+        .await
+        .is_err()
+    {
+        log::info!("writer task still busy after stdin EOF; abandoning it");
+    }
     Ok(())
 }
 
@@ -711,6 +723,38 @@ mod tests {
 
         drop(client_w); // close stdin so server exits
         let _ = server.await;
+    }
+
+    /// Production wiring: main's `on_ready` spawns a drain task that owns a
+    /// Notifier clone for the life of the process, so the writer channel
+    /// never closes. serve() must still return after stdin EOF — it once
+    /// awaited the writer unboundedly here, which is exactly the orphaned-
+    /// shim leak that OOM'd the agent exec hosts.
+    #[tokio::test]
+    async fn eof_returns_even_when_on_ready_retains_notifier() {
+        let (client_w, server_r) = duplex(64 * 1024);
+        let (server_w, _client_r) = duplex(64 * 1024);
+
+        let server = tokio::spawn(serve(
+            make_config(),
+            Arc::new(EchoHandler),
+            Arc::new(Activity::new()),
+            |notifier| {
+                tokio::spawn(async move {
+                    let _keep_forever = notifier;
+                    std::future::pending::<()>().await;
+                });
+            },
+            server_r,
+            server_w,
+        ));
+
+        drop(client_w); // stdin EOF
+        tokio::time::timeout(std::time::Duration::from_secs(30), server)
+            .await
+            .expect("serve() must return after stdin EOF despite a retained Notifier")
+            .expect("serve task panicked")
+            .expect("serve returned an error");
     }
 
     #[tokio::test]
