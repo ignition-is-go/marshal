@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hyphae::Gettable;
+use hyphae::{Gettable, Materialize};
 use marshal_entities::{
     GetAllSessions, LivePushStatus, Message, NotifyChannel, SendMessage, SendMessageResult,
     Session, SessionId, WakeStatus,
@@ -27,16 +27,16 @@ use marshal_entities::{
 use myko::{
     client::{ConnectionStatus, MykoClient, MykoProtocol},
     core::item::Eventable,
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
     wire::{MEvent, MEventType},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use uuid::Uuid;
 
 const POLL_TIMEOUT: Duration = Duration::from_secs(8);
 
 struct ServerHandle {
-    ctx: CellServerCtx,
+    ctx: MykoServerContext,
     shutdown: Option<std::sync::mpsc::Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -60,7 +60,7 @@ fn pick_free_port() -> u16 {
 }
 
 fn spawn_server(bind: SocketAddr) -> ServerHandle {
-    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<CellServerCtx>(1);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<MykoServerContext>(1);
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
     let join = thread::spawn(move || {
@@ -71,7 +71,7 @@ fn spawn_server(bind: SocketAddr) -> ServerHandle {
         rt.block_on(async move {
             let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
             let server = Arc::new(
-                CellServer::builder()
+                MykoServer::builder()
                     .with_bind_addr(bind)
                     .with_default_persister(blackhole)
                     .build(),
@@ -136,10 +136,10 @@ fn send_session_set(client: &MykoClient, session: &Session) {
     client.send_event(event).expect("send_event");
 }
 
-fn message_count(ctx: &CellServerCtx) -> usize {
+fn message_count(ctx: &MykoServerContext) -> usize {
     ctx.registry
         .get(Message::ENTITY_NAME_STATIC)
-        .map(|store| store.entries().get().len())
+        .map(|store| store.entries().materialize().get().len())
         .unwrap_or(0)
 }
 

@@ -22,6 +22,7 @@ fn main() {
     // SAFETY: single-threaded here, before any library init touches env.
     unsafe { std::env::set_var("TS_RS_EXPORT_DIR", &output_dir) };
 
-    myko::codegen::generate_item_types(&output_dir).expect("failed to generate TypeScript types");
+    myko::codegen::typescript::generate_item_types(&output_dir)
+        .expect("failed to generate TypeScript types");
     println!("wrote marshal TS bindings to {output_dir}");
 }

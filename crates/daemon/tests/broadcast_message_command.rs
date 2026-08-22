@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use hyphae::Gettable;
+use hyphae::{Gettable, Materialize};
 use marshal_entities::{
     AutoSource, BroadcastMessage, Message, Room, RoomId, RoomKind, RoomMember, RoomMemberId,
     Session, SessionId,
@@ -19,18 +19,18 @@ use myko::{
     core::item::Eventable,
     entities::client::ClientId,
     request::RequestContext,
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
     utils::downcast_item,
     wire::{MEvent, MEventType},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use uuid::Uuid;
 
-fn setup() -> CellServerCtx {
+fn setup() -> MykoServerContext {
     marshal_entities::link();
     daemon::link();
     let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
-    let server = CellServer::builder()
+    let server = MykoServer::builder()
         .with_default_persister(blackhole)
         .build();
     let ctx = server.ctx();
@@ -60,12 +60,12 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
     }
 }
 
-fn set_session(ctx: &CellServerCtx, s: &Session) {
+fn set_session(ctx: &MykoServerContext, s: &Session) {
     let ev = MEvent::from_item(s, MEventType::SET, &Uuid::new_v4().to_string());
     ctx.apply_event_batch(vec![ev]).expect("apply Session SET");
 }
 
-fn set_room(ctx: &CellServerCtx, id: &str) {
+fn set_room(ctx: &MykoServerContext, id: &str) {
     let room = Room {
         id: RoomId(Arc::from(id)),
         name: id.to_string(),
@@ -79,7 +79,7 @@ fn set_room(ctx: &CellServerCtx, id: &str) {
     ctx.apply_event_batch(vec![ev]).expect("apply Room SET");
 }
 
-fn set_member(ctx: &CellServerCtx, room: &str, sess: &str) {
+fn set_member(ctx: &MykoServerContext, room: &str, sess: &str) {
     let m = RoomMember {
         id: RoomMemberId(Arc::from(RoomMember::make_id(room, sess).as_str())),
         room_id: RoomId(Arc::from(room)),
@@ -91,7 +91,7 @@ fn set_member(ctx: &CellServerCtx, room: &str, sess: &str) {
         .expect("apply RoomMember SET");
 }
 
-fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
+fn cmd_ctx(ctx: &MykoServerContext, caller_client_id: Option<&str>) -> CommandContext {
     let req = RequestContext::new(
         Arc::<str>::from(Uuid::new_v4().to_string().as_str()),
         caller_client_id.map(Arc::<str>::from),
@@ -106,11 +106,12 @@ fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContex
     )
 }
 
-fn messages(ctx: &CellServerCtx) -> Vec<Message> {
+fn messages(ctx: &MykoServerContext) -> Vec<Message> {
     ctx.registry
         .get(Message::ENTITY_NAME_STATIC)
         .map(|s| {
             s.entries()
+                .materialize()
                 .get()
                 .into_iter()
                 .filter_map(|(_, it)| downcast_item::<Message>(&it))
@@ -120,7 +121,7 @@ fn messages(ctx: &CellServerCtx) -> Vec<Message> {
 }
 
 /// A room with `sender` + one other member, so the broadcast has a recipient.
-fn room_with_two(ctx: &CellServerCtx) {
+fn room_with_two(ctx: &MykoServerContext) {
     set_session(ctx, &session("sender", Some("c-sender")));
     set_session(ctx, &session("peer", Some("c-peer")));
     set_room(ctx, "everyone");

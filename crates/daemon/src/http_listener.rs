@@ -5,7 +5,7 @@
 //! `/myko/mcp` (WS + HTTP MCP) on its own port and we do **not** fork it
 //! to bolt on extra routes. The hooks need a dumb plain-HTTP endpoint a
 //! curl one-liner POSTs raw hook JSON to, so marshal binds a second port
-//! and shares the server's `Arc<CellServerCtx>` — same registry, same
+//! and shares the server's `Arc<MykoServerContext>` — same registry, same
 //! event log, no second source of truth.
 //!
 //! The HTTP handling is intentionally tiny: HTTP/1.1, `Content-Length`
@@ -15,7 +15,7 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
-use myko::server::CellServerCtx;
+use myko::server::MykoServerContext;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -29,7 +29,7 @@ use crate::hooks;
 const MAX_BODY: usize = 256 * 1024;
 
 /// Run the hook listener forever. Spawn on a tokio task.
-pub async fn run(bind: SocketAddr, ctx: Arc<CellServerCtx>) -> std::io::Result<()> {
+pub async fn run(bind: SocketAddr, ctx: Arc<MykoServerContext>) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     log::info!("marshal hook listener on http://{bind} (/hook/*)");
     loop {
@@ -49,7 +49,7 @@ pub async fn run(bind: SocketAddr, ctx: Arc<CellServerCtx>) -> std::io::Result<(
     }
 }
 
-async fn handle_conn(mut stream: TcpStream, ctx: Arc<CellServerCtx>) -> std::io::Result<()> {
+async fn handle_conn(mut stream: TcpStream, ctx: Arc<MykoServerContext>) -> std::io::Result<()> {
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
     let mut tmp = [0u8; 2048];
 

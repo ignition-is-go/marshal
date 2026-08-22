@@ -25,10 +25,11 @@
 
 use std::sync::Arc;
 
+use myko::prelude::EventPublishing as _;
 use myko::{
     command::{CommandContext, CommandHandler},
     request::RequestContext,
-    server::CellServerCtx,
+    server::MykoServerContext,
 };
 use serde_json::Value;
 
@@ -71,7 +72,7 @@ pub fn dispatch(
     path: &str,
     query: &str,
     body: &[u8],
-    ctx: &Arc<CellServerCtx>,
+    ctx: &Arc<MykoServerContext>,
 ) -> Option<HookOutcome> {
     match path {
         "/hook/session-register" => Some(handle_session_register(query, body, ctx)),
@@ -86,7 +87,7 @@ pub fn dispatch(
 /// the listener on write success so a lost/timed-out response can't lose
 /// messages (they stay unread and re-surface). Fail-loud: a failed ack is
 /// logged, not silently swallowed.
-pub fn ack_surfaced(ctx: &Arc<CellServerCtx>, session: &SessionId, ids: Vec<MessageId>) {
+pub fn ack_surfaced(ctx: &Arc<MykoServerContext>, session: &SessionId, ids: Vec<MessageId>) {
     if ids.is_empty() {
         return;
     }
@@ -111,12 +112,12 @@ pub fn ack_surfaced(ctx: &Arc<CellServerCtx>, session: &SessionId, ids: Vec<Mess
 /// separate from `/hook/session-start` is important: the eager registration
 /// request has no model turn to receive context, so surfacing (and later
 /// acknowledging) unread messages here would lose them.
-fn handle_session_register(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
+fn handle_session_register(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
     let _ = register_hook_session(query, body, ctx);
     HookOutcome::text(String::new())
 }
 
-fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
+fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
     let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx) else {
         return HookOutcome::text(String::new());
     };
@@ -160,7 +161,7 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> H
 fn register_hook_session(
     query: &str,
     body: &[u8],
-    ctx: &Arc<CellServerCtx>,
+    ctx: &Arc<MykoServerContext>,
 ) -> Option<(String, CommandContext)> {
     let body = parse_body(body)?;
     let sid = body.get("session_id").and_then(|v| v.as_str())?;
@@ -251,7 +252,7 @@ fn register_hook_session(
     Some((sid, cmd_ctx))
 }
 
-fn handle_prompt_submit(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
+fn handle_prompt_submit(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
     // A live Codex TUI may outlast a daemon deployment or an older daemon's
     // time-based hook-session cleanup. Re-run the same idempotent registration
     // used by SessionStart so this prompt repairs a missing row in place before
@@ -268,7 +269,7 @@ fn handle_prompt_submit(query: &str, body: &[u8], ctx: &Arc<CellServerCtx>) -> H
     }
 }
 
-fn handle_session_end(body: &[u8], ctx: &Arc<CellServerCtx>) -> HookOutcome {
+fn handle_session_end(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
     let Some(body) = parse_body(body) else {
         return HookOutcome::text(String::new());
     };
@@ -414,7 +415,7 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
 
 /// Build an internal (clientless) `CommandContext`. Commands run through
 /// it carry no WS `client_id`, so they must self-identify via `asSession`.
-fn internal_cmd_ctx(ctx: &Arc<CellServerCtx>) -> CommandContext {
+fn internal_cmd_ctx(ctx: &Arc<MykoServerContext>) -> CommandContext {
     let tx: Arc<str> = uuid::Uuid::new_v4().to_string().into();
     let req = RequestContext::internal(tx, ctx.host_id, "hook");
     CommandContext::new(Arc::from("hook"), Arc::new(req), ctx.clone())

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
 use myko::{
     command::{CommandContext, CommandError},
     entities::client::ClientId,
@@ -22,6 +23,8 @@ pub struct HostInfo {
     /// `std::env::consts::ARCH` — `"x86_64"`, `"aarch64"`, etc.
     pub arch: String,
 }
+
+myko::impl_filterable_opaque!(HostInfo);
 
 #[cfg(test)]
 mod tests {
@@ -301,14 +304,18 @@ pub fn resolve_caller(
     })?;
     sessions
         .iter()
-        .find(|s| s.client_id.as_ref() == Some(&client_id))
+        .find(|s| {
+            s.client_id
+                .as_ref()
+                .is_some_and(|id| id.0.as_ref() == client_id)
+        })
         .cloned()
         .ok_or_else(|| {
             caller_err(
                 ctx,
                 &format!(
                     "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                    client_id.0.as_ref(),
+                    client_id,
                 ),
             )
         })

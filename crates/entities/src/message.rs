@@ -1,4 +1,5 @@
 use myko::myko_item;
+use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
 
 use crate::session::SessionId;
 

@@ -28,10 +28,10 @@ use hyphae::Gettable;
 use marshal_entities::{GetAllSessions, Session, SessionId};
 use myko::{
     client::{ConnectionStatus, MykoClient, MykoProtocol},
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
     wire::{MEvent, MEventType},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 
 const POLL_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -40,7 +40,7 @@ const POLL_TIMEOUT: Duration = Duration::from_secs(8);
 /// closes all per-connection sockets, simulating `kill` of the
 /// daemon process).
 struct ServerHandle {
-    ctx: CellServerCtx,
+    ctx: MykoServerContext,
     shutdown: Option<mpsc::Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -57,7 +57,7 @@ impl ServerHandle {
 }
 
 fn spawn_server(bind: SocketAddr) -> ServerHandle {
-    let (ready_tx, ready_rx) = mpsc::sync_channel::<CellServerCtx>(1);
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<MykoServerContext>(1);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
     let join = thread::spawn(move || {
@@ -68,7 +68,7 @@ fn spawn_server(bind: SocketAddr) -> ServerHandle {
         rt.block_on(async move {
             let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
             let server = Arc::new(
-                CellServer::builder()
+                MykoServer::builder()
                     .with_bind_addr(bind)
                     .with_default_persister(blackhole)
                     .build(),

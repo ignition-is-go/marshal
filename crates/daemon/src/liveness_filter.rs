@@ -153,9 +153,9 @@ mod tests {
         MEvent {
             item,
             change_type: MEventType::SET,
-            item_type: "Session".to_string(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            tx: "tx".to_string(),
+            item_type: "Session".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            tx: "tx".into(),
             source_id: None,
         }
     }
@@ -164,9 +164,9 @@ mod tests {
         MEvent {
             item: serde_json::json!({ "id": id }),
             change_type: MEventType::DEL,
-            item_type: "Session".to_string(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            tx: "tx".to_string(),
+            item_type: "Session".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            tx: "tx".into(),
             source_id: None,
         }
     }
