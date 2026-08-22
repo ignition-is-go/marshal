@@ -24,12 +24,13 @@ use futures_util::{SinkExt, StreamExt};
 use marshal_entities::{
     GetAllSessions, HostInfo, Message, MessageId, MessageRead, MessageReadId, Session, SessionId,
 };
+use myko::prelude::EventPublishing as _;
 use myko::{
     command::CommandContext,
     request::RequestContext,
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::{
@@ -46,7 +47,7 @@ const SHIM: &str = env!("CARGO_BIN_EXE_marshal-shim");
 
 struct CellHarness {
     address: String,
-    ctx: Arc<CellServerCtx>,
+    ctx: Arc<MykoServerContext>,
     shutdown: Option<std::sync::mpsc::Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -66,7 +67,7 @@ impl CellHarness {
             runtime.block_on(async move {
                 let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
                 let server = Arc::new(
-                    CellServer::builder()
+                    MykoServer::builder()
                         .with_bind_addr(bind)
                         .with_default_persister(blackhole)
                         .build(),
@@ -112,7 +113,7 @@ struct HookHarness {
 }
 
 impl HookHarness {
-    async fn spawn(ctx: Arc<CellServerCtx>) -> Self {
+    async fn spawn(ctx: Arc<MykoServerContext>) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind hook listener");
@@ -141,7 +142,7 @@ impl Drop for HookHarness {
     }
 }
 
-async fn handle_hook_request(mut stream: TcpStream, ctx: Arc<CellServerCtx>) -> io::Result<()> {
+async fn handle_hook_request(mut stream: TcpStream, ctx: Arc<MykoServerContext>) -> io::Result<()> {
     let (target, body) = read_http_request(&mut stream).await?;
     if target.starts_with("/hook/session-register")
         && let Ok(body) = serde_json::from_slice::<Value>(&body)
@@ -447,7 +448,7 @@ fn free_port() -> u16 {
     listener.local_addr().expect("reserved address").port()
 }
 
-fn internal_context(ctx: &Arc<CellServerCtx>) -> CommandContext {
+fn internal_context(ctx: &Arc<MykoServerContext>) -> CommandContext {
     let request = RequestContext::internal(
         uuid::Uuid::new_v4().to_string().into(),
         ctx.host_id,
@@ -482,7 +483,7 @@ fn hook_session(id: &str, cwd: &str) -> Session {
     }
 }
 
-async fn wait_for_sessions(ctx: &Arc<CellServerCtx>, expected: &[&str]) {
+async fn wait_for_sessions(ctx: &Arc<MykoServerContext>, expected: &[&str]) {
     wait_until("hook-owned session registration", WAIT, || {
         let sessions = internal_context(ctx)
             .exec_query(GetAllSessions {})
@@ -496,7 +497,7 @@ async fn wait_for_sessions(ctx: &Arc<CellServerCtx>, expected: &[&str]) {
     .await;
 }
 
-fn emit_message(ctx: &Arc<CellServerCtx>, id: &str, recipient: &str) {
+fn emit_message(ctx: &Arc<MykoServerContext>, id: &str, recipient: &str) {
     internal_context(ctx)
         .emit_set(&Message {
             id: MessageId(Arc::from(id)),
@@ -510,7 +511,7 @@ fn emit_message(ctx: &Arc<CellServerCtx>, id: &str, recipient: &str) {
         .expect("emit direct message");
 }
 
-fn mark_read(ctx: &Arc<CellServerCtx>, message_id: &str, session_id: &str) {
+fn mark_read(ctx: &Arc<MykoServerContext>, message_id: &str, session_id: &str) {
     internal_context(ctx)
         .emit_set(&MessageRead {
             id: MessageReadId(Arc::from(MessageRead::make_id(message_id, session_id))),

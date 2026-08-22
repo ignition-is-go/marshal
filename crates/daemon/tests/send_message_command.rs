@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use hyphae::Gettable;
+use hyphae::{Gettable, Materialize};
 use marshal_entities::{
     LivePushStatus, Message, SendMessage, SendMessageResult, Session, SessionId, WakeStatus,
 };
@@ -25,22 +25,22 @@ use myko::{
     core::item::Eventable,
     entities::client::ClientId,
     request::RequestContext,
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
     wire::{MEvent, MEventType},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use uuid::Uuid;
 
-fn setup() -> CellServerCtx {
+fn setup() -> MykoServerContext {
     marshal_entities::link();
     daemon::link();
 
     let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
-    let server = CellServer::builder()
+    let server = MykoServer::builder()
         .with_default_persister(blackhole)
         .build();
     let ctx = server.ctx();
-    let server: &'static CellServer = Box::leak(Box::new(server));
+    let server: &'static MykoServer = Box::leak(Box::new(server));
     let _ = server;
     ctx
 }
@@ -67,7 +67,7 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
     }
 }
 
-fn set_session(ctx: &CellServerCtx, s: &Session) {
+fn set_session(ctx: &MykoServerContext, s: &Session) {
     let event = MEvent::from_item(s, MEventType::SET, &Uuid::new_v4().to_string());
     ctx.apply_event_batch(vec![event])
         .expect("apply Session SET");
@@ -76,7 +76,7 @@ fn set_session(ctx: &CellServerCtx, s: &Session) {
 /// Build a CommandContext as if the WS server had just dispatched a
 /// command from the given client connection (`None` = no connection
 /// identity, the HTTP-MCP / hook path).
-fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
+fn cmd_ctx(ctx: &MykoServerContext, caller_client_id: Option<&str>) -> CommandContext {
     let req = RequestContext::new(
         Arc::<str>::from(Uuid::new_v4().to_string().as_str()),
         caller_client_id.map(Arc::<str>::from),
@@ -91,19 +91,19 @@ fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContex
     )
 }
 
-fn message_count(ctx: &CellServerCtx) -> usize {
+fn message_count(ctx: &MykoServerContext) -> usize {
     ctx.registry
         .get(Message::ENTITY_NAME_STATIC)
-        .map(|store| store.entries().get().len())
+        .map(|store| store.entries().materialize().get().len())
         .unwrap_or(0)
 }
 
-fn only_message(ctx: &CellServerCtx) -> Message {
+fn only_message(ctx: &MykoServerContext) -> Message {
     let store = ctx
         .registry
         .get(Message::ENTITY_NAME_STATIC)
         .expect("Message store exists");
-    let entries = store.entries().get();
+    let entries = store.entries().materialize().get();
     assert_eq!(entries.len(), 1, "expected exactly one Message");
     myko::utils::downcast_item::<Message>(&entries.into_iter().next().unwrap().1)
         .expect("entry is a Message")

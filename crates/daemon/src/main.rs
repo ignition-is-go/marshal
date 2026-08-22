@@ -1,6 +1,6 @@
 //! marshal-daemon — myko coordination server.
 //!
-//! Single binary: spins up a myko `CellServer` over WebSocket and registers
+//! Single binary: spins up a Myko server over WebSocket and registers
 //! the entities defined in the `entities` crate. Persistence is Postgres via
 //! myko when `MYKO_POSTGRES_URL` is set (durable, latest-state-per-entity —
 //! like pulse-cluster / pulse-ctx); otherwise the daemon runs ephemeral. Bind
@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use myko_server::mcp::dispatch::ServerInfo;
 use myko_server::postgres::PostgresConfig;
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     // the event table grows with session lifecycle, not with heartbeats
     // (lv-6731). Late-bound to the Postgres producer after build below.
     let session_filter = Arc::new(daemon::liveness_filter::SessionLivenessFilter::new());
-    let mut builder = CellServer::builder()
+    let mut builder = MykoServer::builder()
         .with_bind_addr(bind_addr)
         .with_persister_override("Client", blackhole.clone())
         .with_persister_override("Server", blackhole.clone())

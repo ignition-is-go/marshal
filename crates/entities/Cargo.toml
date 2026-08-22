@@ -18,16 +18,15 @@ tasks = ["check", "build", "test", "lint", "publish"]
 # `ts-export` activates the `#[cfg_attr(feature = "ts-export", derive(myko::TS),
 # ts(export))]` the myko item/command/query macros emit into this crate, and
 # turns on myko's ts-rs machinery so `myko::TS` resolves to `ts_rs::TS`.
-# `codegen` additionally pulls `myko::codegen` (dprint/swc) for the typegen bin.
-# Both are off by default so normal builds skip the ts-rs/codegen tree. (codegen
+# `codegen` additionally enables the typegen bin. Both are off by default so
+# normal builds skip the ts-rs/codegen tree. (codegen
 # needs unicode-width ^0.2.1 via swc; marshal-tui was bumped to ratatui 0.30 so
 # the workspace no longer pins unicode-width =0.2.0 and this resolves in-tree.)
 # `ts-export` pulls `ts-rs` itself — the macros emit `#[derive(ts_rs::TS)]`, so
-# the crate must be in scope; pinned to myko's exact 11.1 so the `TS` trait is
-# the same type myko's codegen walks. (myko 6 folds `ts-export`/`codegen` into
-# one `codegen-ts` umbrella and moves to ts-rs 12 — adjust both when migrating.)
-ts-export = ["dep:ts-rs", "myko/ts-export"]
-codegen = ["ts-export", "myko/codegen"]
+# the crate must be in scope; pinned to myko's exact 12.0.1 so the `TS` trait is
+# the same type myko's codegen walks.
+ts-export = ["dep:ts-rs", "myko/codegen-ts"]
+codegen = ["ts-export"]
 
 [[bin]]
 name = "typegen"
@@ -41,6 +40,6 @@ myko = { workspace = true }
 myko-macros = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 log = { workspace = true }
-# Only linked under `ts-export` (the macros' `#[derive(ts_rs::TS)]`). Same 11.1
+# Only linked under `ts-export` (the macros' `#[derive(ts_rs::TS)]`). Same 12.0.1
 # as myko so the derived `TS` impls match the trait myko's typegen consumes.
-ts-rs = { version = "11.1", features = ["serde-json-impl"], optional = true }
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"], optional = true }

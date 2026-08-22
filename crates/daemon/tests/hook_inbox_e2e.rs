@@ -21,10 +21,10 @@ use myko::{
     command::{CommandContext, CommandHandler},
     entities::client::ClientId,
     request::RequestContext,
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
     wire::{MEvent, MEventType},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use uuid::Uuid;
 
 fn pick_free_port() -> u16 {
@@ -56,13 +56,13 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
     }
 }
 
-fn set_session(ctx: &CellServerCtx, s: &Session) {
+fn set_session(ctx: &MykoServerContext, s: &Session) {
     let event = MEvent::from_item(s, MEventType::SET, &Uuid::new_v4().to_string());
     ctx.apply_event_batch(vec![event])
         .expect("apply Session SET");
 }
 
-fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
+fn cmd_ctx(ctx: &MykoServerContext, caller_client_id: Option<&str>) -> CommandContext {
     let req = RequestContext::new(
         Arc::<str>::from(Uuid::new_v4().to_string().as_str()),
         caller_client_id.map(Arc::<str>::from),
@@ -112,11 +112,11 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     daemon::link();
 
     let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
-    let server = CellServer::builder()
+    let server = MykoServer::builder()
         .with_default_persister(blackhole)
         .build();
     let ctx = server.ctx();
-    let server: &'static CellServer = Box::leak(Box::new(server));
+    let server: &'static MykoServer = Box::leak(Box::new(server));
     let _ = server;
 
     // Seed the sender; the recipient is created through the real eager

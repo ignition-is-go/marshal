@@ -18,6 +18,7 @@ use std::{collections::HashSet, sync::Arc};
 use marshal_entities::{
     GetAllSessionNicknames, GetAllSessions, Session, SessionNickname, SessionNicknameId, nickname,
 };
+use myko::prelude::EventPublishing as _;
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
     myko_command,

@@ -21,6 +21,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use myko::prelude::{EventPublishing as _, RequestScoped as _};
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
     myko_command,

@@ -30,6 +30,7 @@ use marshal_entities::{
     AutoSource, GetAllRoomMembers, GetAllRooms, Room, RoomId, RoomKind, RoomMember, RoomMemberId,
     Session,
 };
+use myko::prelude::EventPublishing as _;
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
     myko_command,

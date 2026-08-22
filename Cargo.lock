@@ -255,9 +255,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "autosocket"
-version = "5.0.7"
+version = "6.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28b47dbe494d76b08118c49c814ba43c23de185cbede2890dd9faa501402406d"
+checksum = "130fd21648be3981a3cfc1f42e0ee1739dfa070367e5304d73fe05a4f85099e0"
 dependencies = [
  "dashmap 6.2.1",
  "flume",
@@ -266,7 +266,6 @@ dependencies = [
  "send_wrapper",
  "serde",
  "tracing",
- "ts-rs",
  "tungstenite",
  "url",
  "wasm-bindgen",
@@ -616,6 +615,28 @@ dependencies = [
  "serde_core",
  "toml",
  "winnow",
+]
+
+[[package]]
+name = "confique"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06b4f5ec222421e22bb0a8cbaa36b1d2b50fd45cdd30c915ded34108da78b29f"
+dependencies = [
+ "confique-macro",
+ "serde",
+]
+
+[[package]]
+name = "confique-macro"
+version = "0.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4d1754680cd218e7bcb4c960cc9bae3444b5197d64563dccccfdf83cab9e1a7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1960,9 +1981,9 @@ dependencies = [
 
 [[package]]
 name = "hyphae"
-version = "2.0.1"
+version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a03e9eca73e1e7851eb6b16924ccf0994a56a0b29cdb4e74bd84d0d05c7c8e7a"
+checksum = "e5814a2be1865b96526c652fadc7f7ac1620782109bcfaed5d20be43232c87b6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1982,9 +2003,9 @@ dependencies = [
 
 [[package]]
 name = "hyphae-leptos"
-version = "2.0.1"
+version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac7c14b3a518fa2f9d84475d7deec55b7f0dc7aea1ff99a390514217d7c17c97"
+checksum = "356ee53c1a4a6e27755ba183ac7784c10f56e9a9617039dd86fdbfe407543693"
 dependencies = [
  "hyphae",
  "leptos",
@@ -2857,9 +2878,9 @@ dependencies = [
 
 [[package]]
 name = "myko"
-version = "5.0.7"
+version = "6.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0569507f0e6cb1346a6cff8a68d1dded88e83d9b828aefc44da3e5f0a1e32868"
+checksum = "5c73e8dbc5c8250fdf0fc425322b8260dc078da9b92035f102307547e9323d6a"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -2875,13 +2896,15 @@ dependencies = [
  "flume",
  "futures",
  "getrandom 0.3.4",
+ "gloo-timers",
  "hyphae",
  "inventory",
  "js-sys",
  "myko-macros",
  "nucleo-matcher",
+ "num-traits",
  "opentelemetry",
- "partially",
+ "parking_lot",
  "pin-project-lite",
  "rayon",
  "roaring",
@@ -2900,9 +2923,9 @@ dependencies = [
 
 [[package]]
 name = "myko-leptos"
-version = "5.0.7"
+version = "6.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cca4dd10bbe64567564da968ca877e91bb2727878dc3a81af9e66b3ba5d4ffa5"
+checksum = "25c78208ca4b43bc581a392bb67038f4199124f99d2a24abaa5156de2666dd6c"
 dependencies = [
  "hyphae-leptos",
  "leptos",
@@ -2912,9 +2935,9 @@ dependencies = [
 
 [[package]]
 name = "myko-macros"
-version = "5.0.7"
+version = "6.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee1c9a3bf3509406a60de266bb905e663287d93be863560bf02e66f18c8fa764"
+checksum = "0759296ba0b1af4c7d74ebba87e4572f767974735477c39642e062ee32a9b98e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2923,12 +2946,13 @@ dependencies = [
 
 [[package]]
 name = "myko-server"
-version = "5.0.7"
+version = "6.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d09811b4a04a1699d0f31d163ab4886853e499804512e93dad9f894e5dfdea31"
+checksum = "4b1f82f277ece60da4bc4bbdb2c50a2b6e404ccf5f0d69825ad960403ae6972d"
 dependencies = [
  "chrono",
  "ciborium",
+ "confique",
  "dashmap 6.2.1",
  "flume",
  "futures-util",
@@ -2936,6 +2960,7 @@ dependencies = [
  "hyphae",
  "inventory",
  "myko",
+ "num-traits",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -3264,6 +3289,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c04f5d74368e4d0dfe06c45c8627c81bd7c317d52762d118fb9b3076f6420fd"
 
 [[package]]
+name = "ordered-float"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c7c9e0d9b23589f26070720bac724174bfec1083e82f7854cdd0267518343c0"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "outref"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3350,27 +3384,6 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
-]
-
-[[package]]
-name = "partially"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c662358b50ce030ff0bf5c174541e37b2e29564732c34504e8ffb952389e3c1"
-dependencies = [
- "partially_derive",
-]
-
-[[package]]
-name = "partially_derive"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e53059790c7b28bb3a618a75dbfa0c6e569515d0b8d3a4df94baca76d4e14b38"
-dependencies = [
- "darling 0.20.11",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -3607,6 +3620,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator",
  "postgres-protocol",
 ]
@@ -5464,20 +5478,23 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "ts-rs"
-version = "11.1.0"
+version = "12.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4994acea2522cd2b3b85c1d9529a55991e3ad5e25cdcd3de9d505972c4379424"
+checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
 dependencies = [
+ "chrono",
+ "ordered-float",
  "serde_json",
  "thiserror 2.0.19",
  "ts-rs-macros",
+ "uuid",
 ]
 
 [[package]]
 name = "ts-rs-macros"
-version = "11.1.0"
+version = "12.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee6ff59666c9cbaec3533964505d39154dc4e0a56151fdea30a09ed0301f62e2"
+checksum = "38d90eea51bc7988ef9e674bf80a85ba6804739e535e9cab48e4bb34a8b652aa"
 dependencies = [
  "proc-macro2",
  "quote",

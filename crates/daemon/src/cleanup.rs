@@ -24,9 +24,9 @@ use std::{
 };
 
 use chrono::Utc;
-use hyphae::Gettable;
+use hyphae::{Gettable, Materialize};
 use marshal_entities::{AutoSource, Message, Room, RoomKind, RoomMember, Session};
-use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
+use myko::{core::item::Eventable, server::MykoServerContext, utils::downcast_item};
 
 /// How long a WS-shim session must be without a live client before DEL. Sized
 /// to survive a WHOLE-FLEET reconnect after a daemon restart: on restart every
@@ -72,7 +72,7 @@ const MESSAGE_SWEEP_EVERY: u64 = 100;
 pub const TICK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Run the sweeper forever. Spawn this on a tokio task and forget it.
-pub async fn run_sweeper(ctx: CellServerCtx) {
+pub async fn run_sweeper(ctx: MykoServerContext) {
     let mut disconnected_since: HashMap<Arc<str>, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(TICK_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -96,13 +96,13 @@ pub async fn run_sweeper(ctx: CellServerCtx) {
 /// broadcasts (to `everyone`/`op:`/`project:`, which are never DEL'd) that
 /// would otherwise grow the store without limit. DELing a Message cascades its
 /// `MessageRead` rows via `belongs_to(Message)`, so read-state is cleaned too.
-fn sweep_messages(ctx: &CellServerCtx) {
+fn sweep_messages(ctx: &MykoServerContext) {
     let Some(store) = ctx.registry.get(Message::ENTITY_NAME_STATIC) else {
         return;
     };
     let cutoff = Utc::now().timestamp_millis() - MESSAGE_TTL.as_millis() as i64;
     let mut to_delete: Vec<Arc<str>> = Vec::new();
-    for (id, item) in store.entries().get() {
+    for (id, item) in store.entries().materialize().get() {
         if let Some(m) = downcast_item::<Message>(&item)
             && m.sent_at < cutoff
         {
@@ -131,7 +131,7 @@ fn sweep_messages(ctx: &CellServerCtx) {
 /// `everyone` is permanent; adhoc rooms are user-owned and left alone.
 /// DELing a Room cascades its RoomMember rows via `belongs_to(Room)`, so
 /// live memberships never orphan.
-fn sweep_rooms(ctx: &CellServerCtx) {
+fn sweep_rooms(ctx: &MykoServerContext) {
     let Some(room_store) = ctx.registry.get(Room::ENTITY_NAME_STATIC) else {
         return;
     };
@@ -141,14 +141,14 @@ fn sweep_rooms(ctx: &CellServerCtx) {
 
     // Live member count per room id.
     let mut member_counts: HashMap<Arc<str>, usize> = HashMap::new();
-    for (_id, item) in member_store.entries().get() {
+    for (_id, item) in member_store.entries().materialize().get() {
         if let Some(m) = downcast_item::<RoomMember>(&item) {
             *member_counts.entry(m.room_id.0.clone()).or_default() += 1;
         }
     }
 
     let mut to_delete: Vec<Arc<str>> = Vec::new();
-    for (id, item) in room_store.entries().get() {
+    for (id, item) in room_store.entries().materialize().get() {
         let Some(room) = downcast_item::<Room>(&item) else {
             continue;
         };
@@ -175,7 +175,7 @@ fn sweep_rooms(ctx: &CellServerCtx) {
     }
 }
 
-fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, Instant>) {
+fn sweep_once(ctx: &MykoServerContext, disconnected_since: &mut HashMap<Arc<str>, Instant>) {
     let Some(session_store) = ctx.registry.get(Session::ENTITY_NAME_STATIC) else {
         return;
     };
@@ -188,6 +188,7 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
 
     let live_client_ids: HashSet<Arc<str>> = client_store
         .entries()
+        .materialize()
         .get()
         .into_iter()
         .map(|(id, _)| id)
@@ -197,7 +198,7 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
     let mut to_delete: Vec<Arc<str>> = Vec::new();
     let mut still_disconnected: HashSet<Arc<str>> = HashSet::new();
 
-    for (id, item) in session_store.entries().get() {
+    for (id, item) in session_store.entries().materialize().get() {
         let Some(session) = downcast_item::<Session>(&item) else {
             continue;
         };
@@ -264,15 +265,15 @@ mod tests {
         server::Persister,
         wire::{MEvent, MEventType},
     };
-    use myko_server::{BlackholePersister, CellServer};
+    use myko_server::{BlackholePersister, MykoServer};
     use std::collections::HashSet;
     use uuid::Uuid;
 
-    fn setup() -> CellServerCtx {
+    fn setup() -> MykoServerContext {
         marshal_entities::link();
         crate::link();
         let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
-        let server = CellServer::builder()
+        let server = MykoServer::builder()
             .with_default_persister(blackhole)
             .build();
         let ctx = server.ctx();
@@ -280,7 +281,7 @@ mod tests {
         ctx
     }
 
-    fn set_hook_session(ctx: &CellServerCtx, id: &str, last_activity_at: i64) {
+    fn set_hook_session(ctx: &MykoServerContext, id: &str, last_activity_at: i64) {
         let session = Session {
             id: SessionId(Arc::from(id)),
             client_id: None,
@@ -305,12 +306,13 @@ mod tests {
             .expect("apply hook Session SET");
     }
 
-    fn session_ids(ctx: &CellServerCtx) -> HashSet<String> {
+    fn session_ids(ctx: &MykoServerContext) -> HashSet<String> {
         ctx.registry
             .get(Session::ENTITY_NAME_STATIC)
             .map(|store| {
                 store
                     .entries()
+                    .materialize()
                     .get()
                     .into_iter()
                     .map(|(id, _)| id.to_string())
@@ -334,7 +336,7 @@ mod tests {
 
     /// Seed a Client row so the sweeper's warm-up gate (no Client store yet ⇒
     /// no delete decisions) sees a live snapshot, as in production.
-    fn set_client(ctx: &CellServerCtx, id: &str) {
+    fn set_client(ctx: &MykoServerContext, id: &str) {
         let client = myko::entities::client::Client {
             id: myko::entities::client::ClientId(Arc::from(id)),
             server_id: myko::entities::server::ServerId(Arc::from("srv")),
@@ -363,7 +365,7 @@ mod tests {
         assert!(ids.contains("live-codex"));
     }
 
-    fn set_room(ctx: &CellServerCtx, id: &str, kind: RoomKind) {
+    fn set_room(ctx: &MykoServerContext, id: &str, kind: RoomKind) {
         let room = Room {
             id: RoomId(Arc::from(id)),
             name: id.to_string(),
@@ -375,7 +377,7 @@ mod tests {
         ctx.apply_event_batch(vec![ev]).expect("apply Room SET");
     }
 
-    fn set_member(ctx: &CellServerCtx, room_id: &str, session_id: &str) {
+    fn set_member(ctx: &MykoServerContext, room_id: &str, session_id: &str) {
         let member = RoomMember {
             id: RoomMemberId(Arc::from(RoomMember::make_id(room_id, session_id).as_str())),
             room_id: RoomId(Arc::from(room_id)),
@@ -387,11 +389,12 @@ mod tests {
             .expect("apply RoomMember SET");
     }
 
-    fn room_ids(ctx: &CellServerCtx) -> HashSet<String> {
+    fn room_ids(ctx: &MykoServerContext) -> HashSet<String> {
         ctx.registry
             .get(Room::ENTITY_NAME_STATIC)
             .map(|s| {
                 s.entries()
+                    .materialize()
                     .get()
                     .into_iter()
                     .map(|(id, _)| id.to_string())
@@ -464,7 +467,7 @@ mod tests {
         );
     }
 
-    fn set_message(ctx: &CellServerCtx, id: &str, sent_at: i64) {
+    fn set_message(ctx: &MykoServerContext, id: &str, sent_at: i64) {
         let msg = Message {
             id: MessageId(Arc::from(id)),
             from_session_id: SessionId(Arc::from("sender")),
@@ -478,11 +481,12 @@ mod tests {
         ctx.apply_event_batch(vec![ev]).expect("apply Message SET");
     }
 
-    fn message_ids(ctx: &CellServerCtx) -> HashSet<String> {
+    fn message_ids(ctx: &MykoServerContext) -> HashSet<String> {
         ctx.registry
             .get(Message::ENTITY_NAME_STATIC)
             .map(|s| {
                 s.entries()
+                    .materialize()
                     .get()
                     .into_iter()
                     .map(|(id, _)| id.to_string())

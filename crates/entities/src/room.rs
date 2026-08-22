@@ -14,6 +14,7 @@
 //! - `Adhoc`: anything a user creates with `join_room("anything")`.
 
 use myko::myko_item;
+use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
 use serde::{Deserialize, Serialize};
 
 #[myko_item]
@@ -68,3 +69,5 @@ pub enum AutoSource {
     /// repo root containing the session's `cwd`.
     Project { basename: String },
 }
+
+myko::impl_filterable_opaque!(RoomKind, AutoSource);
