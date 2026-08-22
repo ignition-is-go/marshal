@@ -195,7 +195,7 @@ jobs:
   build-macos:
     needs: release
     if: needs.release.outputs.skip == 'false'
-    runs-on: [self-hosted, macOS, ARM64, site-lucid-lab, cpu-ge-16, ram-ge-64g, disk-ge-200g]
+    runs-on: macos-latest
     timeout-minutes: 40
     permissions:
       contents: write
@@ -213,7 +213,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ needs.release.outputs.version }}"
-          # The self-hosted runner is Apple Silicon; x86_64 is a cross
+          # macos-latest is Apple Silicon (aarch64 native); x86_64 is a cross
           # target the universal Apple SDK on the runner already supports.
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
           cargo build --release -p marshal-shim --target aarch64-apple-darwin
