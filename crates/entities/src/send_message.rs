@@ -100,6 +100,16 @@ pub enum LivePushStatus {
 pub enum WakeStatus {
     /// The live push landed and marked the durable inbox copy read.
     NotNeeded,
+    /// The recipient is connected but does not render channel pushes (a Codex
+    /// bridge, or any channels-off harness), so the message will be picked up by
+    /// that connection's own wake path — typically starting an idle turn shortly
+    /// after this response. States that a path EXISTS, never that a wake
+    /// happened: the daemon still cannot observe the later `turn/start`.
+    ///
+    /// This exists because `live_push: unavailable` alone cannot tell a sender
+    /// whether the recipient is dead or simply wakes by another route, which
+    /// reads as "live delivery is broken" for every healthy Codex session.
+    Expected,
     /// Wake handling, if configured, happens after this response and is not
     /// observed by the sender.
     #[default]
@@ -215,10 +225,21 @@ impl CommandHandler for SendMessage {
             _ => LivePushStatus::Unavailable,
         };
         let delivered_live = live_push == LivePushStatus::Delivered;
-        let wake = if delivered_live {
-            WakeStatus::NotNeeded
-        } else {
-            WakeStatus::Unobserved
+        // A recipient that is connected but cannot render channel pushes still
+        // has a wake path: its harness picks the message up from the inbox (the
+        // Codex bridge starts an idle turn). Distinguish that from a recipient
+        // with no usable connection — otherwise both report the same thing and a
+        // healthy Codex session looks unreachable.
+        //
+        // Narrow deliberately: only the case where the push was SKIPPED because
+        // the live client cannot render. A `Failed` push means the binding was
+        // stale (the connection is gone), which is no wake path at all —
+        // claiming one there would repeat the "delivered_live lied" mistake in a
+        // new field.
+        let wake = match live_push {
+            LivePushStatus::Delivered => WakeStatus::NotNeeded,
+            LivePushStatus::Unavailable if recipient.client_id.is_some() => WakeStatus::Expected,
+            _ => WakeStatus::Unobserved,
         };
 
         // Dedup the pull inbox against a landed live push. A channels-ON
