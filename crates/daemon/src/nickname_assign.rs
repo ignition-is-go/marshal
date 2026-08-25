@@ -57,44 +57,47 @@ pub struct AssignNickname {
 
 impl CommandHandler for AssignNickname {
     fn execute(self, ctx: CommandContext) -> Result<(), CommandError> {
-        // The session may have DEL'd between the SET and our run — that's fine,
-        // a stray assignment is harmless, but skip it to avoid reserving a name
-        // for a gone session.
-        let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
-        if !sessions
-            .iter()
-            .any(|s| s.id.0.as_ref() == self.session_id.as_str())
-        {
-            return Ok(());
-        }
-
-        let assigned: Vec<Arc<SessionNickname>> = ctx.exec_query(GetAllSessionNicknames {})?;
-
-        // Already has a handle → FROZEN. This early return is the whole
-        // grandfather: once a session is named, no wordlist change moves it.
-        if assigned
-            .iter()
-            .any(|n| n.id.0.as_ref() == self.session_id.as_str())
-        {
-            return Ok(());
-        }
-
-        // Assign: the current-wordlist candidate, re-hashed with a salt on the
-        // rare collision so two sessions never share a handle. The un-salted
-        // candidate equals the old pure-function output, so at rollout every
-        // live session is assigned exactly the handle it already had.
-        let taken: HashSet<&str> = assigned.iter().map(|n| n.nickname.as_str()).collect();
-        let mut handle = nickname(&self.session_id);
-        let mut salt = 0u32;
-        while taken.contains(handle.as_str()) {
-            salt += 1;
-            handle = nickname(&format!("{}#{salt}", self.session_id));
-        }
-
-        ctx.emit_set(&SessionNickname {
-            id: SessionNicknameId(Arc::from(self.session_id.as_str())),
-            nickname: handle,
-        })?;
+        ensure_assigned(&ctx, &self.session_id)?;
         Ok(())
     }
+}
+
+/// Reserve and return the sticky nickname for a registered session.
+///
+/// Hook registration calls this synchronously so callers can learn the
+/// collision-safe identity before the asynchronous assignment saga runs.
+pub fn ensure_assigned(ctx: &CommandContext, session_id: &str) -> Result<String, CommandError> {
+    // The session may have DEL'd between the SET and our run — that's fine,
+    // a stray assignment is harmless, but skip it to avoid reserving a name
+    // for a gone session.
+    let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
+    if !sessions.iter().any(|s| s.id.0.as_ref() == session_id) {
+        return Ok(nickname(session_id));
+    }
+
+    let assigned: Vec<Arc<SessionNickname>> = ctx.exec_query(GetAllSessionNicknames {})?;
+
+    // Already has a handle → FROZEN. This early return is the whole
+    // grandfather: once a session is named, no wordlist change moves it.
+    if let Some(existing) = assigned.iter().find(|n| n.id.0.as_ref() == session_id) {
+        return Ok(existing.nickname.clone());
+    }
+
+    // Assign: the current-wordlist candidate, re-hashed with a salt on the
+    // rare collision so two sessions never share a handle. The un-salted
+    // candidate equals the old pure-function output, so at rollout every
+    // live session is assigned exactly the handle it already had.
+    let taken: HashSet<&str> = assigned.iter().map(|n| n.nickname.as_str()).collect();
+    let mut handle = nickname(session_id);
+    let mut salt = 0u32;
+    while taken.contains(handle.as_str()) {
+        salt += 1;
+        handle = nickname(&format!("{session_id}#{salt}"));
+    }
+
+    ctx.emit_set(&SessionNickname {
+        id: SessionNicknameId(Arc::from(session_id)),
+        nickname: handle.clone(),
+    })?;
+    Ok(handle)
 }
