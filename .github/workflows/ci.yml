@@ -20,7 +20,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
