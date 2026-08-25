@@ -1,0 +1,39 @@
+name: Public CI acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: Kata-isolated runner
+    runs-on: public-ci
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify runner isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+
+          test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token
+
+          marker=/home/runner/_work/.public-ci-acceptance-marker
+          test ! -e "$marker"
+          printf '%s\n' "$GITHUB_RUN_ID" > "$marker"
+
+          curl --fail --silent --show-error --max-time 15 \
+            https://api.github.com/meta >/dev/null
+
+          if curl --insecure --silent --connect-timeout 3 --max-time 5 \
+            https://192.168.1.159:6443/ >/dev/null 2>&1; then
+            echo "::error::Private Kubernetes API was reachable"
+            exit 1
+          fi
+
+      - name: Hold for concurrent observation
+        run: sleep 60
