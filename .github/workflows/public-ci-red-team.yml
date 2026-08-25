@@ -24,6 +24,7 @@ jobs:
           cat /proc/1/cgroup
           findmnt -T /home/runner/_work
           grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):' /proc/self/status
+          test "$(awk '/^Seccomp:/ { print $2 }' /proc/self/status)" = 2
           sudo -n id || true
 
       - name: Reject host and cluster resources
@@ -96,4 +97,3 @@ jobs:
 
       - name: Hold for runtime inspection
         run: sleep 60
-
