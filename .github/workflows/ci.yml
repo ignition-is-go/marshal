@@ -11,7 +11,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: public-ci
     # Backstop so a stuck step (e.g. a flaky apt mirror, a hung runner) fails
     # in minutes instead of burning to GitHub's 6-hour default.
     timeout-minutes: 20
@@ -20,12 +20,18 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo install cargo-flux
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: plugins/marshal-pi/package-lock.json
       - run: npm ci --prefix plugins/marshal-pi
       - run: cargo flux run check
       - run: cargo flux run lint
@@ -39,7 +45,7 @@ jobs:
   # every PR, so a Windows-only break fails the check instead of the next
   # manual cross-build.
   windows-cross-check:
-    runs-on: ubuntu-latest
+    runs-on: public-ci
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -52,10 +58,11 @@ jobs:
         # azure.archive.ubuntu.com mirror can't hang the job indefinitely —
         # this is what stalled a release for ~2h on 2026-06-18.
         run: |
+          sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
-          sudo apt-get install -y -o Acquire::Retries=3 mingw-w64
+          sudo apt-get install -y -o Acquire::Retries=3 build-essential pkg-config mingw-w64
       - name: Cross-compile the Windows shim
         run: cargo check -p marshal-shim --target x86_64-pc-windows-gnu
 
