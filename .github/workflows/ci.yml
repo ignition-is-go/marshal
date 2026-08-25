@@ -27,6 +27,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo install cargo-flux
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: plugins/marshal-pi/package-lock.json
       - run: npm ci --prefix plugins/marshal-pi
       - run: cargo flux run check
       - run: cargo flux run lint
