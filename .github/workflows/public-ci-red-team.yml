@@ -2,6 +2,9 @@ name: Public CI red team
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/public-ci-fork-probe
 
 permissions:
   contents: read
@@ -94,6 +97,36 @@ jobs:
         run: |
           set -euo pipefail
           env | sed 's/=.*//' | sort
+
+      - name: Verify fork pull request token boundary
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REPO_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$HEAD_REPO_IS_FORK" = true
+          test -n "$GITHUB_TOKEN"
+
+          repo_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY")
+          test "$repo_status" = 200
+
+          admin_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/permissions")
+          case "$admin_status" in
+            403|404) ;;
+            *)
+              echo "::error::Fork token unexpectedly reached an administration endpoint (HTTP $admin_status)"
+              exit 1
+              ;;
+          esac
+          echo "Fork token read check: HTTP $repo_status; administration check: HTTP $admin_status"
 
       - name: Hold for runtime inspection
         run: sleep 60
