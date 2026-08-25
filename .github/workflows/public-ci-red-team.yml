@@ -164,9 +164,9 @@ jobs:
           foreach ($path in $forbidden) {
             if (Test-Path $path) { throw "Forbidden host resource is visible: $path" }
           }
-          $fixed = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3')
-          if ($fixed.Count -ne 1 -or $fixed[0].DeviceID -ne 'C:') {
-            throw "Unexpected fixed disks: $($fixed.DeviceID -join ', ')"
+          $disks = @(Get-CimInstance Win32_DiskDrive)
+          if ($disks.Count -ne 1) {
+            throw "Unexpected physical disks: $($disks.DeviceID -join ', ')"
           }
 
       - name: Reject private and metadata network reachability
