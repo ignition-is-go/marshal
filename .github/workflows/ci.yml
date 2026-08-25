@@ -11,7 +11,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: public-ci
     # Backstop so a stuck step (e.g. a flaky apt mirror, a hung runner) fails
     # in minutes instead of burning to GitHub's 6-hour default.
     timeout-minutes: 20
@@ -39,7 +39,7 @@ jobs:
   # every PR, so a Windows-only break fails the check instead of the next
   # manual cross-build.
   windows-cross-check:
-    runs-on: ubuntu-latest
+    runs-on: public-ci
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
