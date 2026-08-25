@@ -20,7 +20,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -53,6 +53,7 @@ jobs:
         # azure.archive.ubuntu.com mirror can't hang the job indefinitely —
         # this is what stalled a release for ~2h on 2026-06-18.
         run: |
+          sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
