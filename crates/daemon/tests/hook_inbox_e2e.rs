@@ -140,13 +140,20 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
 
     // App-server lifecycle discovery creates the hook-owned session before
     // any user prompt. Registration has no model turn to receive context, so
-    // its response must stay empty.
+    // its response identifies the reserved session without surfacing inbox.
     let registration = http_post(
         addr,
         "/hook/session-register?host=test-host&operator=test-op&harness=codex",
         r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
     );
-    assert_eq!(registration, "", "registration must not inject context");
+    let registration: serde_json::Value =
+        serde_json::from_str(&registration).expect("registration identity JSON");
+    assert_eq!(registration["session_id"], "recipient");
+    assert!(
+        registration["nickname"]
+            .as_str()
+            .is_some_and(|n| !n.is_empty())
+    );
 
     // Reproduce a still-running Codex TUI whose hook-owned row was removed by
     // an older daemon's idle-session backstop. Its next prompt must recreate
@@ -194,7 +201,11 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         "/hook/session-register?host=test-host&operator=test-op&harness=codex",
         r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
     );
-    assert_eq!(refresh, "", "registration refresh must not inject context");
+    let refresh: serde_json::Value = serde_json::from_str(&refresh).expect("refresh identity JSON");
+    assert_eq!(
+        refresh, registration,
+        "registration must keep its reserved identity"
+    );
 
     // the recipient's prompt-submit hook must surface the stored message.
     let body = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);

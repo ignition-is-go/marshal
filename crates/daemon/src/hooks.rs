@@ -113,8 +113,18 @@ pub fn ack_surfaced(ctx: &Arc<MykoServerContext>, session: &SessionId, ids: Vec<
 /// request has no model turn to receive context, so surfacing (and later
 /// acknowledging) unread messages here would lose them.
 fn handle_session_register(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
-    let _ = register_hook_session(query, body, ctx);
-    HookOutcome::text(String::new())
+    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx) else {
+        return HookOutcome::text(String::new());
+    };
+    let nickname = crate::nickname_assign::ensure_assigned(&cmd_ctx, &sid)
+        .unwrap_or_else(|_| marshal_entities::nickname(&sid));
+    HookOutcome::text(
+        serde_json::json!({
+            "session_id": sid,
+            "nickname": nickname,
+        })
+        .to_string(),
+    )
 }
 
 fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
