@@ -1,0 +1,99 @@
+name: Public CI red team
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  boundary-probes:
+    name: Sandbox boundary probes
+    runs-on: public-ci
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Identify the sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          id
+          systemd-detect-virt || true
+          cat /proc/1/cgroup
+          findmnt -T /home/runner/_work
+          grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):' /proc/self/status
+          sudo -n id || true
+
+      - name: Reject host and cluster resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          forbidden_paths=(
+            /host
+            /run/containerd/containerd.sock
+            /run/k3s/containerd/containerd.sock
+            /var/run/docker.sock
+            /var/lib/kubelet
+            /etc/rancher/k3s
+            /dev/kvm
+            /dev/mem
+            /dev/vhost-vsock
+            /var/run/secrets/kubernetes.io/serviceaccount/token
+          )
+
+          for path in "${forbidden_paths[@]}"; do
+            if [[ -e "$path" ]]; then
+              echo "::error::Forbidden host or cluster resource is visible: $path"
+              exit 1
+            fi
+          done
+
+          if mount | grep -Eq ' on /(host|var/lib/kubelet|run/containerd)(/| )'; then
+            echo "::error::Host filesystem mount is visible"
+            exit 1
+          fi
+
+      - name: Reject private network reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assert_blocked() {
+            local host=$1
+            local port=$2
+            if timeout 3 bash -c "</dev/tcp/$host/$port" 2>/dev/null; then
+              echo "::error::Private endpoint is reachable: $host:$port"
+              exit 1
+            fi
+          }
+
+          assert_blocked 192.168.1.159 6443
+          assert_blocked 192.168.1.29 22
+          assert_blocked 192.168.1.29 10250
+          assert_blocked 10.43.0.1 443
+          assert_blocked 169.254.169.254 80
+          assert_blocked 100.64.0.1 443
+
+          curl --fail --silent --show-error --max-time 15 \
+            https://api.github.com/meta >/dev/null
+
+      - name: Reject cross-job persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker=/home/runner/_work/.public-ci-red-team-marker
+          test ! -e "$marker"
+          printf '%s\n' "$GITHUB_RUN_ID" > "$marker"
+
+      - name: Inventory exposed environment names
+        shell: bash
+        run: |
+          set -euo pipefail
+          env | sed 's/=.*//' | sort
+
+      - name: Hold for runtime inspection
+        run: sleep 60
+
