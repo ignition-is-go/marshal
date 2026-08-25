@@ -20,6 +20,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -55,7 +56,7 @@ jobs:
           sudo apt-get update \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
-          sudo apt-get install -y -o Acquire::Retries=3 mingw-w64
+          sudo apt-get install -y -o Acquire::Retries=3 build-essential pkg-config mingw-w64
       - name: Cross-compile the Windows shim
         run: cargo check -p marshal-shim --target x86_64-pc-windows-gnu
 
