@@ -126,6 +126,12 @@ On Linux and macOS, `codex-run` performs three actions:
 3. runs `codex --remote unix:// ...`; the resulting `thread/started` event
    registers the session before any prompt is required.
 
+App-server and bridge startup are bounded. If either cannot become ready,
+`codex-run` emits a warning and immediately launches the same Codex binary with
+the original arguments in native mode. Live wake is unavailable for that run,
+but an integration failure never prevents the operator from reaching Codex;
+the durable hook inbox remains available at the next turn boundary.
+
 Codex does not provide that managed daemon on native Windows. There,
 `codex-run` instead starts one `codex app-server` child on an ephemeral
 `127.0.0.1` WebSocket port, attaches the bridge and TUI to it, then terminates

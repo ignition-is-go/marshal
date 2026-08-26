@@ -224,7 +224,14 @@ pub fn run_codex(args: &[String]) -> Result<()> {
     }
 
     let codex = std::env::var("MARSHAL_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
-    let mut app_server = launch_app_server(&codex)?;
+    run_codex_binary(&codex, args)
+}
+
+fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
+    let mut app_server = match launch_app_server(codex) {
+        Ok(app_server) => app_server,
+        Err(error) => return run_native_codex(codex, args, &error),
+    };
     let ready_file = std::env::temp_dir().join(format!(
         "marshal-codex-bridge-{}.ready",
         uuid::Uuid::new_v4()
@@ -246,7 +253,7 @@ pub fn run_codex(args: &[String]) -> Result<()> {
         Ok(bridge) => bridge,
         Err(error) => {
             stop_owned_app_server(&mut app_server);
-            return Err(error);
+            return run_native_codex(codex, args, &error);
         }
     };
     if let Err(error) = wait_for_bridge_ready(&mut bridge, &ready_file) {
@@ -254,11 +261,11 @@ pub fn run_codex(args: &[String]) -> Result<()> {
         let _ = bridge.wait();
         let _ = fs::remove_file(&ready_file);
         stop_owned_app_server(&mut app_server);
-        return Err(error);
+        return run_native_codex(codex, args, &error);
     }
 
     let cwd = std::env::current_dir().context("getting codex-run cwd")?;
-    let mut command = codex_tui_command(&codex, &app_server.remote, args, &cwd);
+    let mut command = codex_tui_command(codex, &app_server.remote, args, &cwd);
     let status = command
         .status()
         .with_context(|| format!("running `{codex} --remote {}`", app_server.remote));
@@ -276,6 +283,25 @@ pub fn run_codex(args: &[String]) -> Result<()> {
         anyhow::bail!("Codex exited with {status}");
     }
     Ok(())
+}
+
+fn run_native_codex(codex: &str, args: &[String], bridge_error: &anyhow::Error) -> Result<()> {
+    eprintln!(
+        "warning: Codex live delivery is unavailable ({bridge_error:#}); starting native Codex"
+    );
+    let status = native_codex_command(codex, args)
+        .status()
+        .with_context(|| format!("running native `{codex}` after live-delivery fallback"))?;
+    if !status.success() {
+        anyhow::bail!("Codex exited with {status}");
+    }
+    Ok(())
+}
+
+fn native_codex_command(codex: &str, args: &[String]) -> Command {
+    let mut command = Command::new(codex);
+    command.args(args);
+    command
 }
 
 fn codex_tui_command(codex: &str, remote: &str, args: &[String], cwd: &Path) -> Command {
@@ -1231,6 +1257,51 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args, ["--remote", "unix://", "--cd=/work/override"]);
+    }
+
+    #[test]
+    fn native_fallback_preserves_the_original_codex_arguments() {
+        let command = native_codex_command(
+            "/managed/codex",
+            &["resume".into(), "--last".into(), "--yolo".into()],
+        );
+        assert_eq!(command.get_program(), "/managed/codex");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["resume", "--last", "--yolo"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_run_falls_back_when_app_server_start_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temporary fake Codex directory");
+        let codex = temp.path().join("codex");
+        let invocation = temp.path().join("native-args");
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = app-server ]; then exit 17; fi\nprintf '%s\\n' \"$@\" > '{}'\n",
+                invocation.display()
+            ),
+        )
+        .expect("write fake Codex");
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake Codex executable");
+
+        run_codex_binary(
+            codex.to_str().expect("UTF-8 fake Codex path"),
+            &["resume".into(), "--last".into(), "--yolo".into()],
+        )
+        .expect("native fallback succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(invocation).expect("native invocation record"),
+            "resume\n--last\n--yolo\n"
+        );
     }
 
     fn session(id: &str, host: &str, hook_owned: bool) -> Arc<Session> {
