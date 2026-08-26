@@ -1,0 +1,38 @@
+name: Validate ephemeral public macOS
+
+on:
+  push:
+    branches: [validate-ephemeral-macos-public]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [one, two]
+    runs-on:
+      group: ephemeral-macos
+      labels: public-ci-macos
+    timeout-minutes: 15
+    steps:
+      - name: Validate disposable native environment
+        run: |
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          sw_vers
+          uname -m
+          test ! -e /Users/lucid
+          test ! -e "$HOME/.ssh"
+          test "$(security find-identity -v -p codesigning 2>/dev/null | tail -1 | awk '{print $1}')" = 0
+          curl -fsSL --max-time 10 https://api.github.com/zen >/dev/null
+          if curl -fsSL --connect-timeout 3 --max-time 5 http://192.168.1.1/ >/dev/null 2>&1; then
+            echo 'private management network was reachable' >&2
+            exit 1
+          fi
+          marker="/tmp/pulse-public-ci-${{ matrix.slot }}"
+          test ! -e "$marker"
+          touch "$marker"
+          sleep 10
