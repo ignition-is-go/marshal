@@ -93,11 +93,20 @@ jobs:
     steps:
       - name: Validate disposable native environment
         run: |
-          test "$RUNNER_OS" = macOS
-          test "$RUNNER_ARCH" = ARM64
-          test ! -e /Users/lucid
-          test ! -e "$HOME/.ssh"
-          test "$(security find-identity -v -p codesigning 2>/dev/null | tail -1 | awk '{print $1}')" = 0
+          echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH home=$HOME"
+          test "$RUNNER_OS" = macOS || { echo 'wrong OS'; exit 1; }
+          test "$RUNNER_ARCH" = ARM64 || { echo 'wrong architecture'; exit 1; }
+          test ! -e /Users/lucid || { echo 'host account leaked into guest'; exit 1; }
+          if test -e "$HOME/.ssh"; then
+            echo 'SSH state present:'
+            find "$HOME/.ssh" -maxdepth 2 -ls
+            exit 1
+          fi
+          identities="$(security find-identity -v -p codesigning 2>/dev/null)"
+          printf '%s\n' "$identities"
+          test "$(printf '%s\n' "$identities" | tail -1 | awk '{print $1}')" = 0 || { echo 'signing identity present'; exit 1; }
+          command -v metal
+          metal --version
           curl -fsSL --max-time 10 https://api.github.com/zen >/dev/null
           if curl -fsSL --connect-timeout 3 --max-time 5 http://192.168.1.1/ >/dev/null 2>&1; then
             echo 'private management network was reachable' >&2
