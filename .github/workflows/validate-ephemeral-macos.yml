@@ -1,6 +1,7 @@
 name: Validate ephemeral public macOS
 
 on:
+  workflow_dispatch:
   push:
     branches: [validate-ephemeral-macos-public]
 
