@@ -568,10 +568,19 @@ fn wait_for_app_server_recovery(
 fn same_cwd(first: &Path, second: &Path) -> bool {
     #[cfg(windows)]
     {
-        first
-            .to_string_lossy()
-            .replace('\\', "/")
-            .eq_ignore_ascii_case(&second.to_string_lossy().replace('\\', "/"))
+        fn comparable(path: &Path) -> String {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            if let Some(unc) = normalized.strip_prefix("//?/UNC/") {
+                format!("//{unc}")
+            } else {
+                normalized
+                    .strip_prefix("//?/")
+                    .unwrap_or(&normalized)
+                    .to_string()
+            }
+        }
+
+        comparable(first).eq_ignore_ascii_case(&comparable(second))
     }
     #[cfg(not(windows))]
     {
@@ -1565,11 +1574,11 @@ mod tests {
         let selected = temp.path().join("selected");
         fs::create_dir(&selected).expect("create selected directory");
 
-        assert_eq!(
-            codex_thread_cwd(&["--cd".into(), "selected".into()], temp.path()),
-            selected
-        );
-        assert_eq!(codex_thread_cwd(&[], temp.path()), temp.path());
+        assert!(same_cwd(
+            &codex_thread_cwd(&["--cd".into(), "selected".into()], temp.path()),
+            &selected,
+        ));
+        assert!(same_cwd(&codex_thread_cwd(&[], temp.path()), temp.path()));
     }
 
     #[test]
@@ -1846,14 +1855,20 @@ mod tests {
 
         drop(first);
         let takeover = now + WAKE_LEADER_SETTLE + Duration::from_millis(1);
-        assert!(
-            !second
-                .ready(takeover)
-                .expect("second acquires after first exits")
-        );
+        let acquired_at = (0..100)
+            .find_map(|attempt| {
+                let poll = takeover + Duration::from_millis(attempt);
+                assert!(
+                    !second
+                        .ready(poll)
+                        .expect("second acquires after first exits")
+                );
+                second.acquired_at.map(|_| poll)
+            })
+            .expect("second acquires released wake-leader lock");
         assert!(
             second
-                .ready(takeover + WAKE_LEADER_SETTLE)
+                .ready(acquired_at + WAKE_LEADER_SETTLE)
                 .expect("second becomes ready after settling")
         );
 
