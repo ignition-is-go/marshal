@@ -38,7 +38,7 @@ jobs:
     # guard; `version` is the stamped version the mac job checks out + tags.
     outputs:
       skip: ${{ steps.check.outputs.skip }}
-      version: ${{ steps.stamp.outputs.version }}
+      version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,7 +65,13 @@ jobs:
           if git log -1 --format='%s' | grep -q '^chore(release):'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            VERSION=$(cargo flux version)
+            if [ -z "$VERSION" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       - name: Configure git identity
@@ -80,8 +86,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(cargo flux version)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          VERSION="${{ steps.check.outputs.version }}"
           cargo flux stamp "$VERSION"
           # Keep Claude Code plugin manifests in lockstep with the workspace
           # version so `/plugin update` actually detects new releases.
