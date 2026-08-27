@@ -23,8 +23,9 @@
 //! On Unix, per-TUI bridges attached to the shared app-server elect one
 //! host-local wake leader; every bridge still observes lifecycle events.
 //! A per-TUI loopback proxy observes that connection's authoritative
-//! `thread/started` event, while the bridge registers its root session id before
-//! the first prompt. `codex-run` does not launch the TUI until both are ready.
+//! `thread/started` event or picker-issued `thread/resume` request, while the
+//! bridge registers its root session id before the first prompt. `codex-run`
+//! does not launch the TUI until both are ready.
 //!
 //! This is intentionally opt-in. A plain `codex` process owns an in-process
 //! backend with no control socket, so there is nowhere safe for a peer process
@@ -252,6 +253,14 @@ impl LauncherStateWriter {
     fn observe(&mut self, registration: &ThreadRegistration) -> Result<()> {
         if self.state.thread_id.is_none() && same_cwd(&self.cwd, Path::new(&registration.cwd)) {
             self.state.thread_id = Some(registration.thread_id.clone());
+            self.persist()?;
+        }
+        Ok(())
+    }
+
+    fn selected(&mut self, thread_id: &str) -> Result<()> {
+        if self.state.thread_id.is_none() {
+            self.state.thread_id = Some(thread_id.to_string());
             self.persist()?;
         }
         Ok(())
@@ -753,6 +762,13 @@ where
         tokio::select! {
             message = downstream.next() => {
                 let message = message.context("Codex TUI closed proxy connection")??;
+                if let WebSocketMessage::Text(text) = &message
+                    && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
+                    && let Some(thread_id) = resumed_thread_id(&value)
+                    && let Some(launcher) = launcher.as_ref()
+                {
+                    launcher.lock().await.selected(thread_id)?;
+                }
                 let closed = matches!(message, WebSocketMessage::Close(_));
                 upstream.send(message).await.context("forwarding TUI request to app-server")?;
                 if closed {
@@ -776,6 +792,12 @@ where
             }
         }
     }
+}
+
+fn resumed_thread_id(message: &Value) -> Option<&str> {
+    (message.get("method").and_then(Value::as_str) == Some("thread/resume"))
+        .then(|| message.pointer("/params/threadId").and_then(Value::as_str))
+        .flatten()
 }
 
 fn wait_for_bridge_ready(bridge: &mut Child, ready_file: &Path) -> Result<()> {
@@ -2518,6 +2540,74 @@ mod tests {
         })
         .await
         .expect("proxy should persist picker-selected thread");
+
+        proxy.abort();
+        app_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tui_proxy_records_picker_thread_resume_request() {
+        let app_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let app_address = app_listener.local_addr().unwrap();
+        let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let proxy_address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("launcher.json");
+        let launcher = Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
+            state_path.clone(),
+            PathBuf::from("/work/picker"),
+            None,
+        )));
+
+        let proxy = spawn_tui_proxy(
+            Some(AppServerEndpoint::WebSocket(format!(
+                "ws://{proxy_address}"
+            ))),
+            AppServerEndpoint::WebSocket(format!("ws://{app_address}")),
+            Some(launcher),
+        )
+        .await
+        .unwrap();
+        let app_server = tokio::spawn(async move {
+            let (stream, _) = app_listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            let request = websocket.next().await.unwrap().unwrap();
+            let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+            assert_eq!(request["method"], "thread/resume");
+        });
+
+        let (mut tui, _) = connect_async(format!("ws://{proxy_address}"))
+            .await
+            .unwrap();
+        tui.send(WebSocketMessage::Text(
+            json!({
+                "id": 7,
+                "method": "thread/resume",
+                "params": { "threadId": "picker-resumed-thread" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if read_launcher_state(&state_path)
+                    .and_then(|state| state.thread_id)
+                    .as_deref()
+                    == Some("picker-resumed-thread")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("proxy should persist the picker thread/resume request");
 
         proxy.abort();
         app_server.await.unwrap();
