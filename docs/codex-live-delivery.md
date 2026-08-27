@@ -126,6 +126,29 @@ On Linux and macOS, `codex-run` performs three actions:
 3. runs `codex --remote unix:// ...`; the resulting `thread/started` event
    registers the session before any prompt is required.
 
+The wrapper is a Marshal integration boundary, not a replacement Codex
+client. Marshal needs a second app-server connection because Codex hooks only
+run at turn boundaries and therefore cannot wake an idle TUI. The TUI remains
+the normal Codex executable and owns all user interaction and thread state.
+
+That second connection also gives the launcher an authoritative lifecycle
+signal during managed app-server updates. `codex-run` records the `thread.id`
+from the TUI's `thread/started` event. If the TUI then loses its transport while
+the lifecycle connection reports an app-server disconnect and a successfully
+initialized replacement connection, the launcher starts a fresh TUI process
+with `resume <thread.id>`. It preserves invocation-level model, profile,
+permission, working-directory, and display flags, but never replays positional
+prompts or image inputs. Normal user exits and non-transport failures are not
+restarted. An explicit UUID passed to `codex resume` pins the launcher to that
+thread immediately; a new or picker-selected session learns it from the first
+matching lifecycle event and keeps it across later server generations.
+
+This follows the app-server connection lifecycle rather than attempting to
+preserve a dead socket: every replacement connection performs `initialize` /
+`initialized`, and the fresh TUI resumes the persisted thread. The bridge stays
+alive across the TUI replacement and continues its normal registration and
+wake duties.
+
 App-server and bridge startup are bounded. If either cannot become ready,
 `codex-run` emits a warning and immediately launches the same Codex binary with
 the original arguments in native mode. Live wake is unavailable for that run,
@@ -138,9 +161,11 @@ Codex does not provide that managed daemon on native Windows. There,
 the child when the TUI exits. The bridge refuses non-loopback WebSocket
 endpoints; no unauthenticated app-server listener is exposed to the network.
 
-The bridge exits with that TUI. More than one live launcher may run on a host;
-Unix bridges elect one wake leader while all of them continue lifecycle
-registration. Windows launchers use separate ephemeral ports.
+The bridge normally exits with that TUI. During a managed Unix app-server
+replacement it remains alive long enough to reconnect and supervise the TUI
+resume. More than one live launcher may run on a host; Unix bridges elect one
+wake leader while all of them continue lifecycle registration. Windows
+launchers use separate ephemeral ports.
 
 For diagnostics or a supervisor-managed deployment, run the bridge directly:
 

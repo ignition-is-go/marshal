@@ -53,6 +53,7 @@ use marshal_entities::{
     GetAllMessageReads, GetAllMessages, GetAllSessions, Message, MessageRead, Session, SessionId,
 };
 use myko::client::MykoClient;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
@@ -67,6 +68,7 @@ const RETRY_COOLDOWN: Duration = Duration::from_secs(2);
 const WAKE_LEADER_SETTLE: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(8);
 const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const TUI_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -196,6 +198,62 @@ struct BridgeArgs {
     poll: Duration,
     wake_thread: Option<SessionId>,
     ready_file: Option<PathBuf>,
+    launcher_state_file: Option<PathBuf>,
+    launcher_cwd: Option<PathBuf>,
+    launcher_thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LauncherState {
+    generation: u64,
+    connected: bool,
+    thread_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct LauncherStateWriter {
+    path: PathBuf,
+    cwd: PathBuf,
+    state: LauncherState,
+}
+
+impl LauncherStateWriter {
+    fn new(path: PathBuf, cwd: PathBuf, thread_id: Option<String>) -> Self {
+        Self {
+            path,
+            cwd,
+            state: LauncherState {
+                thread_id,
+                ..LauncherState::default()
+            },
+        }
+    }
+
+    fn connected(&mut self) -> Result<()> {
+        self.state.generation = self.state.generation.saturating_add(1);
+        self.state.connected = true;
+        self.persist()
+    }
+
+    fn disconnected(&mut self) -> Result<()> {
+        self.state.connected = false;
+        self.persist()
+    }
+
+    fn observe(&mut self, registration: &ThreadRegistration) -> Result<()> {
+        if self.state.thread_id.is_none() && same_cwd(&self.cwd, Path::new(&registration.cwd)) {
+            self.state.thread_id = Some(registration.thread_id.clone());
+            self.persist()?;
+        }
+        Ok(())
+    }
+
+    fn persist(&self) -> Result<()> {
+        let encoded = serde_json::to_vec(&self.state).context("encoding codex-run state")?;
+        fs::write(&self.path, encoded)
+            .with_context(|| format!("writing codex-run state {}", self.path.display()))
+    }
 }
 
 struct LaunchedAppServer {
@@ -236,9 +294,23 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
         "marshal-codex-bridge-{}.ready",
         uuid::Uuid::new_v4()
     ));
+    let launcher_state_file = std::env::temp_dir().join(format!(
+        "marshal-codex-launcher-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let cwd = std::env::current_dir().context("getting codex-run cwd")?;
+    let thread_cwd = codex_thread_cwd(args, &cwd);
     let mut bridge_args = app_server.bridge_args.clone();
     bridge_args.push("--ready-file".to_string());
     bridge_args.push(ready_file.to_string_lossy().into_owned());
+    bridge_args.push("--launcher-state-file".to_string());
+    bridge_args.push(launcher_state_file.to_string_lossy().into_owned());
+    bridge_args.push("--launcher-cwd".to_string());
+    bridge_args.push(thread_cwd.to_string_lossy().into_owned());
+    if let Some(thread_id) = explicit_resume_thread_id(args) {
+        bridge_args.push("--launcher-thread-id".to_string());
+        bridge_args.push(thread_id);
+    }
 
     let this = std::env::current_exe().context("locating marshal-shim executable")?;
     let bridge = Command::new(this)
@@ -260,15 +332,39 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
         let _ = bridge.kill();
         let _ = bridge.wait();
         let _ = fs::remove_file(&ready_file);
+        let _ = fs::remove_file(&launcher_state_file);
         stop_owned_app_server(&mut app_server);
         return run_native_codex(codex, args, &error);
     }
 
-    let cwd = std::env::current_dir().context("getting codex-run cwd")?;
-    let mut command = codex_tui_command(codex, &app_server.remote, args, &cwd);
-    let status = command
-        .status()
-        .with_context(|| format!("running `{codex} --remote {}`", app_server.remote));
+    let mut tui_args = args.to_vec();
+    let status = loop {
+        let launch_generation = read_launcher_state(&launcher_state_file)
+            .map(|state| state.generation)
+            .unwrap_or_default();
+        let mut command = codex_tui_command(codex, &app_server.remote, &tui_args, &cwd);
+        let status = command
+            .status()
+            .with_context(|| format!("running `{codex} --remote {}`", app_server.remote))?;
+
+        let current = read_launcher_state(&launcher_state_file);
+        let already_reconnected = current
+            .as_ref()
+            .is_some_and(|state| state.generation > launch_generation && state.connected);
+        let recovered = if already_reconnected {
+            current
+        } else if status.success() {
+            None
+        } else {
+            wait_for_app_server_recovery(&mut bridge, &launcher_state_file, launch_generation)?
+        };
+
+        let Some(thread_id) = recovered.and_then(|state| state.thread_id) else {
+            break status;
+        };
+        eprintln!("Codex app-server restarted; reconnecting and resuming thread {thread_id} ...");
+        tui_args = codex_resume_args(args, &thread_id);
+    };
 
     // The bridge is scoped to this interactive launcher. Multiple launchers may
     // coexist; Unix bridges elect one wake leader for their shared app-server,
@@ -276,9 +372,9 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
     let _ = bridge.kill();
     let _ = bridge.wait();
     let _ = fs::remove_file(&ready_file);
+    let _ = fs::remove_file(&launcher_state_file);
     stop_owned_app_server(&mut app_server);
 
-    let status = status?;
     if !status.success() {
         anyhow::bail!("Codex exited with {status}");
     }
@@ -318,15 +414,203 @@ fn codex_tui_command(codex: &str, remote: &str, args: &[String], cwd: &Path) -> 
     command
 }
 
+fn codex_resume_args(original: &[String], thread_id: &str) -> Vec<String> {
+    const VALUE_OPTIONS: &[&str] = &[
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+        "--remote-auth-token-env",
+        "-m",
+        "--model",
+        "--local-provider",
+        "-p",
+        "--profile",
+        "-s",
+        "--sandbox",
+        "-C",
+        "--cd",
+        "--add-dir",
+        "-a",
+        "--ask-for-approval",
+    ];
+    const FLAG_OPTIONS: &[&str] = &[
+        "--oss",
+        "--approve-for-me",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--search",
+        "--no-alt-screen",
+        // Compatibility alias used by managed launchers even when omitted
+        // from a Codex version's --help output.
+        "--yolo",
+    ];
+
+    let mut recovered = Vec::new();
+    let mut index = 0;
+    while index < original.len() {
+        let argument = &original[index];
+        if argument == "--" {
+            break;
+        }
+        if VALUE_OPTIONS.contains(&argument.as_str()) {
+            if let Some(value) = original.get(index + 1) {
+                recovered.push(argument.clone());
+                recovered.push(value.clone());
+                index += 2;
+                continue;
+            }
+        } else if FLAG_OPTIONS.contains(&argument.as_str())
+            || argument.starts_with("-C") && argument.len() > 2
+            || VALUE_OPTIONS
+                .iter()
+                .filter(|option| option.starts_with("--"))
+                .any(|option| argument.starts_with(&format!("{option}=")))
+        {
+            recovered.push(argument.clone());
+        }
+        index += 1;
+    }
+    recovered.push("resume".to_string());
+    recovered.push(thread_id.to_string());
+    recovered
+}
+
+fn explicit_resume_thread_id(args: &[String]) -> Option<String> {
+    const VALUE_OPTIONS: &[&str] = &[
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+        "--remote-auth-token-env",
+        "-m",
+        "--model",
+        "--local-provider",
+        "-p",
+        "--profile",
+        "-s",
+        "--sandbox",
+        "-C",
+        "--cd",
+        "--add-dir",
+        "-a",
+        "--ask-for-approval",
+        "-i",
+        "--image",
+    ];
+
+    let mut arguments = args
+        .iter()
+        .skip_while(|argument| argument.as_str() != "resume");
+    arguments.next()?;
+    let mut skip_value = false;
+    for argument in arguments {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if argument == "--last" {
+            return None;
+        }
+        if VALUE_OPTIONS.contains(&argument.as_str()) {
+            skip_value = true;
+            continue;
+        }
+        if argument.starts_with('-') {
+            continue;
+        }
+        return uuid::Uuid::parse_str(argument)
+            .ok()
+            .map(|_| argument.clone());
+    }
+    None
+}
+
+fn read_launcher_state(path: &Path) -> Option<LauncherState> {
+    let encoded = fs::read(path).ok()?;
+    serde_json::from_slice(&encoded).ok()
+}
+
+fn wait_for_app_server_recovery(
+    bridge: &mut Child,
+    state_file: &Path,
+    launch_generation: u64,
+) -> Result<Option<LauncherState>> {
+    let deadline = Instant::now() + TUI_RECOVERY_TIMEOUT;
+    let disconnect_detection_deadline = Instant::now() + Duration::from_secs(1);
+    let mut saw_disconnect = false;
+    loop {
+        if let Some(status) = bridge
+            .try_wait()
+            .context("checking Codex live-delivery bridge during app-server recovery")?
+        {
+            anyhow::bail!("Codex live-delivery bridge exited during app-server recovery: {status}");
+        }
+        if let Some(state) = read_launcher_state(state_file) {
+            saw_disconnect |= !state.connected;
+            if state.generation > launch_generation && state.connected && state.thread_id.is_some()
+            {
+                return Ok(Some(state));
+            }
+        }
+        if !saw_disconnect && Instant::now() >= disconnect_detection_deadline {
+            // A non-transport TUI failure must retain its original behavior;
+            // do not turn every command/config error into a 30-second pause.
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn same_cwd(first: &Path, second: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        first
+            .to_string_lossy()
+            .replace('\\', "/")
+            .eq_ignore_ascii_case(&second.to_string_lossy().replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        first == second
+    }
+}
+
 fn has_explicit_cwd(args: &[String]) -> bool {
-    args.iter()
-        .take_while(|arg| arg.as_str() != "--")
-        .any(|arg| {
-            arg == "-C"
-                || arg == "--cd"
-                || arg.starts_with("-C") && arg.len() > 2
-                || arg.starts_with("--cd=")
-        })
+    explicit_codex_cwd(args).is_some()
+}
+
+fn codex_thread_cwd(args: &[String], launcher_cwd: &Path) -> PathBuf {
+    let selected = explicit_codex_cwd(args).unwrap_or_else(|| launcher_cwd.to_path_buf());
+    let absolute = if selected.is_absolute() {
+        selected
+    } else {
+        launcher_cwd.join(selected)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn explicit_codex_cwd(args: &[String]) -> Option<PathBuf> {
+    let mut selected = None;
+    let mut arguments = args.iter().take_while(|argument| argument.as_str() != "--");
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "-C" | "--cd" => {
+                selected = arguments.next().map(PathBuf::from);
+            }
+            _ if argument.starts_with("--cd=") => {
+                selected = Some(PathBuf::from(&argument[5..]));
+            }
+            _ if argument.starts_with("-C") && argument.len() > 2 => {
+                selected = Some(PathBuf::from(&argument[2..]));
+            }
+            _ => {}
+        }
+    }
+    selected
 }
 
 fn wait_for_bridge_ready(bridge: &mut Child, ready_file: &Path) -> Result<()> {
@@ -454,6 +738,9 @@ pub async fn run(args: &[String]) -> Result<()> {
         args.app_server.clone(),
         hook_base,
         args.ready_file.clone(),
+        args.launcher_state_file.clone(),
+        args.launcher_cwd.clone(),
+        args.launcher_thread_id.clone(),
     ));
     let client = Arc::new(MykoClient::new());
     let sessions = client.watch_query::<GetAllSessions>(GetAllSessions {});
@@ -552,6 +839,9 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
     let mut poll_ms = None;
     let mut wake_thread = None;
     let mut ready_file = None;
+    let mut launcher_state_file = None;
+    let mut launcher_cwd = None;
+    let mut launcher_thread_id = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -572,6 +862,18 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
             }
             "--ready-file" => {
                 ready_file = Some(PathBuf::from(required_value(&mut it, "--ready-file")?));
+            }
+            "--launcher-state-file" => {
+                launcher_state_file = Some(PathBuf::from(required_value(
+                    &mut it,
+                    "--launcher-state-file",
+                )?));
+            }
+            "--launcher-cwd" => {
+                launcher_cwd = Some(PathBuf::from(required_value(&mut it, "--launcher-cwd")?));
+            }
+            "--launcher-thread-id" => {
+                launcher_thread_id = Some(required_value(&mut it, "--launcher-thread-id")?);
             }
             "-h" | "--help" => {
                 println!(
@@ -611,6 +913,14 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
             .unwrap_or_else(default_socket);
         AppServerEndpoint::Unix(socket)
     };
+    if launcher_state_file.is_some() != launcher_cwd.is_some() {
+        anyhow::bail!(
+            "codex-bridge: --launcher-state-file and --launcher-cwd must be provided together"
+        );
+    }
+    if launcher_thread_id.is_some() && launcher_state_file.is_none() {
+        anyhow::bail!("codex-bridge: --launcher-thread-id requires --launcher-state-file");
+    }
 
     Ok(BridgeArgs {
         daemon,
@@ -618,6 +928,9 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
         poll: poll_ms.map(Duration::from_millis).unwrap_or(DEFAULT_POLL),
         wake_thread,
         ready_file,
+        launcher_state_file,
+        launcher_cwd,
+        launcher_thread_id,
     })
 }
 
@@ -689,8 +1002,14 @@ async fn watch_app_server_registrations(
     app_server: AppServerEndpoint,
     hook_base: String,
     mut ready_file: Option<PathBuf>,
+    launcher_state_file: Option<PathBuf>,
+    launcher_cwd: Option<PathBuf>,
+    launcher_thread_id: Option<String>,
 ) -> Result<()> {
     let mut pending = HashMap::new();
+    let mut launcher = launcher_state_file
+        .zip(launcher_cwd)
+        .map(|(path, cwd)| LauncherStateWriter::new(path, cwd, launcher_thread_id));
     loop {
         let result = match &app_server {
             AppServerEndpoint::WebSocket(endpoint) => {
@@ -702,6 +1021,7 @@ async fn watch_app_server_registrations(
                             &hook_base,
                             &mut ready_file,
                             &mut pending,
+                            &mut launcher,
                         )
                         .await
                     }
@@ -712,12 +1032,23 @@ async fn watch_app_server_registrations(
                 }
             }
             AppServerEndpoint::Unix(socket) => {
-                monitor_registrations_over_unix(socket, &hook_base, &mut ready_file, &mut pending)
-                    .await
+                monitor_registrations_over_unix(
+                    socket,
+                    &hook_base,
+                    &mut ready_file,
+                    &mut pending,
+                    &mut launcher,
+                )
+                .await
             }
         };
         if let Err(error) = result {
             log::debug!("[codex-bridge] app-server lifecycle connection unavailable: {error:#}");
+        }
+        if let Some(launcher) = launcher.as_mut()
+            && let Err(error) = launcher.disconnected()
+        {
+            log::debug!("[codex-bridge] could not record app-server disconnect: {error:#}");
         }
         tokio::time::sleep(RETRY_COOLDOWN).await;
     }
@@ -729,6 +1060,7 @@ async fn monitor_registrations_over_unix(
     hook_base: &str,
     ready_file: &mut Option<PathBuf>,
     pending: &mut HashMap<String, ThreadRegistration>,
+    launcher: &mut Option<LauncherStateWriter>,
 ) -> Result<()> {
     use tokio::net::UnixStream;
 
@@ -743,7 +1075,7 @@ async fn monitor_registrations_over_unix(
         .await
         .context("timed out upgrading Codex app-server connection")?
         .context("upgrading Codex app-server Unix socket to WebSocket")?;
-    monitor_registration_connection(&mut websocket, hook_base, ready_file, pending).await
+    monitor_registration_connection(&mut websocket, hook_base, ready_file, pending, launcher).await
 }
 
 #[cfg(not(unix))]
@@ -752,6 +1084,7 @@ async fn monitor_registrations_over_unix(
     _hook_base: &str,
     _ready_file: &mut Option<PathBuf>,
     _pending: &mut HashMap<String, ThreadRegistration>,
+    _launcher: &mut Option<LauncherStateWriter>,
 ) -> Result<()> {
     anyhow::bail!("Unix-domain-socket app-server endpoints are unavailable on this platform")
 }
@@ -761,11 +1094,15 @@ async fn monitor_registration_connection<S>(
     hook_base: &str,
     ready_file: &mut Option<PathBuf>,
     pending: &mut HashMap<String, ThreadRegistration>,
+    launcher: &mut Option<LauncherStateWriter>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     initialize_app_server(websocket).await?;
+    if let Some(launcher) = launcher.as_mut() {
+        launcher.connected()?;
+    }
     if let Some(path) = ready_file.as_ref() {
         // codex-run deliberately starts its TUI only after this marker, so the
         // initial thread/started event cannot race us and no snapshot is needed.
@@ -815,6 +1152,9 @@ where
                 let message: Value = serde_json::from_str(text.as_ref())
                     .context("decoding app-server lifecycle notification")?;
                 if let Some(registration) = thread_registration(&message) {
+                    if let Some(launcher) = launcher.as_mut() {
+                        launcher.observe(&registration)?;
+                    }
                     let session_id = registration.session_id.clone();
                     pending.insert(session_id.clone(), registration);
                     try_pending_registration(hook_base, pending, &session_id).await;
@@ -1220,6 +1560,19 @@ mod tests {
     }
 
     #[test]
+    fn recovery_tracks_codex_effective_working_directory() {
+        let temp = tempfile::tempdir().expect("working-directory tempdir");
+        let selected = temp.path().join("selected");
+        fs::create_dir(&selected).expect("create selected directory");
+
+        assert_eq!(
+            codex_thread_cwd(&["--cd".into(), "selected".into()], temp.path()),
+            selected
+        );
+        assert_eq!(codex_thread_cwd(&[], temp.path()), temp.path());
+    }
+
+    #[test]
     fn codex_tui_uses_the_launchers_working_directory_by_default() {
         let command = codex_tui_command(
             "codex",
@@ -1271,6 +1624,121 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args, ["resume", "--last", "--yolo"]);
+    }
+
+    #[test]
+    fn recovery_resumes_the_recorded_thread_without_replaying_prompts() {
+        let args = vec![
+            "--model".into(),
+            "gpt-5.6-sol".into(),
+            "resume".into(),
+            "old-thread".into(),
+            "do not replay me".into(),
+            "--yolo".into(),
+            "--cd=/work/pulse".into(),
+            "--image".into(),
+            "/tmp/old.png".into(),
+        ];
+        assert_eq!(
+            codex_resume_args(&args, "recorded-thread"),
+            [
+                "--model",
+                "gpt-5.6-sol",
+                "--yolo",
+                "--cd=/work/pulse",
+                "resume",
+                "recorded-thread",
+            ]
+        );
+    }
+
+    #[test]
+    fn launcher_state_records_one_matching_thread_across_server_generations() {
+        let temp = tempfile::tempdir().expect("launcher state tempdir");
+        let path = temp.path().join("state.json");
+        let mut writer = LauncherStateWriter::new(path.clone(), PathBuf::from("/work/pulse"), None);
+
+        writer.connected().expect("first app-server connection");
+        writer
+            .observe(&ThreadRegistration {
+                thread_id: "other-thread".into(),
+                session_id: "other-thread".into(),
+                cwd: "/work/other".into(),
+            })
+            .expect("ignore other cwd");
+        writer
+            .observe(&ThreadRegistration {
+                thread_id: "owned-thread".into(),
+                session_id: "root-session".into(),
+                cwd: "/work/pulse".into(),
+            })
+            .expect("record matching thread");
+        writer
+            .observe(&ThreadRegistration {
+                thread_id: "later-thread".into(),
+                session_id: "later-thread".into(),
+                cwd: "/work/pulse".into(),
+            })
+            .expect("retain first matching thread");
+        writer
+            .connected()
+            .expect("replacement app-server connection");
+
+        assert_eq!(
+            read_launcher_state(&path),
+            Some(LauncherState {
+                generation: 2,
+                connected: true,
+                thread_id: Some("owned-thread".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_resume_thread_id_pins_launcher_correlation() {
+        let thread_id = "01a04397-805f-73e0-8d8a-b0aada4e0105";
+        assert_eq!(
+            explicit_resume_thread_id(&[
+                "resume".into(),
+                "--yolo".into(),
+                thread_id.into(),
+                "continue the task".into(),
+            ]),
+            Some(thread_id.into())
+        );
+        assert_eq!(
+            explicit_resume_thread_id(&[
+                "resume".into(),
+                "--last".into(),
+                "01a04397-805f-73e0-8d8a-b0aada4e0105".into(),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn launcher_state_retains_explicit_thread_over_same_cwd_events() {
+        let temp = tempfile::tempdir().expect("launcher state tempdir");
+        let path = temp.path().join("state.json");
+        let mut writer = LauncherStateWriter::new(
+            path.clone(),
+            PathBuf::from("/work/pulse"),
+            Some("expected-thread".into()),
+        );
+
+        writer.connected().expect("app-server connection");
+        writer
+            .observe(&ThreadRegistration {
+                thread_id: "concurrent-thread".into(),
+                session_id: "concurrent-thread".into(),
+                cwd: "/work/pulse".into(),
+            })
+            .expect("ignore concurrent thread");
+
+        assert_eq!(
+            read_launcher_state(&path).and_then(|state| state.thread_id),
+            Some("expected-thread".into())
+        );
     }
 
     #[cfg(unix)]
@@ -1637,6 +2105,9 @@ mod tests {
             AppServerEndpoint::WebSocket(format!("ws://{app_address}")),
             format!("http://{hook_address}"),
             Some(ready_file.clone()),
+            None,
+            None,
+            None,
         ));
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -1747,6 +2218,9 @@ mod tests {
         let watcher = tokio::spawn(watch_app_server_registrations(
             AppServerEndpoint::WebSocket(format!("ws://{app_address}")),
             format!("http://{hook_address}"),
+            None,
+            None,
+            None,
             None,
         ));
 
