@@ -151,7 +151,7 @@ impl CommandHandler for SendMessage {
 
         let now = Utc::now().timestamp_millis();
         let msg = Message {
-            id: MessageId(Arc::from(Uuid::new_v4().to_string())),
+            id: MessageId(Arc::from(Uuid::now_v7().to_string())),
             from_session_id: sender.id.clone(),
             to_session_id: Some(recipient.id.clone()),
             to_room_id: None,

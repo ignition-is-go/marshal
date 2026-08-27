@@ -134,7 +134,7 @@ impl CommandHandler for BroadcastMessage {
         // attempted.
         let now = Utc::now().timestamp_millis();
         let msg = Message {
-            id: MessageId(Arc::from(Uuid::new_v4().to_string())),
+            id: MessageId(Arc::from(Uuid::now_v7().to_string())),
             from_session_id: sender.id.clone(),
             to_session_id: None,
             to_room_id: Some(room.id.clone()),
@@ -209,7 +209,7 @@ impl CommandHandler for BroadcastMessage {
             // human @mention (`@max@lucid.rocks`) carries `to_operator` so it's
             // surfaced to the person, same as a direct human-addressed send.
             let ping = Message {
-                id: MessageId(Arc::from(Uuid::new_v4().to_string())),
+                id: MessageId(Arc::from(Uuid::now_v7().to_string())),
                 from_session_id: sender.id.clone(),
                 to_session_id: Some(target.id.clone()),
                 to_room_id: None,

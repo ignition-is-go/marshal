@@ -26,6 +26,11 @@ use myko::{
 use myko_server::{BlackholePersister, MykoServer};
 use uuid::Uuid;
 
+fn assert_uuid_v7(value: &str) {
+    let id = Uuid::parse_str(value).expect("message id is a UUID");
+    assert_eq!(id.get_version_num(), 7);
+}
+
 fn setup() -> MykoServerContext {
     marshal_entities::link();
     daemon::link();
@@ -142,6 +147,7 @@ fn plain_broadcast_persists_one_ambient_room_message() {
     .execute(cmd_ctx(&ctx, Some("c-sender")))
     .expect("broadcast ok");
 
+    assert_uuid_v7(res.message_id.0.as_ref());
     assert!(res.mentioned.is_empty(), "no @mentions → no directed pings");
     let msgs = messages(&ctx);
     assert_eq!(msgs.len(), 1, "only the ambient room message");
@@ -178,6 +184,7 @@ fn mention_delivers_a_direct_ping_to_the_named_member() {
         .find(|m| m.to_session_id.is_some())
         .expect("a direct ping exists");
     assert_eq!(direct.to_session_id, Some(SessionId(Arc::from("alice"))));
+    assert_uuid_v7(direct.id.0.as_ref());
     assert!(
         direct.body.starts_with("[@mention in"),
         "carries room context"

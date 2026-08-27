@@ -56,12 +56,38 @@ pub struct ToolHost {
 /// daemon has assigned one — they agree in the common case, and the assigned
 /// value is authoritative once present.
 fn handle_for(host: &ToolHost, session_id: &str) -> String {
-    host.nicknames_cell
-        .get()
+    handle_from(&host.nicknames_cell.get(), session_id)
+}
+
+fn handle_from(nicknames: &[Arc<marshal_entities::SessionNickname>], session_id: &str) -> String {
+    nicknames
         .iter()
         .find(|n| n.id.0.as_ref() == session_id)
         .map(|n| n.nickname.clone())
         .unwrap_or_else(|| marshal_entities::nickname(session_id))
+}
+
+/// Resolve a nickname against the exact session/nickname snapshot used by the
+/// shim's roster resource. Returning the canonical id prevents a daemon with a
+/// stale nickname view from silently routing the visible handle to another
+/// session. Non-nickname tokens remain server-resolved (exact id, operator, or
+/// id prefix).
+fn resolve_visible_nickname(
+    sessions: &[Arc<Session>],
+    nicknames: &[Arc<marshal_entities::SessionNickname>],
+    token: &str,
+) -> Result<Option<SessionId>, String> {
+    let matches: Vec<_> = sessions
+        .iter()
+        .filter(|session| handle_from(nicknames, session.id.0.as_ref()) == token)
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [session] => Ok(Some(session.id.clone())),
+        _ => Err(format!(
+            "nickname `{token}` is ambiguous in the current roster; use an exact session id"
+        )),
+    }
 }
 
 pub struct CoordHandler {
@@ -387,10 +413,14 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         "send_message: missing `to` (session id or nickname)",
     )?;
     let body = arg_str(args, "body", "send_message: missing `body`")?;
-    // Recipient resolution is authoritative in the daemon's SendMessage command
-    // now (so every harness shares one policy AND operator / human-via-agent
-    // addressing works from the shim too) — pass the raw token straight through.
-    let to_session_id = SessionId(std::sync::Arc::from(to.as_str()));
+    // Pin a visible nickname to the exact id from this shim's roster snapshot.
+    // Other tokens stay server-resolved so operator/human routing and id-prefix
+    // addressing retain their shared daemon policy.
+    let sessions = host.sessions_cell.get();
+    let nicknames = host.nicknames_cell.get();
+    let to_session_id = resolve_visible_nickname(&sessions, &nicknames, &to)
+        .map_err(ToolError::invalid_params)?
+        .unwrap_or_else(|| SessionId(std::sync::Arc::from(to.as_str())));
     let cmd = SendMessage {
         to_session_id,
         body,
@@ -819,7 +849,75 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marshal_entities::{DeliveredRecipient, FailedRecipient, LivePushStatus, WakeStatus};
+    use marshal_entities::{
+        DeliveredRecipient, FailedRecipient, LivePushStatus, SessionNickname, SessionNicknameId,
+        WakeStatus,
+    };
+
+    fn session(id: &str) -> Arc<Session> {
+        Arc::new(Session {
+            id: SessionId(Arc::from(id)),
+            client_id: None,
+            pid: 0,
+            cwd: "/repo".into(),
+            git_branch: None,
+            current_task: None,
+            session_name: None,
+            activity: None,
+            kind: None,
+            connected_at: 0,
+            last_activity_at: None,
+            last_tool: None,
+            last_tool_at: None,
+            operator: None,
+            host: None,
+            project: None,
+            channels_enabled: None,
+        })
+    }
+
+    #[test]
+    fn visible_nickname_pins_the_roster_session_id() {
+        let sessions = vec![session("stale-daemon-target"), session("visible-target")];
+        let nicknames = vec![
+            Arc::new(SessionNickname {
+                id: SessionNicknameId(Arc::from("stale-daemon-target")),
+                nickname: "arctic-oryx".into(),
+            }),
+            Arc::new(SessionNickname {
+                id: SessionNicknameId(Arc::from("visible-target")),
+                nickname: "coastal-iguana".into(),
+            }),
+        ];
+
+        assert_eq!(
+            resolve_visible_nickname(&sessions, &nicknames, "coastal-iguana").unwrap(),
+            Some(SessionId(Arc::from("visible-target")))
+        );
+        assert_eq!(
+            resolve_visible_nickname(&sessions, &nicknames, "max@lucid.rocks").unwrap(),
+            None,
+            "operator tokens must remain server-resolved"
+        );
+    }
+
+    #[test]
+    fn ambiguous_visible_nickname_refuses_to_route() {
+        let sessions = vec![session("one"), session("two")];
+        let nicknames = vec![
+            Arc::new(SessionNickname {
+                id: SessionNicknameId(Arc::from("one")),
+                nickname: "same-handle".into(),
+            }),
+            Arc::new(SessionNickname {
+                id: SessionNicknameId(Arc::from("two")),
+                nickname: "same-handle".into(),
+            }),
+        ];
+
+        let error = resolve_visible_nickname(&sessions, &nicknames, "same-handle").unwrap_err();
+        assert!(error.contains("ambiguous"));
+    }
 
     fn result(
         live_push: LivePushStatus,
