@@ -1,6 +1,6 @@
 [package]
 name = "marshal-shim"
-version = "0.50.2"
+version = "0.50.3"
 edition.workspace = true
 license.workspace = true
 description = "Stdio MCP shim that bridges Claude Code sessions to the marshal coordination daemon."
