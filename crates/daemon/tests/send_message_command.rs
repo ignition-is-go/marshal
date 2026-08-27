@@ -272,6 +272,24 @@ fn nickname_resolves_server_side() {
 }
 
 #[test]
+fn direct_message_ids_are_uuid_v7() {
+    let ctx = setup();
+    set_session(&ctx, &session("sender", Some("c-sender")));
+    set_session(&ctx, &session("recipient", None));
+
+    let result = SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "hi".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send succeeds");
+
+    let id = Uuid::parse_str(result.message_id.0.as_ref()).expect("message id is a UUID");
+    assert_eq!(id.get_version_num(), 7);
+}
+
+#[test]
 fn operator_token_routes_to_the_humans_most_recently_active_agent() {
     // Human-via-agent routing: address the PERSON by their operator identity
     // and the daemon picks which of their agents currently has the floor —

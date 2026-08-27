@@ -38,7 +38,7 @@ serde_json = "1"
 chrono = { workspace = true }
 myko = { workspace = true }
 myko-macros = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v7"] }
 log = { workspace = true }
 # Only linked under `ts-export` (the macros' `#[derive(ts_rs::TS)]`). Same 12.0.1
 # as myko so the derived `TS` impls match the trait myko's typegen consumes.
