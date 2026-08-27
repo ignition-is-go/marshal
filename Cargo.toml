@@ -36,4 +36,4 @@ hyphae = "3.1.2"
 # the cross-crate publish graph on the dep key, not the `package =`
 # alias). Source code uses `use marshal_entities::...` — the auto
 # dash→underscore conversion Rust applies to crate names.
-marshal-entities = { path = "crates/entities", version = "0.50.5" }
+marshal-entities = { path = "crates/entities", version = "0.50.6" }
