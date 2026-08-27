@@ -22,9 +22,9 @@
 //! Room broadcasts remain ambient, and a failed wake leaves the message unread.
 //! On Unix, per-TUI bridges attached to the shared app-server elect one
 //! host-local wake leader; every bridge still observes lifecycle events.
-//! The same bridge observes the TUI's authoritative `thread/started` event and
-//! registers its root session id before the first prompt. `codex-run` does not
-//! launch the TUI until this lifecycle subscription is ready.
+//! A per-TUI loopback proxy observes that connection's authoritative
+//! `thread/started` event, while the bridge registers its root session id before
+//! the first prompt. `codex-run` does not launch the TUI until both are ready.
 //!
 //! This is intentionally opt-in. A plain `codex` process owns an in-process
 //! backend with no control socket, so there is nowhere safe for a peer process
@@ -44,7 +44,10 @@ use std::{
     time::{Duration, Instant},
 };
 #[cfg(unix)]
-use std::{fs::OpenOptions, os::fd::AsRawFd};
+use std::{
+    fs::OpenOptions,
+    os::{fd::AsRawFd, unix::fs::PermissionsExt},
+};
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -57,7 +60,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
-use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::Message as WebSocketMessage};
+use tokio_tungstenite::{
+    WebSocketStream, accept_async, connect_async, tungstenite::Message as WebSocketMessage,
+};
 #[cfg(unix)]
 use tokio_tungstenite::{client_async, tungstenite::client::IntoClientRequest};
 
@@ -201,6 +206,7 @@ struct BridgeArgs {
     launcher_state_file: Option<PathBuf>,
     launcher_cwd: Option<PathBuf>,
     launcher_thread_id: Option<String>,
+    tui_proxy: Option<AppServerEndpoint>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -217,6 +223,8 @@ struct LauncherStateWriter {
     cwd: PathBuf,
     state: LauncherState,
 }
+
+type SharedLauncherState = Arc<tokio::sync::Mutex<LauncherStateWriter>>;
 
 impl LauncherStateWriter {
     fn new(path: PathBuf, cwd: PathBuf, thread_id: Option<String>) -> Self {
@@ -260,6 +268,7 @@ struct LaunchedAppServer {
     remote: String,
     bridge_args: Vec<String>,
     child: Option<Child>,
+    proxy_path: Option<PathBuf>,
 }
 
 /// Launch a normal interactive Codex TUI against a shared local app-server while
@@ -324,6 +333,7 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
     let mut bridge = match bridge {
         Ok(bridge) => bridge,
         Err(error) => {
+            cleanup_proxy(&app_server);
             stop_owned_app_server(&mut app_server);
             return run_native_codex(codex, args, &error);
         }
@@ -333,6 +343,7 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
         let _ = bridge.wait();
         let _ = fs::remove_file(&ready_file);
         let _ = fs::remove_file(&launcher_state_file);
+        cleanup_proxy(&app_server);
         stop_owned_app_server(&mut app_server);
         return run_native_codex(codex, args, &error);
     }
@@ -373,12 +384,19 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
     let _ = bridge.wait();
     let _ = fs::remove_file(&ready_file);
     let _ = fs::remove_file(&launcher_state_file);
+    cleanup_proxy(&app_server);
     stop_owned_app_server(&mut app_server);
 
     if !status.success() {
         anyhow::bail!("Codex exited with {status}");
     }
     Ok(())
+}
+
+fn cleanup_proxy(app_server: &LaunchedAppServer) {
+    if let Some(path) = app_server.proxy_path.as_ref() {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn run_native_codex(codex: &str, args: &[String], bridge_error: &anyhow::Error) -> Result<()> {
@@ -622,6 +640,144 @@ fn explicit_codex_cwd(args: &[String]) -> Option<PathBuf> {
     selected
 }
 
+async fn spawn_tui_proxy(
+    proxy: Option<AppServerEndpoint>,
+    upstream: AppServerEndpoint,
+    launcher: Option<SharedLauncherState>,
+) -> Result<tokio::task::JoinHandle<Result<()>>> {
+    let Some(proxy) = proxy else {
+        return Ok(tokio::spawn(std::future::pending::<Result<()>>()));
+    };
+    match (proxy, upstream) {
+        #[cfg(unix)]
+        (AppServerEndpoint::Unix(proxy), AppServerEndpoint::Unix(upstream)) => {
+            let _ = fs::remove_file(&proxy);
+            let listener = tokio::net::UnixListener::bind(&proxy)
+                .with_context(|| format!("binding Codex TUI proxy {}", proxy.display()))?;
+            fs::set_permissions(&proxy, fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("restricting Codex TUI proxy {}", proxy.display()))?;
+            Ok(tokio::spawn(run_unix_tui_proxy(
+                listener, upstream, launcher,
+            )))
+        }
+        (AppServerEndpoint::WebSocket(proxy), AppServerEndpoint::WebSocket(upstream)) => {
+            let address = loopback_address(&proxy)?;
+            let listener = tokio::net::TcpListener::bind(address)
+                .await
+                .with_context(|| format!("binding Codex TUI proxy {proxy}"))?;
+            Ok(tokio::spawn(run_tcp_tui_proxy(
+                listener, upstream, launcher,
+            )))
+        }
+        _ => anyhow::bail!("Codex TUI proxy and app-server transports must match"),
+    }
+}
+
+#[cfg(unix)]
+async fn run_unix_tui_proxy(
+    listener: tokio::net::UnixListener,
+    upstream: PathBuf,
+    launcher: Option<SharedLauncherState>,
+) -> Result<()> {
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .context("accepting Codex TUI proxy client")?;
+        let upstream = upstream.clone();
+        let launcher = launcher.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let downstream = accept_async(stream)
+                    .await
+                    .context("accepting Codex TUI WebSocket")?;
+                let stream = tokio::net::UnixStream::connect(&upstream)
+                    .await
+                    .with_context(|| format!("connecting TUI proxy to {}", upstream.display()))?;
+                let request = "ws://localhost/"
+                    .into_client_request()
+                    .context("building TUI proxy upstream request")?;
+                let (upstream, _) = client_async(request, stream)
+                    .await
+                    .context("upgrading TUI proxy upstream WebSocket")?;
+                relay_tui_websocket(downstream, upstream, launcher).await
+            }
+            .await;
+            if let Err(error) = result {
+                log::debug!("[codex-bridge] TUI proxy connection ended: {error:#}");
+            }
+        });
+    }
+}
+
+async fn run_tcp_tui_proxy(
+    listener: tokio::net::TcpListener,
+    upstream: String,
+    launcher: Option<SharedLauncherState>,
+) -> Result<()> {
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .context("accepting Codex TUI proxy client")?;
+        let upstream = upstream.clone();
+        let launcher = launcher.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let downstream = accept_async(stream)
+                    .await
+                    .context("accepting Codex TUI WebSocket")?;
+                let (upstream, _) = connect_async(&upstream)
+                    .await
+                    .with_context(|| format!("connecting TUI proxy to {upstream}"))?;
+                relay_tui_websocket(downstream, upstream, launcher).await
+            }
+            .await;
+            if let Err(error) = result {
+                log::debug!("[codex-bridge] TUI proxy connection ended: {error:#}");
+            }
+        });
+    }
+}
+
+async fn relay_tui_websocket<Downstream, Upstream>(
+    mut downstream: WebSocketStream<Downstream>,
+    mut upstream: WebSocketStream<Upstream>,
+    launcher: Option<SharedLauncherState>,
+) -> Result<()>
+where
+    Downstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    Upstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        tokio::select! {
+            message = downstream.next() => {
+                let message = message.context("Codex TUI closed proxy connection")??;
+                let closed = matches!(message, WebSocketMessage::Close(_));
+                upstream.send(message).await.context("forwarding TUI request to app-server")?;
+                if closed {
+                    return Ok(());
+                }
+            }
+            message = upstream.next() => {
+                let message = message.context("Codex app-server closed TUI proxy connection")??;
+                if let WebSocketMessage::Text(text) = &message
+                    && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
+                    && let Some(registration) = thread_registration(&value)
+                    && let Some(launcher) = launcher.as_ref()
+                {
+                    launcher.lock().await.observe(&registration)?;
+                }
+                let closed = matches!(message, WebSocketMessage::Close(_));
+                downstream.send(message).await.context("forwarding app-server event to TUI")?;
+                if closed {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
 fn wait_for_bridge_ready(bridge: &mut Child, ready_file: &Path) -> Result<()> {
     let deadline = Instant::now() + BRIDGE_START_TIMEOUT;
     loop {
@@ -667,10 +823,16 @@ fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
              Codex live delivery was not started"
         );
     }
+    let proxy_path =
+        std::env::temp_dir().join(format!("marshal-codex-tui-{}.sock", uuid::Uuid::new_v4()));
     Ok(LaunchedAppServer {
-        remote: "unix://".to_string(),
-        bridge_args: Vec::new(),
+        remote: format!("unix://{}", proxy_path.display()),
+        bridge_args: vec![
+            "--proxy-socket".to_string(),
+            proxy_path.to_string_lossy().into_owned(),
+        ],
         child: None,
+        proxy_path: Some(proxy_path),
     })
 }
 
@@ -690,10 +852,17 @@ fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
         return Err(error);
     }
 
+    let proxy_endpoint = ephemeral_loopback_endpoint()?;
     Ok(LaunchedAppServer {
-        remote: endpoint.clone(),
-        bridge_args: vec!["--endpoint".to_string(), endpoint],
+        remote: proxy_endpoint.clone(),
+        bridge_args: vec![
+            "--endpoint".to_string(),
+            endpoint,
+            "--proxy-endpoint".to_string(),
+            proxy_endpoint,
+        ],
         child: Some(child),
+        proxy_path: None,
     })
 }
 
@@ -743,13 +912,28 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     let local_host = short_host();
     let hook_base = crate::codex_hook::registration_base(&args.daemon);
+    let launcher = args
+        .launcher_state_file
+        .clone()
+        .zip(args.launcher_cwd.clone())
+        .map(|(path, cwd)| {
+            Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
+                path,
+                cwd,
+                args.launcher_thread_id.clone(),
+            )))
+        });
+    let mut proxy_task = spawn_tui_proxy(
+        args.tui_proxy.clone(),
+        args.app_server.clone(),
+        launcher.clone(),
+    )
+    .await?;
     let mut registration_task = tokio::spawn(watch_app_server_registrations(
         args.app_server.clone(),
         hook_base,
         args.ready_file.clone(),
-        args.launcher_state_file.clone(),
-        args.launcher_cwd.clone(),
-        args.launcher_thread_id.clone(),
+        launcher,
     ));
     let client = Arc::new(MykoClient::new());
     let sessions = client.watch_query::<GetAllSessions>(GetAllSessions {});
@@ -778,6 +962,10 @@ pub async fn run(args: &[String]) -> Result<()> {
             result = &mut registration_task => {
                 return result
                     .context("Codex app-server registration watcher stopped")?;
+            }
+            result = &mut proxy_task => {
+                return result
+                    .context("Codex TUI proxy stopped")?;
             }
         }
 
@@ -851,6 +1039,8 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
     let mut launcher_state_file = None;
     let mut launcher_cwd = None;
     let mut launcher_thread_id = None;
+    let mut proxy_socket = None;
+    let mut proxy_endpoint = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -883,6 +1073,12 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
             }
             "--launcher-thread-id" => {
                 launcher_thread_id = Some(required_value(&mut it, "--launcher-thread-id")?);
+            }
+            "--proxy-socket" => {
+                proxy_socket = Some(PathBuf::from(required_value(&mut it, "--proxy-socket")?));
+            }
+            "--proxy-endpoint" => {
+                proxy_endpoint = Some(required_value(&mut it, "--proxy-endpoint")?);
             }
             "-h" | "--help" => {
                 println!(
@@ -922,6 +1118,15 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
             .unwrap_or_else(default_socket);
         AppServerEndpoint::Unix(socket)
     };
+    if proxy_socket.is_some() && proxy_endpoint.is_some() {
+        anyhow::bail!("codex-bridge: --proxy-socket and --proxy-endpoint are mutually exclusive");
+    }
+    let tui_proxy = if let Some(url) = proxy_endpoint {
+        loopback_address(&url)?;
+        Some(AppServerEndpoint::WebSocket(url))
+    } else {
+        proxy_socket.map(AppServerEndpoint::Unix)
+    };
     if launcher_state_file.is_some() != launcher_cwd.is_some() {
         anyhow::bail!(
             "codex-bridge: --launcher-state-file and --launcher-cwd must be provided together"
@@ -940,6 +1145,7 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
         launcher_state_file,
         launcher_cwd,
         launcher_thread_id,
+        tui_proxy,
     })
 }
 
@@ -1011,14 +1217,9 @@ async fn watch_app_server_registrations(
     app_server: AppServerEndpoint,
     hook_base: String,
     mut ready_file: Option<PathBuf>,
-    launcher_state_file: Option<PathBuf>,
-    launcher_cwd: Option<PathBuf>,
-    launcher_thread_id: Option<String>,
+    launcher: Option<SharedLauncherState>,
 ) -> Result<()> {
     let mut pending = HashMap::new();
-    let mut launcher = launcher_state_file
-        .zip(launcher_cwd)
-        .map(|(path, cwd)| LauncherStateWriter::new(path, cwd, launcher_thread_id));
     loop {
         let result = match &app_server {
             AppServerEndpoint::WebSocket(endpoint) => {
@@ -1030,7 +1231,7 @@ async fn watch_app_server_registrations(
                             &hook_base,
                             &mut ready_file,
                             &mut pending,
-                            &mut launcher,
+                            &launcher,
                         )
                         .await
                     }
@@ -1046,7 +1247,7 @@ async fn watch_app_server_registrations(
                     &hook_base,
                     &mut ready_file,
                     &mut pending,
-                    &mut launcher,
+                    &launcher,
                 )
                 .await
             }
@@ -1054,8 +1255,8 @@ async fn watch_app_server_registrations(
         if let Err(error) = result {
             log::debug!("[codex-bridge] app-server lifecycle connection unavailable: {error:#}");
         }
-        if let Some(launcher) = launcher.as_mut()
-            && let Err(error) = launcher.disconnected()
+        if let Some(launcher) = launcher.as_ref()
+            && let Err(error) = launcher.lock().await.disconnected()
         {
             log::debug!("[codex-bridge] could not record app-server disconnect: {error:#}");
         }
@@ -1069,7 +1270,7 @@ async fn monitor_registrations_over_unix(
     hook_base: &str,
     ready_file: &mut Option<PathBuf>,
     pending: &mut HashMap<String, ThreadRegistration>,
-    launcher: &mut Option<LauncherStateWriter>,
+    launcher: &Option<SharedLauncherState>,
 ) -> Result<()> {
     use tokio::net::UnixStream;
 
@@ -1093,7 +1294,7 @@ async fn monitor_registrations_over_unix(
     _hook_base: &str,
     _ready_file: &mut Option<PathBuf>,
     _pending: &mut HashMap<String, ThreadRegistration>,
-    _launcher: &mut Option<LauncherStateWriter>,
+    _launcher: &Option<SharedLauncherState>,
 ) -> Result<()> {
     anyhow::bail!("Unix-domain-socket app-server endpoints are unavailable on this platform")
 }
@@ -1103,14 +1304,14 @@ async fn monitor_registration_connection<S>(
     hook_base: &str,
     ready_file: &mut Option<PathBuf>,
     pending: &mut HashMap<String, ThreadRegistration>,
-    launcher: &mut Option<LauncherStateWriter>,
+    launcher: &Option<SharedLauncherState>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     initialize_app_server(websocket).await?;
-    if let Some(launcher) = launcher.as_mut() {
-        launcher.connected()?;
+    if let Some(launcher) = launcher.as_ref() {
+        launcher.lock().await.connected()?;
     }
     if let Some(path) = ready_file.as_ref() {
         // codex-run deliberately starts its TUI only after this marker, so the
@@ -1161,8 +1362,8 @@ where
                 let message: Value = serde_json::from_str(text.as_ref())
                     .context("decoding app-server lifecycle notification")?;
                 if let Some(registration) = thread_registration(&message) {
-                    if let Some(launcher) = launcher.as_mut() {
-                        launcher.observe(&registration)?;
+                    if let Some(launcher) = launcher.as_ref() {
+                        launcher.lock().await.observe(&registration)?;
                     }
                     let session_id = registration.session_id.clone();
                     pending.insert(session_id.clone(), registration);
@@ -2121,8 +2322,6 @@ mod tests {
             format!("http://{hook_address}"),
             Some(ready_file.clone()),
             None,
-            None,
-            None,
         ));
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -2235,8 +2434,6 @@ mod tests {
             format!("http://{hook_address}"),
             None,
             None,
-            None,
-            None,
         ));
 
         let request = tokio::time::timeout(Duration::from_secs(2), hook_server)
@@ -2249,6 +2446,80 @@ mod tests {
         assert_eq!(body["cwd"], "/work/already-running");
 
         watcher.abort();
+        app_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tui_proxy_records_connection_scoped_thread_started() {
+        let app_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let app_address = app_listener.local_addr().unwrap();
+        let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let proxy_address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("launcher.json");
+        let launcher = Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
+            state_path.clone(),
+            PathBuf::from("/work/picker"),
+            None,
+        )));
+
+        let proxy = spawn_tui_proxy(
+            Some(AppServerEndpoint::WebSocket(format!(
+                "ws://{proxy_address}"
+            ))),
+            AppServerEndpoint::WebSocket(format!("ws://{app_address}")),
+            Some(launcher),
+        )
+        .await
+        .unwrap();
+        let app_server = tokio::spawn(async move {
+            let (stream, _) = app_listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "method": "thread/started",
+                        "params": {
+                            "thread": {
+                                "id": "picker-thread",
+                                "sessionId": "picker-session",
+                                "cwd": "/work/picker"
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let (mut tui, _) = connect_async(format!("ws://{proxy_address}"))
+            .await
+            .unwrap();
+        let event = tui.next().await.unwrap().unwrap();
+        let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
+        assert_eq!(event["params"]["thread"]["id"], "picker-thread");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if read_launcher_state(&state_path)
+                    .and_then(|state| state.thread_id)
+                    .as_deref()
+                    == Some("picker-thread")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("proxy should persist picker-selected thread");
+
+        proxy.abort();
         app_server.await.unwrap();
     }
 }
