@@ -51,5 +51,5 @@
     "gen": "cargo run -p marshal-entities --no-default-features --features codegen --bin typegen -- src/generated"
   },
   "type": "module",
-  "version": "0.50.4"
+  "version": "0.50.5"
 }
