@@ -200,7 +200,7 @@ jobs:
   build-macos:
     needs: release
     if: needs.release.outputs.skip == 'false'
-    runs-on: [self-hosted, macOS, ARM64, site-lucid-lab]
+    runs-on: public-ci-macos
     timeout-minutes: 40
     permissions:
       contents: write
