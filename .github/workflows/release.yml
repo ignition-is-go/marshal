@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     # Backstop: this job does apt + cross-build + the marshal-ui WASM bundle +
     # upload. A flaky apt mirror hung it ~2h on 2026-06-18; fail in minutes.
     timeout-minutes: 40
@@ -159,7 +159,7 @@ jobs:
   publish-packages:
     needs: release
     if: needs.release.outputs.skip == 'false'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -200,7 +200,7 @@ jobs:
   build-macos:
     needs: release
     if: needs.release.outputs.skip == 'false'
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64, site-lucid-lab]
     timeout-minutes: 40
     permissions:
       contents: write
