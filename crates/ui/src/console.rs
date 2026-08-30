@@ -600,6 +600,7 @@ fn delivered_note(live_push: LivePushStatus, wake: WakeStatus) -> String {
     };
     let wake = match wake {
         WakeStatus::NotNeeded => "wake not needed",
+        WakeStatus::Expected => "queued; recipient wakes on its own path",
         WakeStatus::Unobserved => "asynchronous wake unobserved",
     };
     format!("stored ✓ — {push}; {wake}")
