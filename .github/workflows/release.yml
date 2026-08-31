@@ -48,6 +48,10 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Public runners are disposable and intentionally have no ambient
+          # Rust components. The release script formats the stamped manifests.
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       # Prebuilt trunk (fast) — builds the marshal-ui WASM bundle shipped as a
       # release asset below.
