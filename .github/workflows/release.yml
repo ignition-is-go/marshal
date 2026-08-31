@@ -239,6 +239,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: v${{ needs.release.outputs.version }}
+      # A recovery checks out the immutable release tag for package contents,
+      # but the tag necessarily predates any repair to the publishing tools.
+      # Overlay only those tools from the workflow revision being dispatched.
+      - name: Load current publication recovery tools
+        if: inputs.publish_version != ''
+        run: |
+          git fetch --no-tags origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:flux.toml" > flux.toml
+          git show "$GITHUB_SHA:scripts/publish-cargo-package.sh" > scripts/publish-cargo-package.sh
+          git show "$GITHUB_SHA:scripts/publish-npm-package.sh" > scripts/publish-npm-package.sh
+          chmod +x scripts/publish-cargo-package.sh scripts/publish-npm-package.sh
       - name: Install package build dependencies
         run: |
           sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
