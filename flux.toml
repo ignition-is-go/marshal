@@ -38,5 +38,5 @@ npm = "npm run gen"
 cascade = "all"
 autoapply = "inherit"
 depends_on = ["build", "gen"]
-cargo = ["cargo", "publish"]
-npm = "npm publish --provenance --access public"
+cargo = ["bash", "../../scripts/publish-cargo-package.sh"]
+npm = "bash ../../scripts/publish-npm-package.sh"
