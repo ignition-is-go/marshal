@@ -78,18 +78,46 @@ jobs:
       # This also avoids the infinite release-on-release loop.
       - name: Sync branch tip and skip if already released
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git pull --ff-only origin "$GITHUB_REF_NAME"
-          if git log -1 --format='%s' | grep -q '^chore(release):'; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+          SUBJECT=$(git log -1 --format='%s')
+          if [[ "$SUBJECT" =~ ^chore\(release\):\ v(.+)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
           else
             VERSION=$(cargo flux version)
-            if [ -z "$VERSION" ]; then
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A release is complete only when every artifact produced by this
+          # workflow exists. A prior run may have stamped/pushed before a
+          # runner or tool failed; that state must resume, not be skipped.
+          ASSETS=$(gh release view "v$VERSION" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          COMPLETE=true
+          for asset in \
+            install-codex.sh \
+            marshal-daemon-x86_64-unknown-linux-gnu \
+            marshal-shim-x86_64-unknown-linux-gnu \
+            marshal-shim-x86_64-pc-windows-gnu.exe \
+            marshal-ui-dist.tar.gz \
+            marshal-shim-aarch64-apple-darwin \
+            marshal-shim-x86_64-apple-darwin; do
+            if ! grep -Fxq "$asset" <<<"$ASSETS"; then
+              COMPLETE=false
+              break
             fi
+          done
+
+          if [ "$COMPLETE" = true ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Configure git identity
@@ -114,14 +142,28 @@ jobs:
           cargo update --workspace
           cargo fmt --all
           git add -A
-          git commit -m "chore(release): v$VERSION"
-          git tag "v$VERSION" -m "Release $VERSION"
-          git push origin HEAD "v$VERSION"
-          BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          if [ "$BRANCH" = "main" ]; then
-            gh release create "v$VERSION" --title "v$VERSION" --generate-notes --latest
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): v$VERSION"
+          fi
+
+          if git rev-parse --verify --quiet "refs/tags/v$VERSION" >/dev/null; then
+            TAG_COMMIT=$(git rev-list -n 1 "v$VERSION")
+            HEAD_COMMIT=$(git rev-parse HEAD)
+            if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+              echo "v$VERSION already points to $TAG_COMMIT, not $HEAD_COMMIT" >&2
+              exit 1
+            fi
           else
-            gh release create "v$VERSION" --title "v$VERSION" --generate-notes --prerelease
+            git tag "v$VERSION" -m "Release $VERSION"
+          fi
+          git push origin HEAD "refs/tags/v$VERSION"
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            if [ "$BRANCH" = "main" ]; then
+              gh release create "v$VERSION" --title "v$VERSION" --generate-notes --latest
+            else
+              gh release create "v$VERSION" --title "v$VERSION" --generate-notes --prerelease
+            fi
           fi
           # Publish prebuilt binaries as release assets so deployers download
           # instead of compiling — this is what lets the daemon and shims
@@ -140,7 +182,7 @@ jobs:
           cargo build --release -p marshal-shim
           cp target/release/marshal-daemon  marshal-daemon-x86_64-unknown-linux-gnu
           cp target/release/marshal-shim    marshal-shim-x86_64-unknown-linux-gnu
-          gh release upload "v$VERSION" \
+          gh release upload "v$VERSION" --clobber \
             marshal-daemon-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-unknown-linux-gnu \
             scripts/install-codex.sh
@@ -161,7 +203,7 @@ jobs:
           ( cd crates/ui && trunk build --release )
           tar -czf marshal-ui-dist.tar.gz -C crates/ui/dist .
 
-          gh release upload "v$VERSION" \
+          gh release upload "v$VERSION" --clobber \
             marshal-shim-x86_64-pc-windows-gnu.exe \
             marshal-ui-dist.tar.gz
 
@@ -237,6 +279,6 @@ jobs:
           cargo build --release -p marshal-shim --target x86_64-apple-darwin
           cp target/aarch64-apple-darwin/release/marshal-shim marshal-shim-aarch64-apple-darwin
           cp target/x86_64-apple-darwin/release/marshal-shim  marshal-shim-x86_64-apple-darwin
-          gh release upload "v$VERSION" \
+          gh release upload "v$VERSION" --clobber \
             marshal-shim-aarch64-apple-darwin \
             marshal-shim-x86_64-apple-darwin
