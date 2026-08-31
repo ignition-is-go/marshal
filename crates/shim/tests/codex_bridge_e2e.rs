@@ -463,6 +463,7 @@ fn hook_session(id: &str, cwd: &str) -> Session {
         client_id: None,
         pid: 0,
         cwd: cwd.to_string(),
+        agent_id: None,
         git_branch: None,
         current_task: None,
         session_name: None,
