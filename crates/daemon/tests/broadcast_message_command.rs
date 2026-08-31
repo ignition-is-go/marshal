@@ -49,6 +49,7 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
         client_id: client_id.map(|c| ClientId(Arc::from(c))),
         pid: 0,
         cwd: "/repo".into(),
+        agent_id: None,
         git_branch: None,
         current_task: None,
         session_name: None,

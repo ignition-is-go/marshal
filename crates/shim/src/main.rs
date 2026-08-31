@@ -273,12 +273,16 @@ async fn serve() -> Result<()> {
     let session_name = manifest.as_ref().and_then(|m| m.name.clone());
     let activity = manifest.as_ref().and_then(|m| m.activity.clone());
     let kind = manifest.and_then(|m| m.kind);
+    let agent_id = std::env::var("MARSHAL_AGENT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
 
     let session = Session {
         id: session_id.clone(),
         client_id: None,
         pid,
         cwd: cwd.clone(),
+        agent_id,
         git_branch: git_branch.clone(),
         current_task: None,
         session_name,

@@ -287,6 +287,7 @@ mod tests {
             client_id: None,
             pid: 0,
             cwd: "/repo".into(),
+            agent_id: None,
             git_branch: None,
             current_task: None,
             session_name: None,

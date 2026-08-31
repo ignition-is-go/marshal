@@ -61,6 +61,7 @@ impl Console {
             client_id: None,
             pid: 0,
             cwd: "—".to_string(),
+            agent_id: None,
             git_branch: None,
             current_task: Some("operator console".to_string()),
             session_name: None,

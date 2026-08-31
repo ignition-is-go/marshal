@@ -101,6 +101,7 @@ fn session_set_event(id: &str) -> MEvent {
         client_id: None,
         pid: 0,
         cwd: "/tmp".into(),
+        agent_id: None,
         git_branch: None,
         current_task: None,
         session_name: None,

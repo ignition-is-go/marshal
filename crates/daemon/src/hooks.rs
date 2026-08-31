@@ -240,6 +240,7 @@ fn register_hook_session(
             client_id: None,
             pid: 0,
             cwd,
+            agent_id: None,
             git_branch: None,
             current_task: None,
             // Codex has no per-PID name manifest; identity is hook-owned.
@@ -292,6 +293,7 @@ fn handle_session_end(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome 
         client_id: None,
         pid: 0,
         cwd: String::new(),
+        agent_id: None,
         git_branch: None,
         current_task: None,
         session_name: None,
