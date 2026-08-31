@@ -54,6 +54,8 @@ jobs:
           components: rustfmt
       - name: Install release system dependencies
         run: |
+          # The public runner network permits Ubuntu mirrors over HTTPS only.
+          sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo timeout 8m apt-get update \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
