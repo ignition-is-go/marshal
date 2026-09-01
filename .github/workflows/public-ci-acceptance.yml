@@ -9,7 +9,7 @@ permissions:
 jobs:
   acceptance:
     name: Kata-isolated runner
-    runs-on: public-ci
+    runs-on: ci-public-linux-ephemeral
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

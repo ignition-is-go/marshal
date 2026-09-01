@@ -11,7 +11,7 @@ env:
 
 jobs:
   check:
-    runs-on: public-ci
+    runs-on: ci-public-linux-ephemeral
     # Backstop so a stuck step (e.g. a flaky apt mirror, a hung runner) fails
     # in minutes instead of burning to GitHub's 6-hour default.
     timeout-minutes: 20
@@ -45,7 +45,7 @@ jobs:
   # every PR, so a Windows-only break fails the check instead of the next
   # manual cross-build.
   windows-cross-check:
-    runs-on: public-ci
+    runs-on: ci-public-linux-ephemeral
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +71,7 @@ jobs:
   # native Windows host as well: Windows Codex TUIs own isolated loopback
   # app-servers, so each bridge must wake only the thread its endpoint owns.
   windows-native-wake:
-    runs-on: public-ci-windows
+    runs-on: ci-windows-ephemeral
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
