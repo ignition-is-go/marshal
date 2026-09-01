@@ -30,10 +30,10 @@ concurrency:
 
 jobs:
   release:
-    # Marshal is public: only the selected disposable public-ci group admits
+    # Marshal is public: only ci-public-linux-ephemeral admits
     # its workflows. Generic self-hosted labels target private-estate runners
     # and leave this job queued forever.
-    runs-on: public-ci
+    runs-on: ci-public-linux-ephemeral
     # Backstop: this job does apt + cross-build + the marshal-ui WASM bundle +
     # upload. A flaky apt mirror hung it ~2h on 2026-06-18; fail in minutes.
     timeout-minutes: 40
@@ -227,7 +227,7 @@ jobs:
   publish-packages:
     needs: release
     if: needs.release.outputs.skip == 'false' || inputs.publish_version != ''
-    runs-on: public-ci
+    runs-on: ci-public-linux-ephemeral
     timeout-minutes: 20
     permissions:
       contents: read
@@ -287,7 +287,7 @@ jobs:
   build-macos:
     needs: release
     if: needs.release.outputs.skip == 'false'
-    runs-on: public-ci-macos
+    runs-on: ci-macos-ephemeral
     timeout-minutes: 40
     permissions:
       contents: write

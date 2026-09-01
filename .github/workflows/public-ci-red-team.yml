@@ -12,7 +12,7 @@ permissions:
 jobs:
   boundary-probes:
     name: Sandbox boundary probes
-    runs-on: public-ci
+    runs-on: ci-public-linux-ephemeral
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
