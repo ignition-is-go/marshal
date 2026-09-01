@@ -1,6 +1,6 @@
 [package]
 name = "marshal-daemon"
-version = "0.50.7"
+version = "0.50.8"
 edition.workspace = true
 license.workspace = true
 description = "Coordination daemon for the marshal multi-agent service. Owns the live roster and routes messages between Claude Code sessions."
