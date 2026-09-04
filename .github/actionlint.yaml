@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+    - ci-public-linux-ephemeral
+    - ci-windows-ephemeral
+    - ci-macos-ephemeral

@@ -49,15 +49,20 @@ jobs:
       skip: ${{ steps.check.outputs.skip }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           fetch-tags: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ignition-is-go/pulse-actions/actions/report-resources@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
+      - uses: ignition-is-go/pulse-actions/actions/setup-rust@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
         with:
           # Public runners are disposable and intentionally have no ambient
           # Rust components. The release script formats the stamped manifests.
           components: rustfmt
+          compiler-cache-endpoint: ${{ secrets.CI_CACHE_ENDPOINT }}
+          compiler-cache-bucket: ${{ secrets.CI_CACHE_BUCKET }}
+          compiler-cache-access-key: ${{ secrets.CI_CACHE_ACCESS_KEY }}
+          compiler-cache-secret-key: ${{ secrets.CI_CACHE_SECRET_KEY }}
       - name: Install release system dependencies
         run: |
           # The public runner network permits Ubuntu mirrors over HTTPS only.
@@ -69,10 +74,9 @@ jobs:
             build-essential gh jq libssl-dev pkg-config
           gh --version
           jq --version
-      - uses: Swatinem/rust-cache@v2
       # Prebuilt trunk (fast) — builds the marshal-ui WASM bundle shipped as a
       # release asset below.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         with:
           tool: trunk
 
@@ -220,6 +224,8 @@ jobs:
           gh release upload "v$VERSION" --clobber \
             marshal-shim-x86_64-pc-windows-gnu.exe \
             marshal-ui-dist.tar.gz
+      - uses: ignition-is-go/pulse-actions/actions/report-resources@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
+        if: always()
 
   # Registry publication is deliberately downstream of the deploy artifacts.
   # It remains a required job (so missing credentials are visible), but cannot
@@ -236,7 +242,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: v${{ needs.release.outputs.version }}
       # A recovery checks out the immutable release tag for package contents,
@@ -262,7 +268,7 @@ jobs:
       # and npm >=11.5.1. The runner's ambient npm has repeatedly fallen back
       # to legacy token auth (ENEEDAUTH), even though id-token permission is
       # present, so pin a supported toolchain rather than relying on the image.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
       - name: Install an OIDC-capable npm
@@ -271,13 +277,20 @@ jobs:
         run: |
           node --version
           npm --version
-          test "$(node -p 'Number(process.versions.node.split(`.`)[0]) >= 22')" = true
-          test "$(npm --version | awk -F. '{ print ($1 > 11 || ($1 == 11 && $2 >= 5)) ? "true" : "false" }')" = true
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          node -e "process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)"
+          npm --version | node -e "const v = require('fs').readFileSync(0, 'utf8').trim().split('.').map(Number); process.exit(v[0] > 11 || (v[0] === 11 && v[1] >= 5) ? 0 : 1)"
+      - uses: ignition-is-go/pulse-actions/actions/report-resources@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
+      - uses: ignition-is-go/pulse-actions/actions/setup-rust@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
+        with:
+          compiler-cache-endpoint: ${{ secrets.CI_CACHE_ENDPOINT }}
+          compiler-cache-bucket: ${{ secrets.CI_CACHE_BUCKET }}
+          compiler-cache-access-key: ${{ secrets.CI_CACHE_ACCESS_KEY }}
+          compiler-cache-secret-key: ${{ secrets.CI_CACHE_SECRET_KEY }}
       - run: cargo install cargo-flux
       - name: Publish crates and plugins
         run: cargo flux run publish
+      - uses: ignition-is-go/pulse-actions/actions/report-resources@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
+        if: always()
 
   # marshal-shim for macOS — the ONLY marshal binary a Mac needs (the daemon +
   # UI run on the Linux marshal LXC; a Mac is purely a Codex/Claude CLIENT).
@@ -294,12 +307,17 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Build the exact commit the release job stamped + tagged.
           ref: v${{ needs.release.outputs.version }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ignition-is-go/pulse-actions/actions/report-resources@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
+      - uses: ignition-is-go/pulse-actions/actions/setup-rust@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
+        with:
+          compiler-cache-endpoint: ${{ secrets.CI_CACHE_ENDPOINT }}
+          compiler-cache-bucket: ${{ secrets.CI_CACHE_BUCKET }}
+          compiler-cache-access-key: ${{ secrets.CI_CACHE_ACCESS_KEY }}
+          compiler-cache-secret-key: ${{ secrets.CI_CACHE_SECRET_KEY }}
       - name: Build + upload macOS marshal-shim (arm64 + x86_64)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -315,3 +333,5 @@ jobs:
           gh release upload "v$VERSION" --clobber \
             marshal-shim-aarch64-apple-darwin \
             marshal-shim-x86_64-apple-darwin
+      - uses: ignition-is-go/pulse-actions/actions/report-resources@2c94ebf4fedd47f0c36d491e0dee5ad446a071b5 # v1.0.0
+        if: always()
