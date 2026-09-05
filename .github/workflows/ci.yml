@@ -36,6 +36,8 @@ jobs:
       - run: cargo flux run check
       - run: cargo flux run lint
       - run: cargo flux run test
+      - name: Test release dispatch contract
+        run: python3 scripts/test_release_dispatch_contract.py
 
   # marshal-shim ships to Windows (ue_plugindev) as a cross-compiled
   # x86_64-pc-windows-gnu binary, but its Windows code is `#[cfg(windows)]`
