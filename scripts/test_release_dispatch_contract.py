@@ -17,6 +17,9 @@ class ReleaseDispatchContractTests(unittest.TestCase):
             self.assertIn(f"needs.{job}.result == 'success'", self.workflow)
 
     def test_dispatch_token_is_scoped_to_pulse_deploy(self) -> None:
+        self.assertIn("app-id: ${{ vars.RELEASE_APP_ID }}", self.workflow)
+        self.assertIn("private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}", self.workflow)
+        self.assertNotIn("RELEASE_DISPATCH_APP", self.workflow)
         self.assertIn("repositories: pulse-deploy", self.workflow)
         self.assertIn("permission-contents: write", self.workflow)
         self.assertNotIn("permission-actions: write", self.workflow)
