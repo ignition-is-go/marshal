@@ -14,7 +14,7 @@ jobs:
     runs-on: ci-public-linux-ephemeral
     # Backstop so a stuck step (e.g. a flaky apt mirror, a hung runner) fails
     # in minutes instead of burning to GitHub's 6-hour default.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
