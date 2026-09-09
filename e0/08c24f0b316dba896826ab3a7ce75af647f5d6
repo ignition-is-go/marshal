@@ -1,0 +1,14 @@
+¶ditem©dbodyyA message addressed to a human operator by email is documented to "route to their most-active agent". It arrives in that agent's session as an ordinary notifications/claude/channel event, indistinguishable at handling time from an agent-to-agent message, even though the wire metadata carries the distinction.
+
+Evidence (2026-09-08, session 779cf66c-d0d3-410e-a647-6319c2ed6db5, nickname mighty-nova):
+
+- message_id 01a0825c-afc0-7381-92d6-a43ea43dadd9 from super-photon (01a05e50-2f80-7e82-bd5c-38bebcd8dc78): to_operator="max@lucid.rocks", to_session="779cf66c-...". Body: a request to review/approve pulse-cluster PR #527 so a matched release/deploy could proceed. This was addressed to the HUMAN.
+- Contrast message_id 01a08264-6769-7bb2-b314-e064de97837c from crimson-hare: to_operator="null", to_session="779cf66c-...". Genuinely agent-to-agent.
+- Both were delivered identically.
+
+Consequence: an approval request meant for the human was handled by an agent that shares the human's GitHub identity (every pulse-admin session authenticates as lucid-max). Only a manual `gh auth status` check prevented a self-approval that would have defeated branch protection's independent-review requirement. The failure mode is a policy bypass, not a lost message.
+
+Asks, any of which closes the gap:
+1. A hold-for-human delivery mode: to_operator messages land in an operator-visible inbox and are NOT dispatched to an agent session.
+2. Failing that, surface to_operator in the delivered event so the receiving agent can treat it as "for your operator, relay it" rather than "for you, act on it". The metadata already exists; only the client handling is missing.
+3. Document that "most-active agent" routing means agents WILL receive human-addressed requests, so senders stop assuming an email reaches a person.gcreatedx2026-09-09T01:05:12.507154ZlcreatedByDevomax@lucid.rockspcreatedByMachinekpulse-adminbidx 11416c48433049e0a751ff7cea8e026dflabelsÅgroutinghprioritybP1iprojectIdx 06a27415cc7c4b7d9d9d6fe1e377e6c3etitlexZHuman-addressed messages (to_operator) are delivered to an agent with no distinct handlingjchangeTypecSEThitemTypedTaskicreatedAtx2026-09-09T01:05:12.507696Zbtxx$734bc8c5-2337-4a7e-b85a-9fcc2500fce5hsourceIdkpulse-admin
