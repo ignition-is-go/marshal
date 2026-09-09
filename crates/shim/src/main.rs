@@ -280,7 +280,7 @@ async fn serve() -> Result<()> {
         pid,
         cwd: cwd.clone(),
         git_branch: git_branch.clone(),
-        current_task: None,
+        current_task: default_current_task(&cwd, git_branch.as_deref()),
         session_name,
         activity,
         kind,
@@ -1161,6 +1161,28 @@ fn detect_project_basename(cwd: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Default the roster's free-form `current_task` from evidence the shim already
+/// holds at registration, so a busy session is never the unlabeled entry a peer
+/// routes a misdirected request to. Two sources, strongest first: the enclosing
+/// `pulse work` workspace (`.workspaces/<name>/…`, named for its task) and then
+/// a non-trunk git branch. Trunk names carry no routing signal and stay `None`.
+/// An explicit `set_status` always overwrites this. The workspace source is
+/// fixed for the session's life; the branch source is read once and the HEAD
+/// watcher does not re-derive it on checkout.
+fn default_current_task(cwd: &str, git_branch: Option<&str>) -> Option<String> {
+    let mut components = std::path::Path::new(cwd).components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == ".workspaces"
+            && let Some(name) = components.next()
+        {
+            return name.as_os_str().to_str().map(str::to_string);
+        }
+    }
+    git_branch
+        .filter(|branch| !matches!(*branch, "main" | "master" | "dev" | "develop" | "trunk"))
+        .map(str::to_string)
+}
+
 /// Resolve which HUMAN drives this session, as an email — the canonical id
 /// that links the same person across harnesses and machines. Layered,
 /// strongest → weakest:
@@ -1248,8 +1270,49 @@ fn detect_host() -> HostInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{ROSTER_MISS_TICKS, detect_git_branch, resolve_git_head_dir, roster_miss_step};
+    use super::{
+        ROSTER_MISS_TICKS, default_current_task, detect_git_branch, resolve_git_head_dir,
+        roster_miss_step,
+    };
     use std::process::Command;
+
+    #[test]
+    fn default_current_task_prefers_the_pulse_workspace_name() {
+        assert_eq!(
+            default_current_task("/root/pulse/.workspaces/lv-1141/marshal", Some("lv-1141")),
+            Some("lv-1141".into())
+        );
+        // The workspace wins even when the branch is trunk: it is the task the
+        // checkout was created for and it cannot go stale on checkout.
+        assert_eq!(
+            default_current_task(
+                "/root/pulse/.workspaces/uestaging-disk/pulse-deploy",
+                Some("main")
+            ),
+            Some("uestaging-disk".into())
+        );
+    }
+
+    #[test]
+    fn default_current_task_falls_back_to_a_non_trunk_branch() {
+        assert_eq!(
+            default_current_task("/root/pulse/pulse-unreal", Some("feat/rotunda-deformer")),
+            Some("feat/rotunda-deformer".into())
+        );
+        // A trailing `.workspaces` with no name after it carries nothing.
+        assert_eq!(
+            default_current_task("/root/pulse/.workspaces", Some("lv-a57b")),
+            Some("lv-a57b".into())
+        );
+    }
+
+    #[test]
+    fn default_current_task_is_none_on_trunk_or_no_evidence() {
+        for trunk in ["main", "master", "dev", "develop", "trunk"] {
+            assert_eq!(default_current_task("/repo", Some(trunk)), None, "{trunk}");
+        }
+        assert_eq!(default_current_task("/repo", None), None);
+    }
 
     #[test]
     fn roster_self_check_ignores_unsynced_and_present_rosters() {
