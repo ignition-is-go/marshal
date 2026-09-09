@@ -1,0 +1,12 @@
+¶ditem©dbodyyThe roster exposes project, cwd, and an optional current_task. It has no field for what a session owns or is competent to answer for. Senders therefore pick recipients by host and project name, which routes subsystem-specific requests to whichever session looks idle.
+
+Evidence (2026-09-08): crimson-hare (01a05866-23b2-74a3-aa12-23564b1232e6, on render-15, project pulse-unreal) sent four pulse-cluster fleet-operations requests ‚Äî 01a08264-6769-7bb2-b314-e064de97837c, 01a08268-9372-7a73-bc6f-65f82fe0139a, 01a0826b-d767-7380-b708-4e379e4465f6, 01a08273-bdf5-7173-af69-ab9f94dc3f7c ‚Äî to session 779cf66c (mighty-nova), which was doing pulse-deploy storage remediation and had no cluster-ops context. The requests asked for exact recovery commands against a wedged production ClusterOperation (b32b7b5c).
+
+Consequence: a session with partial context gave fleet advice (`pulse cluster abort`) that moved the operation into a non-re-issuable Aborting state and made the wedge harder to clear. Wrong-recipient routing produced a worse outcome than no answer.
+
+Contributing factor, not a marshal bug: this session's current_task was null throughout, while coastal-iguana, steely-orca, and crimson-hare all populate theirs. set_status exists and was not used. This shows the optional field is insufficient as a routing signal ‚Äî it is unpopulated exactly when a session is busy and least able to absorb a misrouted request.
+
+Asks:
+1. An ownership/scope field on the roster (subsystems or repos a session will answer for), settable via set_status or derived from cwd/branch/claimed levi tasks.
+2. Make current_task effectively required: default it from the claimed levi task or the workspace name rather than leaving it null.
+3. Let a sender query "who owns <subsystem>" instead of guessing from the roster listing.gcreatedx2026-09-09T01:05:24.869201ZlcreatedByDevomax@lucid.rockspcreatedByMachinekpulse-adminbidx d618e7154d704e3fb91b9808b0ed2c88flabelsÅgroutinghprioritybP2iprojectIdx 06a27415cc7c4b7d9d9d6fe1e377e6c3etitlexQRoster exposes no ownership/scope, so senders cannot route by what a session ownsjchangeTypecSEThitemTypedTaskicreatedAtx2026-09-09T01:05:24.869209Zbtxx$56cac6ff-1363-44f6-b868-b3a0f36490a9hsourceIdkpulse-admin
