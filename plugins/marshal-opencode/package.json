@@ -1,5 +1,5 @@
 {
-  "name": "marshal-opencode",
+  "name": "@agent-marshal/marshal-opencode",
   "version": "0.18.1",
   "description": "opencode plugin that connects an opencode session to the marshal coordination daemon — roster registration, send_message/broadcast/join_room/leave_room/set_status tools, and real-time + per-turn delivery of sibling-agent messages. The opencode-native counterpart of the Claude Code marshal-shim, built on opencode's plugin hooks instead of a shim binary.",
   "type": "module",
@@ -18,6 +18,20 @@
     "marshal",
     "agent-coordination"
   ],
+  "repository": {
+    "directory": "plugins/marshal-opencode",
+    "type": "git",
+    "url": "https://github.com/ignition-is-go/marshal"
+  },
+  "flux": {
+    "tasks": [
+      "check",
+      "publish"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
   "dependencies": {
     "@myko/core": "^4.24.2",
     "@opencode-ai/plugin": "^1.17.11"
