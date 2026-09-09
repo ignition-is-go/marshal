@@ -391,10 +391,8 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
     }
     if !human.is_empty() {
         let op = human[0].to_operator.as_deref().unwrap_or("your operator");
-        out.push_str(&format!(
-            "For operator ({op}): relay these messages; do not answer for them or expand your \
-             current task.\n",
-        ));
+        out.push_str(&marshal_entities::operator_relay_notice(op));
+        out.push('\n');
         for m in &human {
             out.push_str(&render_line(m));
         }

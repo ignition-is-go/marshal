@@ -200,7 +200,7 @@ impl CommandHandler for SendMessage {
                     // marshal:") and no body (it would just be a truncated
                     // banner). `meta.body` is a bounded model-context preview;
                     // the persisted Message retains the complete body.
-                    format!("new message from {from_nickname}"),
+                    direct_push_content(&from_nickname, to_operator.as_deref()),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "new_message",
@@ -455,4 +455,38 @@ pub(crate) fn push_to_client(client_id: &str, content: String, meta: serde_json:
     let cmd = NotifyChannel { content, meta };
     let request = CommandRequest::new(cmd);
     registry.send_command_request_to(client_id, &request)
+}
+
+/// The channel banner for a direct message. Agent-addressed mail stays a
+/// concise origin ping; human-addressed mail opens with the relay-to-operator
+/// contract so the recipient agent puts it in front of the person instead of
+/// acting on it. Pure so it can be asserted without a live client registry.
+pub(crate) fn direct_push_content(from_nickname: &str, to_operator: Option<&str>) -> String {
+    match to_operator {
+        Some(op) => format!(
+            "{} New message from {from_nickname}.",
+            crate::message::operator_relay_notice(op)
+        ),
+        None => format!("new message from {from_nickname}"),
+    }
+}
+
+#[cfg(test)]
+mod push_content_tests {
+    use super::direct_push_content;
+
+    #[test]
+    fn agent_addressed_banner_is_unchanged() {
+        assert_eq!(
+            direct_push_content("fleet-wolf", None),
+            "new message from fleet-wolf"
+        );
+    }
+
+    #[test]
+    fn human_addressed_banner_opens_with_the_relay_contract() {
+        let content = direct_push_content("fleet-wolf", Some("max@lucid.rocks"));
+        assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
+        assert!(content.ends_with("New message from fleet-wolf."));
+    }
 }

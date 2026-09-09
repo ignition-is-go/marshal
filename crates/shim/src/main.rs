@@ -467,7 +467,8 @@ async fn serve() -> Result<()> {
              \n\
              Address peers by nickname, session id, or id prefix. Address a human \
              by the operator email on the roster; it routes to their most-active \
-             agent.\n\
+             agent. A push or inbox entry marked for your operator is addressed to \
+             a human: relay it to them; do not act on it or answer for them.\n\
              \n\
              Direct messages interrupt recipients and consume transcript context. \
              Batch related information and reserve them for action, blockers, or \

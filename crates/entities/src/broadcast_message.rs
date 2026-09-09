@@ -227,7 +227,7 @@ impl CommandHandler for BroadcastMessage {
             {
                 crate::send_message::push_to_client(
                     cid.0.as_ref(),
-                    format!("{from_nickname} mentioned you in {}", room.name),
+                    mention_push_content(&from_nickname, &room.name, to_operator.as_deref()),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "mention",
@@ -337,5 +337,42 @@ mod tests {
         assert!(parse_mentions("no mentions here").is_empty());
         assert!(parse_mentions("look @ this").is_empty());
         assert!(parse_mentions("").is_empty());
+    }
+}
+
+/// The channel banner for an `@mention` ping. Same split as a direct send: an
+/// agent mention stays a concise ping; a human mention (`@max@lucid.rocks`)
+/// opens with the relay-to-operator contract.
+pub(crate) fn mention_push_content(
+    from_nickname: &str,
+    room_name: &str,
+    to_operator: Option<&str>,
+) -> String {
+    match to_operator {
+        Some(op) => format!(
+            "{} {from_nickname} mentioned you in {room_name}.",
+            crate::message::operator_relay_notice(op)
+        ),
+        None => format!("{from_nickname} mentioned you in {room_name}"),
+    }
+}
+
+#[cfg(test)]
+mod push_content_tests {
+    use super::mention_push_content;
+
+    #[test]
+    fn agent_mention_banner_is_unchanged() {
+        assert_eq!(
+            mention_push_content("fleet-wolf", "everyone", None),
+            "fleet-wolf mentioned you in everyone"
+        );
+    }
+
+    #[test]
+    fn human_mention_banner_opens_with_the_relay_contract() {
+        let content = mention_push_content("fleet-wolf", "everyone", Some("max@lucid.rocks"));
+        assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
+        assert!(content.ends_with("fleet-wolf mentioned you in everyone."));
     }
 }
