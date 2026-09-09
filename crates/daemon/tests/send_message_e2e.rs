@@ -407,3 +407,123 @@ fn live_client_with_channels_off_is_not_delivered_live() {
 
     server.shutdown();
 }
+
+#[test]
+fn human_addressed_push_content_carries_the_relay_contract() {
+    // A message addressed to a HUMAN (by operator identity) lands on that
+    // operator's most-active agent. The hook (pull) path already frames such
+    // mail as "for your operator: relay it"; the live push must say the same
+    // in `content`, because Claude Code wraps every channel push as untrusted
+    // peer input — the right stance for agent mail, the wrong one for a
+    // request meant for a person. Without the contract in `content`, an
+    // approval request for the human gets handled by the agent instead.
+    let _ = env_logger::builder().is_test(true).try_init();
+    marshal_entities::link();
+    daemon::link();
+
+    let port = pick_free_port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let addr = format!("ws://{bind}");
+    let server = spawn_server(bind);
+
+    let client_a = MykoClient::new();
+    client_a.set_protocol(MykoProtocol::JSON);
+    let client_b = MykoClient::new();
+    client_b.set_protocol(MykoProtocol::JSON);
+
+    let received: Arc<Mutex<Option<NotifyChannel>>> = Arc::new(Mutex::new(None));
+    let received_for_handler = Arc::clone(&received);
+    let notify_guard = client_b.on_command::<NotifyChannel, _>(move |cmd, _responder| {
+        *received_for_handler.lock().expect("notify mutex") = Some(cmd);
+    });
+    Box::leak(Box::new(notify_guard));
+
+    let _b_sessions = client_b.watch_query::<GetAllSessions>(GetAllSessions {});
+    let _a_sessions = client_a.watch_query::<GetAllSessions>(GetAllSessions {});
+
+    client_a.set_address(Some(addr.clone()));
+    client_b.set_address(Some(addr.clone()));
+    {
+        let s = client_a.connection_status();
+        wait_for("A connected", move || {
+            matches!(s.get(), ConnectionStatus::Connected(_))
+        });
+    }
+    {
+        let s = client_b.connection_status();
+        wait_for("B connected", move || {
+            matches!(s.get(), ConnectionStatus::Connected(_))
+        });
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    // B is one of max's agents. A addresses the PERSON, not the session.
+    let mut max_agent = make_session("sess-max");
+    max_agent.operator = Some("max@lucid.rocks".into());
+    max_agent.last_activity_at = Some(chrono::Utc::now().timestamp_millis());
+    send_session_set(&client_a, &make_session("sess-alpha"));
+    send_session_set(&client_b, &max_agent);
+    {
+        let cell = _a_sessions.clone();
+        wait_for("both sessions visible to A with client_ids", move || {
+            let sessions = cell.get();
+            let a = sessions.iter().find(|s| s.id.0.as_ref() == "sess-alpha");
+            let b = sessions.iter().find(|s| s.id.0.as_ref() == "sess-max");
+            matches!((a, b), (Some(a), Some(b)) if a.client_id.is_some() && b.client_id.is_some())
+        });
+    }
+
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from("max@lucid.rocks")),
+        body: "please approve PR #527".into(),
+        as_session: None,
+    };
+    let response_cell = client_a.send_command::<SendMessage, SendMessageResult>(&cmd);
+    {
+        let cell = response_cell.clone();
+        wait_for("A's send_command response", move || {
+            matches!(cell.get(), Some(Ok(_)))
+        });
+    }
+    let result = response_cell.get().expect("got response").expect("ok");
+    assert_eq!(result.to_session_id.0.as_ref(), "sess-max");
+    assert_eq!(result.live_push, LivePushStatus::Delivered);
+
+    {
+        let received = Arc::clone(&received);
+        wait_for("B received NotifyChannel", move || {
+            received.lock().expect("notify mutex").is_some()
+        });
+    }
+    let push = received.lock().unwrap().take().expect("push");
+
+    // meta already carried the signal before this change; the defect is that
+    // `content` — the line the model actually reads — did not.
+    assert_eq!(
+        push.meta.get("to_operator"),
+        Some(&serde_json::json!("max@lucid.rocks")),
+    );
+    assert!(
+        push.content.contains("For operator (max@lucid.rocks)"),
+        "human-addressed push content must open with the relay-to-operator contract, got: {}",
+        push.content,
+    );
+    assert!(
+        push.content.contains("relay"),
+        "content must tell the agent to relay, not act, got: {}",
+        push.content,
+    );
+    assert!(
+        push.content
+            .contains(&marshal_entities::nickname("sess-alpha")),
+        "content must still name the sender, got: {}",
+        push.content,
+    );
+    assert!(
+        !push.content.contains("please approve"),
+        "content must NOT carry the body, got: {}",
+        push.content,
+    );
+
+    server.shutdown();
+}
