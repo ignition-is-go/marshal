@@ -44,6 +44,10 @@ import type { Identity } from "./identity.ts";
 
 const LIVENESS_INTERVAL_MS = 5_000;
 const INBOX_PULL_LIMIT = 20;
+// Marshal context enriches a turn but must never gate the harness itself. A
+// disconnected Myko client keeps sendCommand pending while it reconnects, so
+// bound the optional per-turn inbox read and fail open.
+const INBOX_COMMAND_TIMEOUT_MS = 1_500;
 const SOURCE_ID = "marshal-pi";
 
 /** myko's CellServer serves its WebSocket at the `/myko` path. */
@@ -251,6 +255,7 @@ export class MarshalDaemon {
   }
 
   drainInbox(sessionId: string): Promise<string | null> {
+    if (!this.connected) return Promise.resolve(null);
     const prev = this.draining.get(sessionId) ?? Promise.resolve<string | null>(null);
     const next = prev.catch(() => null).then(() => this.drainInboxInner(sessionId));
     this.draining.set(sessionId, next);
@@ -274,7 +279,7 @@ export class MarshalDaemon {
     let result: ReadMessagesResult | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        result = await this.send(readMessages({
+        result = await this.sendForInbox(readMessages({
           asSession: sessionId,
           toSession: sessionId,
           inbox: false,
@@ -292,7 +297,7 @@ export class MarshalDaemon {
 
     const block = this.renderInbox(result.messages);
     try {
-      await this.send(ackMessages(sessionId, result.messages.map((m) => m.messageId)));
+      await this.sendForInbox(ackMessages(sessionId, result.messages.map((m) => m.messageId)));
     } catch { this.log("inbox ack failed"); }
     return block;
   }
@@ -350,6 +355,38 @@ export class MarshalDaemon {
 
   private send<R>(command: MarshalCommand<R>): Promise<R> {
     return this.client.sendCommand(command as never) as Promise<R>;
+  }
+
+  /** Bounded send for the optional inbox path: reject immediately if the WS is
+   *  down, and otherwise time out rather than block a turn while the client
+   *  reconnects. Interactive tools use the connection guard in index.ts. */
+  private sendForInbox<R>(command: MarshalCommand<R>): Promise<R> {
+    if (!this.connected) return Promise.reject(new Error("marshal is disconnected"));
+
+    return new Promise<R>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`marshal inbox command timed out after ${INBOX_COMMAND_TIMEOUT_MS}ms`));
+      }, INBOX_COMMAND_TIMEOUT_MS);
+      if (typeof (timer as any).unref === "function") (timer as any).unref();
+
+      void this.send(command).then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   private watch<I>(query: MarshalQuery<I>) {
