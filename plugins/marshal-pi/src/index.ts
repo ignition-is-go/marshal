@@ -216,6 +216,18 @@ async function init(pi: ExtensionAPI) {
     sessionCtx = ctx;
     sessionId = stableSessionId(ctx.sessionManager.getSessionFile());
 
+    if (!ctx.hasUI) {
+      // Headless (-p) runs: skip the daemon connection entirely. Connecting
+      // leaves the myko client's synchronous self-pipe pump spinning at
+      // session shutdown — the process never exits, pegs a CPU core, and
+      // ignores SIGTERM (only SIGKILL lands), so every headless pi worker
+      // hangs until its wrapper timeout with output never flushed. The
+      // marshal_* tools stay registered and fail cleanly (see #118 for the
+      // fail-open guard on the daemon-unreachable path).
+      log("headless: marshal daemon connection skipped");
+      return;
+    }
+
     if (!daemon) {
       daemon = new MarshalDaemon({ address, cwd, identity, log });
       daemon.onNotify(onInboundMessage);
