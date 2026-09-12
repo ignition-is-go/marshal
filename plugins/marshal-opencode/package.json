@@ -30,13 +30,17 @@
   "license": "MIT OR Apache-2.0",
   "main": "./src/index.ts",
   "name": "@agent-marshal/marshal-opencode",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "directory": "plugins/marshal-opencode",
     "type": "git",
-    "url": "https://github.com/ignition-is-go/marshal"
+    "url": "git+https://github.com/ignition-is-go/marshal.git"
   },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "prepublishOnly": "npm run check"
   },
   "type": "module",
   "version": "0.52.0"

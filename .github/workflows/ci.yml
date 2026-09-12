@@ -31,8 +31,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: plugins/marshal-pi/package-lock.json
+          cache-dependency-path: |
+            plugins/marshal-pi/package-lock.json
+            plugins/marshal-opencode/package-lock.json
       - run: npm ci --prefix plugins/marshal-pi
+      - run: npm ci --prefix plugins/marshal-opencode
       - run: cargo flux run check
       - run: cargo flux run lint
       - run: cargo flux run test

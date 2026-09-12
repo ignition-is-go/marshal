@@ -14,9 +14,7 @@ if published_version=$(npm view "${package_name}@${package_version}" version --j
   fi
   echo "${package_name} ${package_version} already exists on npm; skipping"
 elif grep -q 'E404' "$error_log"; then
-  # npm provenance currently rejects self-hosted GitHub Actions runners. OIDC
-  # trusted publishing still authenticates this job; publish without provenance.
-  npm publish --provenance=false --access public
+  npm publish --access public
 else
   cat "$error_log" >&2
   exit 1

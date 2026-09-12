@@ -229,7 +229,8 @@ jobs:
   publish-packages:
     needs: release
     if: needs.release.outputs.skip == 'false' || inputs.publish_version != ''
-    runs-on: ci-public-linux-ephemeral
+    # npm trusted publishing requires a GitHub-hosted runner.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -269,6 +270,7 @@ jobs:
           node-version: 24
       - name: Install an OIDC-capable npm
         run: npm install --global npm@11
+      - run: npm ci --prefix plugins/marshal-opencode
       - name: Verify publishing toolchain
         run: |
           node --version

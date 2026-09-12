@@ -22,14 +22,14 @@ It talks to the daemon with [`@myko/core`](https://www.npmjs.com/package/@myko/c
 
 ## Install
 
-### Option A — npm package (once published)
+### Option A — npm package
 
 Add it to your opencode config (`opencode.json` / `~/.config/opencode/opencode.json`):
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["marshal-opencode"]
+  "plugin": ["@agent-marshal/marshal-opencode"]
 }
 ```
 
@@ -91,6 +91,26 @@ bun test test/entities.test.ts test/daemon.test.ts  # unit only
   (cd ../.. && cargo build -p marshal-daemon)   # builds target/debug/marshal-daemon
   bun test test/integration.test.ts             # or set MARSHAL_DAEMON_BIN=/path/to/marshal-daemon
   ```
+
+## Publishing
+
+For the first publication, use an npm account with write access to the
+`@agent-marshal` scope. From this directory, run:
+
+```bash
+npm ci --workspaces=false
+npm login --registry=https://registry.npmjs.org/
+npm publish
+```
+
+Publishing runs the typecheck and uses public access. After the package exists,
+configure its [trusted publisher](https://docs.npmjs.com/trusted-publishers/)
+on npm with GitHub owner `ignition-is-go`, repository `marshal`, workflow
+`release.yml`, and no environment name. Allow direct publication with `npm publish`.
+Subsequent versions publish through the Release workflow on a GitHub-hosted runner.
+
+To retry publication of an existing release, dispatch the Release workflow with
+its version in `publish_version`.
 
 ## Status / follow-ups
 
