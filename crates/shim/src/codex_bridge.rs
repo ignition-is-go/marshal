@@ -47,7 +47,10 @@ use std::{
 #[cfg(unix)]
 use std::{
     fs::OpenOptions,
-    os::{fd::AsRawFd, unix::fs::PermissionsExt},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{fs::PermissionsExt, net::UnixStream},
+    },
 };
 
 use anyhow::{Context, Result};
@@ -208,6 +211,7 @@ struct BridgeArgs {
     launcher_cwd: Option<PathBuf>,
     launcher_thread_id: Option<String>,
     tui_proxy: Option<AppServerEndpoint>,
+    launcher_stdin: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -331,12 +335,22 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
     }
 
     let this = std::env::current_exe().context("locating marshal-shim executable")?;
-    let bridge = Command::new(this)
+    let mut bridge_command = Command::new(this);
+    bridge_command
         .arg("codex-bridge")
         .args(&bridge_args)
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    let (bridge_stdin, _launcher_liveness) =
+        UnixStream::pair().context("creating launcher liveness pipe")?;
+    #[cfg(unix)]
+    bridge_command
+        .arg("--launcher-stdin")
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(bridge_stdin)));
+    #[cfg(not(unix))]
+    bridge_command.stdin(Stdio::null());
+    let bridge = bridge_command
         .spawn()
         .context("starting Codex live-delivery bridge");
     let mut bridge = match bridge {
@@ -973,6 +987,8 @@ pub async fn run(args: &[String]) -> Result<()> {
     let mut cooldowns: HashMap<SessionId, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(args.poll);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let launcher_exit = wait_for_launcher_exit(args.launcher_stdin);
+    tokio::pin!(launcher_exit);
 
     loop {
         tokio::select! {
@@ -989,6 +1005,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                 return result
                     .context("Codex TUI proxy stopped")?;
             }
+            _ = &mut launcher_exit => break,
         }
 
         let now = Instant::now();
@@ -1043,6 +1060,38 @@ pub async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+async fn wait_for_launcher_exit(launcher_stdin: bool) {
+    if !launcher_stdin {
+        std::future::pending::<()>().await;
+        return;
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(libc::STDIN_FILENO) };
+    if stream.set_nonblocking(true).is_err() {
+        return;
+    }
+    let Ok(stream) = tokio::net::UnixStream::from_std(stream) else {
+        return;
+    };
+    loop {
+        if stream.readable().await.is_err() {
+            return;
+        }
+        let mut byte = [0_u8; 1];
+        match stream.try_read(&mut byte) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_launcher_exit(_launcher_stdin: bool) {
+    std::future::pending::<()>().await;
+}
+
 fn retain_active_cooldowns(cooldowns: &mut HashMap<SessionId, Instant>, now: Instant) {
     // Do not tie the coalescing window to the current unread snapshot. A
     // successful hook normally acknowledges the message immediately, making
@@ -1063,6 +1112,7 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
     let mut launcher_thread_id = None;
     let mut proxy_socket = None;
     let mut proxy_endpoint = None;
+    let mut launcher_stdin = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -1102,6 +1152,8 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
             "--proxy-endpoint" => {
                 proxy_endpoint = Some(required_value(&mut it, "--proxy-endpoint")?);
             }
+            #[cfg(unix)]
+            "--launcher-stdin" => launcher_stdin = true,
             "-h" | "--help" => {
                 println!(
                     "usage: marshal-shim codex-bridge [--daemon WS_URL] \
@@ -1168,6 +1220,7 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
         launcher_cwd,
         launcher_thread_id,
         tui_proxy,
+        launcher_stdin,
     })
 }
 
