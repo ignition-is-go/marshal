@@ -596,7 +596,8 @@ fn same_cwd(first: &Path, second: &Path) -> bool {
     #[cfg(windows)]
     {
         fn comparable(path: &Path) -> String {
-            let normalized = path.to_string_lossy().replace('\\', "/");
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            let normalized = canonical.to_string_lossy().replace('\\', "/");
             if let Some(unc) = normalized.strip_prefix("//?/UNC/") {
                 format!("//{unc}")
             } else {
