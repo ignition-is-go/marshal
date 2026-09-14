@@ -366,7 +366,8 @@ async function init(pi: ExtensionAPI) {
     promptSnippet: "List live peer sessions on the marshal roster",
     parameters: Type.Object({}),
     async execute(): Promise<MarshalToolResult> {
-      if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
+      if (!daemon || !sessionId || !daemon.isConnected())
+        return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       const sessions = await daemon.roster_snapshot();
       if (sessions.length === 0) return { content: [{ type: "text", text: "no live sessions on the marshal roster" }], details: {} };
@@ -395,7 +396,8 @@ async function init(pi: ExtensionAPI) {
       _toolCallId: string,
       params: { to: string; body: string },
     ): Promise<MarshalToolResult> {
-      if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
+      if (!daemon || !sessionId || !daemon.isConnected())
+        return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         const r = await daemon.sendMessage(sessionId, params.to, params.body);
@@ -424,7 +426,8 @@ async function init(pi: ExtensionAPI) {
       _toolCallId: string,
       params: { room: string; body: string },
     ): Promise<MarshalToolResult> {
-      if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
+      if (!daemon || !sessionId || !daemon.isConnected())
+        return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         const r = await daemon.broadcast(sessionId, params.room, params.body);
@@ -451,7 +454,8 @@ async function init(pi: ExtensionAPI) {
       _toolCallId: string,
       params: { name: string; description?: string },
     ): Promise<MarshalToolResult> {
-      if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
+      if (!daemon || !sessionId || !daemon.isConnected())
+        return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         const r = await daemon.joinRoom(sessionId, params.name, params.description);
@@ -477,7 +481,8 @@ async function init(pi: ExtensionAPI) {
       _toolCallId: string,
       params: { room: string },
     ): Promise<MarshalToolResult> {
-      if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
+      if (!daemon || !sessionId || !daemon.isConnected())
+        return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         const r = await daemon.leaveRoom(sessionId, params.room);
@@ -503,7 +508,8 @@ async function init(pi: ExtensionAPI) {
       _toolCallId: string,
       params: { text: string },
     ): Promise<MarshalToolResult> {
-      if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
+      if (!daemon || !sessionId || !daemon.isConnected())
+        return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         await daemon.setStatus(sessionId, params.text);
@@ -534,7 +540,8 @@ async function init(pi: ExtensionAPI) {
       _toolCallId: string,
       params: { room?: string; since?: number; limit?: number },
     ): Promise<MarshalToolResult> {
-      if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
+      if (!daemon || !sessionId || !daemon.isConnected())
+        return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         const msgs = await daemon.readHistory(sessionId, {
@@ -563,7 +570,8 @@ async function init(pi: ExtensionAPI) {
       _toolCallId: string,
       params: { message_ids: string[] },
     ): Promise<MarshalToolResult> {
-      if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
+      if (!daemon || !sessionId || !daemon.isConnected())
+        return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
         const n = await daemon.ackMessages(sessionId, params.message_ids);
