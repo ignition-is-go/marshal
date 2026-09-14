@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "@myko/core": "^4.24.4"
+    "@myko/core": "^6.5.13"
   },
   "description": "Prime Agent extension that connects live conversations to the marshal coordination daemon with native tools and real-time steering delivery of sibling-agent messages.",
   "devDependencies": {
