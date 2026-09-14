@@ -24,6 +24,15 @@ It talks to the daemon with [`@myko/core`](https://www.npmjs.com/package/@myko/c
 
 ### Option A — npm package (once published)
 
+> **Not published from CI yet.** `@agent-marshal/marshal-opencode` 0.52.0 was
+> published by hand and has no npm trusted publisher, so `npm publish` from the
+> release workflow is rejected with `E403 OIDC permission denied`. The package
+> is deliberately left out of the flux `publish` task until a maintainer adds a
+> Trusted Publisher (GitHub Actions, `ignition-is-go/marshal`, `release.yml`) on
+> npmjs.com; otherwise its failure blocks marshal-pi and marshal-prime-agent,
+> which publish after it. The fleet installs this plugin from the git tree, not
+> npm (pulse-deploy `pulse_agents_execution`), so nothing depends on the gap.
+
 Add it to your opencode config (`opencode.json` / `~/.config/opencode/opencode.json`):
 
 ```jsonc
