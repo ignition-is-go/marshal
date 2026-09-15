@@ -17,8 +17,7 @@
   ],
   "flux": {
     "tasks": [
-      "check",
-      "publish"
+      "check"
     ]
   },
   "keywords": [
