@@ -1811,29 +1811,41 @@ where
 }
 
 fn marshal_decorated_thread_name(current_name: Option<&str>, nickname: &str) -> Option<String> {
-    let base = strip_marshal_thread_name_prefix(current_name?.trim()).trim();
+    let base = strip_marshal_thread_name_prefix(current_name?.trim(), nickname).trim();
     if base.is_empty() {
         return None;
     }
-    let marker = format!("[marshal:{nickname}]");
+    let marker = format!("[{nickname}]");
     Some(format!("{marker} {base}"))
 }
 
-fn strip_marshal_thread_name_prefix(name: &str) -> &str {
+fn strip_marshal_thread_name_prefix<'a>(name: &'a str, nickname: &str) -> &'a str {
     let mut base = name;
-    while let Some(rest) = base.strip_prefix("[marshal:") {
-        let Some(end) = rest.find(']') else {
+    loop {
+        if let Some(rest) = base.strip_prefix("[marshal:") {
+            let Some(end) = rest.find(']') else {
+                break;
+            };
+            let old_nickname = &rest[..end];
+            if old_nickname.is_empty()
+                || !old_nickname
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                break;
+            }
+            base = rest[end + 1..].trim_start();
+            continue;
+        }
+
+        let marker = format!("[{nickname}]");
+        let Some(rest) = base.strip_prefix(&marker) else {
             break;
         };
-        let nickname = &rest[..end];
-        if nickname.is_empty()
-            || !nickname
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        {
+        if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
             break;
         }
-        base = rest[end + 1..].trim_start();
+        base = rest.trim_start();
     }
     base
 }
@@ -2437,30 +2449,27 @@ mod tests {
     fn thread_name_decoration_preserves_the_codex_title() {
         assert_eq!(
             marshal_decorated_thread_name(Some("auth refactor"), "sunny-summit"),
-            Some("[marshal:sunny-summit] auth refactor".into())
+            Some("[sunny-summit] auth refactor".into())
         );
         assert_eq!(marshal_decorated_thread_name(None, "sunny-summit"), None);
         assert_eq!(
-            marshal_decorated_thread_name(
-                Some("[marshal:sunny-summit] auth refactor"),
-                "sunny-summit"
-            ),
-            Some("[marshal:sunny-summit] auth refactor".into())
+            marshal_decorated_thread_name(Some("[sunny-summit] auth refactor"), "sunny-summit"),
+            Some("[sunny-summit] auth refactor".into())
         );
         assert_eq!(
             marshal_decorated_thread_name(Some("[marshal:old-nick] auth refactor"), "new-nick"),
-            Some("[marshal:new-nick] auth refactor".into())
+            Some("[new-nick] auth refactor".into())
         );
         assert_eq!(
             marshal_decorated_thread_name(Some("[draft] auth refactor"), "sunny-summit"),
-            Some("[marshal:sunny-summit] [draft] auth refactor".into())
+            Some("[sunny-summit] [draft] auth refactor".into())
         );
         assert_eq!(
             marshal_decorated_thread_name(
                 Some("[marshal:old] [marshal:older] auth refactor"),
                 "new-nick"
             ),
-            Some("[marshal:new-nick] auth refactor".into())
+            Some("[new-nick] auth refactor".into())
         );
     }
 
@@ -2688,7 +2697,7 @@ mod tests {
             assert_eq!(
                 name_set["params"]["name"],
                 format!(
-                    "[marshal:{}] auth refactor",
+                    "[{}] auth refactor",
                     marshal_entities::nickname("session-before-prompt")
                 )
             );
@@ -2721,7 +2730,7 @@ mod tests {
             assert_eq!(
                 renamed["params"]["name"],
                 format!(
-                    "[marshal:{}] generated follow-up",
+                    "[{}] generated follow-up",
                     marshal_entities::nickname("session-before-prompt")
                 )
             );

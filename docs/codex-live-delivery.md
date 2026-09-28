@@ -147,7 +147,7 @@ own proxied request and response, then keeps it across later server generations.
 
 The bridge uses the same ownership proof to add the Marshal nickname to the
 Codex thread name. It waits for a non-empty Codex name, then writes
-`[marshal:<nickname>] <existing name>` through `thread/name/set`. A
+`[<nickname>] <existing name>` through `thread/name/set`. A
 `thread/name/updated` event applies the rule again after an automatic title or
 a user rename. The marker is parseable, so resumes, bridge restarts, and
 repeated events do not add duplicate prefixes. A bridge that has no per-TUI
