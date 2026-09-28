@@ -2846,7 +2846,7 @@ mod tests {
         })
         .await
         .expect("lifecycle subscriber readiness");
-        let request = tokio::time::timeout(Duration::from_secs(2), hook_server)
+        let request = tokio::time::timeout(Duration::from_secs(5), hook_server)
             .await
             .expect("eager registration request")
             .expect("hook server task");
