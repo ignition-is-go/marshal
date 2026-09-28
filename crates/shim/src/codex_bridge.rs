@@ -1521,6 +1521,28 @@ where
                 }
             }
             _ = retry.tick() => {
+                let selected = if let Some(launcher) = launcher.as_ref() {
+                    launcher.lock().await.state.thread_id.clone()
+                } else {
+                    None
+                };
+                if let Some(thread_id) = selected.as_deref()
+                    && !decorations.contains_key(thread_id)
+                    && !pending.values().any(|registration| registration.thread_id == thread_id)
+                {
+                    match read_thread_registration(websocket, thread_id, &mut request_id).await {
+                        Ok((Some(registration), notifications)) => {
+                            apply_lifecycle_notifications(pending, notifications);
+                            pending.insert(registration.session_id.clone(), registration);
+                        }
+                        Ok((None, notifications)) => {
+                            apply_lifecycle_notifications(pending, notifications);
+                        }
+                        Err(error) => log::debug!(
+                            "[codex-bridge] could not discover selected thread={thread_id}: {error:#}"
+                        ),
+                    }
+                }
                 let session_ids: Vec<String> = pending.keys().cloned().collect();
                 for session_id in session_ids {
                     try_pending_registration(
@@ -1534,11 +1556,6 @@ where
                     )
                     .await;
                 }
-                let selected = if let Some(launcher) = launcher.as_ref() {
-                    launcher.lock().await.state.thread_id.clone()
-                } else {
-                    None
-                };
                 if let Some(thread_id) = selected
                     && let Some(mut decoration) = decorations.get(&thread_id).cloned()
                 {
@@ -1855,6 +1872,30 @@ where
     Ok((name, notifications))
 }
 
+async fn read_thread_registration<S>(
+    websocket: &mut WebSocketStream<S>,
+    thread_id: &str,
+    request_id: &mut i64,
+) -> Result<(Option<ThreadRegistration>, Vec<Value>)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let id = *request_id;
+    *request_id += 1;
+    write_rpc(
+        websocket,
+        &json!({
+            "id": id,
+            "method": "thread/read",
+            "params": { "threadId": thread_id, "includeTurns": false },
+        }),
+    )
+    .await?;
+    let (result, notifications) = read_response_collecting(websocket, id).await?;
+    let registration = result.get("thread").and_then(thread_value_registration);
+    Ok((registration, notifications))
+}
+
 fn marshal_decorated_thread_name(current_name: Option<&str>, nickname: &str) -> Option<String> {
     let base = strip_marshal_thread_name_prefix(current_name?.trim(), nickname).trim();
     if base.is_empty() {
@@ -2132,7 +2173,6 @@ mod tests {
     use super::*;
     use marshal_entities::{HostInfo, MessageId, MessageReadId};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::oneshot;
     use tokio_tungstenite::accept_async;
 
     #[test]
@@ -2674,7 +2714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_subscriber_is_ready_before_registering_thread_started() {
+    async fn lifecycle_subscriber_discovers_selected_resume_without_started_notification() {
         use tokio::net::TcpListener as TokioTcpListener;
 
         let app_listener = TokioTcpListener::bind(("127.0.0.1", 0))
@@ -2689,7 +2729,6 @@ mod tests {
             "marshal-codex-registration-test-{}.ready",
             uuid::Uuid::new_v4()
         ));
-        let (send_notification, receive_notification) = oneshot::channel::<()>();
         let launcher_directory = tempfile::tempdir().unwrap();
         let launcher = Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
             launcher_directory.path().join("launcher.json"),
@@ -2714,26 +2753,6 @@ mod tests {
             let initialized: Value = serde_json::from_str(initialized.to_text().unwrap()).unwrap();
             assert_eq!(initialized["method"], "initialized");
 
-            receive_notification
-                .await
-                .expect("test releases notification");
-            websocket
-                .send(WebSocketMessage::Text(
-                    json!({
-                        "method": "thread/started",
-                        "params": {
-                            "thread": {
-                                "id": "thread-before-prompt",
-                                "sessionId": "session-before-prompt",
-                                "cwd": "/work/before-prompt"
-                            }
-                        }
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .unwrap();
             let name_read = websocket.next().await.unwrap().unwrap();
             let name_read: Value = serde_json::from_str(name_read.to_text().unwrap()).unwrap();
             assert_eq!(name_read["method"], "thread/read");
@@ -2744,6 +2763,9 @@ mod tests {
                         "id": name_read["id"],
                         "result": {
                             "thread": {
+                                "id": "thread-before-prompt",
+                                "sessionId": "session-before-prompt",
+                                "cwd": "/work/before-prompt",
                                 "name": "[marshal:old-nickname] auth refactor"
                             }
                         }
@@ -2824,8 +2846,6 @@ mod tests {
         })
         .await
         .expect("lifecycle subscriber readiness");
-        send_notification.send(()).unwrap();
-
         let request = tokio::time::timeout(Duration::from_secs(2), hook_server)
             .await
             .expect("eager registration request")
