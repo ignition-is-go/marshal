@@ -1295,6 +1295,7 @@ struct ThreadNameDecoration {
     thread_id: String,
     nickname: String,
     current_name: Option<String>,
+    name_hydrated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1502,6 +1503,7 @@ where
                     update_pending_thread_name(pending, &update);
                     if let Some(mut decoration) = decorations.get(&update.thread_id).cloned() {
                         decoration.current_name.clone_from(&update.name);
+                        decoration.name_hydrated = true;
                         if let Some(name) = try_decorate_thread_name(
                             websocket,
                             pending,
@@ -1539,16 +1541,31 @@ where
                 };
                 if let Some(thread_id) = selected
                     && let Some(mut decoration) = decorations.get(&thread_id).cloned()
-                    && let Some(name) = try_decorate_thread_name(
-                        websocket,
-                        pending,
-                        &decoration,
-                        decoration.current_name.as_deref(),
-                        &mut request_id,
-                        launcher,
-                    ).await
                 {
-                    decoration.current_name = Some(name);
+                    if !decoration.name_hydrated {
+                        match read_thread_name(websocket, &thread_id, &mut request_id).await {
+                            Ok((name, notifications)) => {
+                                apply_lifecycle_notifications(pending, notifications);
+                                decoration.current_name = name;
+                                decoration.name_hydrated = true;
+                            }
+                            Err(error) => log::debug!(
+                                "[codex-bridge] could not read thread={thread_id} name: {error:#}"
+                            ),
+                        }
+                    }
+                    if decoration.name_hydrated
+                        && let Some(name) = try_decorate_thread_name(
+                            websocket,
+                            pending,
+                            &decoration,
+                            decoration.current_name.as_deref(),
+                            &mut request_id,
+                            launcher,
+                        ).await
+                    {
+                        decoration.current_name = Some(name);
+                    }
                     decorations.insert(thread_id, decoration);
                 }
             }
@@ -1726,6 +1743,7 @@ async fn try_pending_registration<S>(
             thread_id: registration.thread_id.clone(),
             nickname,
             current_name: registration.name.clone(),
+            name_hydrated: registration.name.is_some(),
         };
         let mut decoration = decoration;
         if let Some(name) = try_decorate_thread_name(
@@ -1808,6 +1826,33 @@ where
     read_response_collecting(websocket, id)
         .await
         .map(|(_, notifications)| notifications)
+}
+
+async fn read_thread_name<S>(
+    websocket: &mut WebSocketStream<S>,
+    thread_id: &str,
+    request_id: &mut i64,
+) -> Result<(Option<String>, Vec<Value>)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let id = *request_id;
+    *request_id += 1;
+    write_rpc(
+        websocket,
+        &json!({
+            "id": id,
+            "method": "thread/read",
+            "params": { "threadId": thread_id, "includeTurns": false },
+        }),
+    )
+    .await?;
+    let (result, notifications) = read_response_collecting(websocket, id).await?;
+    let name = result
+        .pointer("/thread/name")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok((name, notifications))
 }
 
 fn marshal_decorated_thread_name(current_name: Option<&str>, nickname: &str) -> Option<String> {
@@ -2680,8 +2725,26 @@ mod tests {
                             "thread": {
                                 "id": "thread-before-prompt",
                                 "sessionId": "session-before-prompt",
-                                "cwd": "/work/before-prompt",
-                                "name": "auth refactor"
+                                "cwd": "/work/before-prompt"
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let name_read = websocket.next().await.unwrap().unwrap();
+            let name_read: Value = serde_json::from_str(name_read.to_text().unwrap()).unwrap();
+            assert_eq!(name_read["method"], "thread/read");
+            assert_eq!(name_read["params"]["threadId"], "thread-before-prompt");
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "id": name_read["id"],
+                        "result": {
+                            "thread": {
+                                "name": "[marshal:old-nickname] auth refactor"
                             }
                         }
                     })
@@ -2776,7 +2839,7 @@ mod tests {
         assert_eq!(body["session_id"], "session-before-prompt");
         assert_eq!(body["cwd"], "/work/before-prompt");
 
-        tokio::time::timeout(Duration::from_secs(2), app_server)
+        tokio::time::timeout(Duration::from_secs(5), app_server)
             .await
             .expect("name decoration RPC")
             .unwrap();
