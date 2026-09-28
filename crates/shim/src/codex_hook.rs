@@ -84,7 +84,7 @@ pub fn run(ep: &str, base_override: Option<&str>) {
 /// context. The long-lived bridge calls this from `thread/started`, before the
 /// first prompt; normal lifecycle hooks remain responsible for context
 /// injection and inbox acknowledgement.
-pub(crate) fn register_session(base: &str, session_id: &str, cwd: &str) -> bool {
+pub(crate) fn register_session(base: &str, session_id: &str, cwd: &str) -> Option<String> {
     let body = format!(
         "{{\"session_id\":{},\"cwd\":{}}}",
         json_str(session_id),
@@ -95,16 +95,18 @@ pub(crate) fn register_session(base: &str, session_id: &str, cwd: &str) -> bool 
         url_q(&short_host()),
         url_q(&operator())
     );
-    let Some(response) = http_post(base, &path, &body) else {
-        return false;
-    };
+    let response = http_post(base, &path, &body)?;
     if let Ok(identity) = serde_json::from_str::<serde_json::Value>(&response)
         && identity.get("session_id").and_then(|v| v.as_str()) == Some(session_id)
-        && let Some(nickname) = identity.get("nickname").and_then(|v| v.as_str())
+        && let Some(nickname) = identity
+            .get("nickname")
+            .and_then(|v| v.as_str())
+            .filter(|nickname| !nickname.is_empty())
     {
         crate::write_assigned_nickname(session_id, nickname);
+        return Some(nickname.to_string());
     }
-    true
+    None
 }
 
 /// Resolve the hook listener used by a bridge that already resolved its daemon

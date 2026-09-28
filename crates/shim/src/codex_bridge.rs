@@ -225,17 +225,15 @@ struct LauncherState {
 #[derive(Debug)]
 struct LauncherStateWriter {
     path: PathBuf,
-    cwd: PathBuf,
     state: LauncherState,
 }
 
 type SharedLauncherState = Arc<tokio::sync::Mutex<LauncherStateWriter>>;
 
 impl LauncherStateWriter {
-    fn new(path: PathBuf, cwd: PathBuf, thread_id: Option<String>) -> Self {
+    fn new(path: PathBuf, _cwd: PathBuf, thread_id: Option<String>) -> Self {
         Self {
             path,
-            cwd,
             state: LauncherState {
                 thread_id,
                 ..LauncherState::default()
@@ -252,14 +250,6 @@ impl LauncherStateWriter {
     fn disconnected(&mut self) -> Result<()> {
         self.state.connected = false;
         self.persist()
-    }
-
-    fn observe(&mut self, registration: &ThreadRegistration) -> Result<()> {
-        if self.state.thread_id.is_none() && same_cwd(&self.cwd, Path::new(&registration.cwd)) {
-            self.state.thread_id = Some(registration.thread_id.clone());
-            self.persist()?;
-        }
-        Ok(())
     }
 
     fn selected(&mut self, thread_id: &str) -> Result<()> {
@@ -606,6 +596,7 @@ fn wait_for_app_server_recovery(
     }
 }
 
+#[cfg(test)]
 fn same_cwd(first: &Path, second: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -773,16 +764,23 @@ where
     Downstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     Upstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let mut pending_thread_starts = Vec::new();
     loop {
         tokio::select! {
             message = downstream.next() => {
                 let message = message.context("Codex TUI closed proxy connection")??;
                 if let WebSocketMessage::Text(text) = &message
                     && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
-                    && let Some(thread_id) = resumed_thread_id(&value)
-                    && let Some(launcher) = launcher.as_ref()
                 {
-                    launcher.lock().await.selected(thread_id)?;
+                    if let Some(thread_id) = resumed_thread_id(&value)
+                        && let Some(launcher) = launcher.as_ref()
+                    {
+                        launcher.lock().await.selected(thread_id)?;
+                    } else if value.get("method").and_then(Value::as_str) == Some("thread/start")
+                        && let Some(id) = value.get("id")
+                    {
+                        pending_thread_starts.push(id.clone());
+                    }
                 }
                 let closed = matches!(message, WebSocketMessage::Close(_));
                 upstream.send(message).await.context("forwarding TUI request to app-server")?;
@@ -794,10 +792,19 @@ where
                 let message = message.context("Codex app-server closed TUI proxy connection")??;
                 if let WebSocketMessage::Text(text) = &message
                     && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
-                    && let Some(registration) = thread_registration(&value)
-                    && let Some(launcher) = launcher.as_ref()
+                    && let Some(id) = value.get("id")
+                    && let Some(position) = pending_thread_starts
+                        .iter()
+                        .position(|pending| pending == id)
                 {
-                    launcher.lock().await.observe(&registration)?;
+                    pending_thread_starts.swap_remove(position);
+                    if let Some(thread_id) = value
+                        .pointer("/result/thread/id")
+                        .and_then(Value::as_str)
+                        && let Some(launcher) = launcher.as_ref()
+                    {
+                        launcher.lock().await.selected(thread_id)?;
+                    }
                 }
                 let closed = matches!(message, WebSocketMessage::Close(_));
                 downstream.send(message).await.context("forwarding app-server event to TUI")?;
@@ -1280,6 +1287,20 @@ struct ThreadRegistration {
     thread_id: String,
     session_id: String,
     cwd: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadNameDecoration {
+    thread_id: String,
+    nickname: String,
+    current_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadNameUpdate {
+    thread_id: String,
+    name: Option<String>,
 }
 
 /// Maintain a subscribed app-server connection for lifecycle discovery.
@@ -1296,6 +1317,7 @@ async fn watch_app_server_registrations(
     launcher: Option<SharedLauncherState>,
 ) -> Result<()> {
     let mut pending = HashMap::new();
+    let mut decorations = HashMap::new();
     loop {
         let result = match &app_server {
             AppServerEndpoint::WebSocket(endpoint) => {
@@ -1307,6 +1329,7 @@ async fn watch_app_server_registrations(
                             &hook_base,
                             &mut ready_file,
                             &mut pending,
+                            &mut decorations,
                             &launcher,
                         )
                         .await
@@ -1323,6 +1346,7 @@ async fn watch_app_server_registrations(
                     &hook_base,
                     &mut ready_file,
                     &mut pending,
+                    &mut decorations,
                     &launcher,
                 )
                 .await
@@ -1346,6 +1370,7 @@ async fn monitor_registrations_over_unix(
     hook_base: &str,
     ready_file: &mut Option<PathBuf>,
     pending: &mut HashMap<String, ThreadRegistration>,
+    decorations: &mut HashMap<String, ThreadNameDecoration>,
     launcher: &Option<SharedLauncherState>,
 ) -> Result<()> {
     use tokio::net::UnixStream;
@@ -1361,7 +1386,15 @@ async fn monitor_registrations_over_unix(
         .await
         .context("timed out upgrading Codex app-server connection")?
         .context("upgrading Codex app-server Unix socket to WebSocket")?;
-    monitor_registration_connection(&mut websocket, hook_base, ready_file, pending, launcher).await
+    monitor_registration_connection(
+        &mut websocket,
+        hook_base,
+        ready_file,
+        pending,
+        decorations,
+        launcher,
+    )
+    .await
 }
 
 #[cfg(not(unix))]
@@ -1370,6 +1403,7 @@ async fn monitor_registrations_over_unix(
     _hook_base: &str,
     _ready_file: &mut Option<PathBuf>,
     _pending: &mut HashMap<String, ThreadRegistration>,
+    _decorations: &mut HashMap<String, ThreadNameDecoration>,
     _launcher: &Option<SharedLauncherState>,
 ) -> Result<()> {
     anyhow::bail!("Unix-domain-socket app-server endpoints are unavailable on this platform")
@@ -1380,12 +1414,14 @@ async fn monitor_registration_connection<S>(
     hook_base: &str,
     ready_file: &mut Option<PathBuf>,
     pending: &mut HashMap<String, ThreadRegistration>,
+    decorations: &mut HashMap<String, ThreadNameDecoration>,
     launcher: &Option<SharedLauncherState>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     initialize_app_server(websocket).await?;
+    let mut request_id = 100_i64;
     if let Some(launcher) = launcher.as_ref() {
         launcher.lock().await.connected()?;
     }
@@ -1397,7 +1433,7 @@ where
             .with_context(|| format!("writing bridge readiness file {}", path.display()))?;
         ready_file.take();
     } else {
-        if let Err(error) = snapshot_loaded_threads(websocket, pending).await {
+        if let Err(error) = snapshot_loaded_threads(websocket, pending, &mut request_id).await {
             // Thread discovery is an optimization over the authoritative lifecycle
             // notifications. Keep the subscription alive against older app-server
             // versions that do not implement thread/list or thread/read.
@@ -1405,7 +1441,16 @@ where
         }
         let session_ids: Vec<String> = pending.keys().cloned().collect();
         for session_id in session_ids {
-            try_pending_registration(hook_base, pending, &session_id).await;
+            try_pending_registration(
+                websocket,
+                hook_base,
+                pending,
+                decorations,
+                &session_id,
+                &mut request_id,
+                launcher,
+            )
+            .await;
         }
     }
 
@@ -1438,20 +1483,73 @@ where
                 let message: Value = serde_json::from_str(text.as_ref())
                     .context("decoding app-server lifecycle notification")?;
                 if let Some(registration) = thread_registration(&message) {
-                    if let Some(launcher) = launcher.as_ref() {
-                        launcher.lock().await.observe(&registration)?;
-                    }
                     let session_id = registration.session_id.clone();
                     pending.insert(session_id.clone(), registration);
-                    try_pending_registration(hook_base, pending, &session_id).await;
+                    try_pending_registration(
+                        websocket,
+                        hook_base,
+                        pending,
+                        decorations,
+                        &session_id,
+                        &mut request_id,
+                        launcher,
+                    )
+                    .await;
                 } else if let Some(thread_id) = closed_thread_id(&message) {
                     pending.retain(|_, registration| registration.thread_id != thread_id);
+                    decorations.remove(thread_id);
+                } else if let Some(update) = thread_name_update(&message) {
+                    update_pending_thread_name(pending, &update);
+                    if let Some(mut decoration) = decorations.get(&update.thread_id).cloned() {
+                        decoration.current_name.clone_from(&update.name);
+                        if let Some(name) = try_decorate_thread_name(
+                            websocket,
+                            pending,
+                            &decoration,
+                            update.name.as_deref(),
+                            &mut request_id,
+                            launcher,
+                        )
+                        .await
+                        {
+                            decoration.current_name = Some(name);
+                        }
+                        decorations.insert(update.thread_id, decoration);
+                    }
                 }
             }
-            _ = retry.tick(), if !pending.is_empty() => {
+            _ = retry.tick() => {
                 let session_ids: Vec<String> = pending.keys().cloned().collect();
                 for session_id in session_ids {
-                    try_pending_registration(hook_base, pending, &session_id).await;
+                    try_pending_registration(
+                        websocket,
+                        hook_base,
+                        pending,
+                        decorations,
+                        &session_id,
+                        &mut request_id,
+                        launcher,
+                    )
+                    .await;
+                }
+                let selected = if let Some(launcher) = launcher.as_ref() {
+                    launcher.lock().await.state.thread_id.clone()
+                } else {
+                    None
+                };
+                if let Some(thread_id) = selected
+                    && let Some(mut decoration) = decorations.get(&thread_id).cloned()
+                    && let Some(name) = try_decorate_thread_name(
+                        websocket,
+                        pending,
+                        &decoration,
+                        decoration.current_name.as_deref(),
+                        &mut request_id,
+                        launcher,
+                    ).await
+                {
+                    decoration.current_name = Some(name);
+                    decorations.insert(thread_id, decoration);
                 }
             }
         }
@@ -1465,18 +1563,20 @@ where
 async fn snapshot_loaded_threads<S>(
     websocket: &mut WebSocketStream<S>,
     pending: &mut HashMap<String, ThreadRegistration>,
+    request_id: &mut i64,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut cursor: Option<String> = None;
-    let mut request_id = 100_i64;
 
     loop {
+        let id = *request_id;
+        *request_id += 1;
         write_rpc(
             websocket,
             &json!({
-                "id": request_id,
+                "id": id,
                 "method": "thread/list",
                 "params": {
                     "cursor": cursor,
@@ -1486,9 +1586,8 @@ where
             }),
         )
         .await?;
-        let (page, notifications) = read_response_collecting(websocket, request_id).await?;
+        let (page, notifications) = read_response_collecting(websocket, id).await?;
         apply_lifecycle_notifications(pending, notifications);
-        request_id += 1;
 
         let loaded_ids: Vec<String> = page
             .get("data")
@@ -1502,18 +1601,19 @@ where
             .collect();
 
         for thread_id in loaded_ids {
+            let id = *request_id;
+            *request_id += 1;
             write_rpc(
                 websocket,
                 &json!({
-                    "id": request_id,
+                    "id": id,
                     "method": "thread/read",
                     "params": { "threadId": thread_id, "includeTurns": false },
                 }),
             )
             .await?;
-            let (result, notifications) = read_response_collecting(websocket, request_id).await?;
+            let (result, notifications) = read_response_collecting(websocket, id).await?;
             apply_lifecycle_notifications(pending, notifications);
-            request_id += 1;
             if let Some(registration) = result.get("thread").and_then(thread_value_registration) {
                 pending.insert(registration.session_id.clone(), registration);
             }
@@ -1538,6 +1638,8 @@ fn apply_lifecycle_notifications(
             pending.insert(registration.session_id.clone(), registration);
         } else if let Some(thread_id) = closed_thread_id(&message) {
             pending.retain(|_, registration| registration.thread_id != thread_id);
+        } else if let Some(update) = thread_name_update(&message) {
+            update_pending_thread_name(pending, &update);
         }
     }
 }
@@ -1561,6 +1663,10 @@ fn thread_value_registration(thread: &Value) -> Option<ThreadRegistration> {
         thread_id,
         session_id,
         cwd,
+        name: thread
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -1570,26 +1676,166 @@ fn closed_thread_id(message: &Value) -> Option<&str> {
         .flatten()
 }
 
-async fn try_pending_registration(
+fn thread_name_update(message: &Value) -> Option<ThreadNameUpdate> {
+    if message.get("method").and_then(Value::as_str) != Some("thread/name/updated") {
+        return None;
+    }
+    let params = message.get("params")?;
+    let thread_id = params.get("threadId")?.as_str()?.to_string();
+    let name = params
+        .get("threadName")
+        .or_else(|| params.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(ThreadNameUpdate { thread_id, name })
+}
+
+fn update_pending_thread_name(
+    pending: &mut HashMap<String, ThreadRegistration>,
+    update: &ThreadNameUpdate,
+) {
+    for registration in pending.values_mut() {
+        if registration.thread_id == update.thread_id {
+            registration.name.clone_from(&update.name);
+        }
+    }
+}
+
+async fn try_pending_registration<S>(
+    websocket: &mut WebSocketStream<S>,
     hook_base: &str,
     pending: &mut HashMap<String, ThreadRegistration>,
+    decorations: &mut HashMap<String, ThreadNameDecoration>,
     session_id: &str,
-) {
+    request_id: &mut i64,
+    launcher: &Option<SharedLauncherState>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let Some(registration) = pending.get(session_id).cloned() else {
         return;
     };
     let base = hook_base.to_string();
-    let registered = tokio::task::spawn_blocking(move || {
+    let nickname = tokio::task::spawn_blocking(move || {
         crate::codex_hook::register_session(&base, &registration.session_id, &registration.cwd)
     })
     .await
-    .unwrap_or(false);
-    if registered {
+    .unwrap_or(None);
+    if let Some(nickname) = nickname {
+        let decoration = ThreadNameDecoration {
+            thread_id: registration.thread_id.clone(),
+            nickname,
+            current_name: registration.name.clone(),
+        };
+        let mut decoration = decoration;
+        if let Some(name) = try_decorate_thread_name(
+            websocket,
+            pending,
+            &decoration,
+            registration.name.as_deref(),
+            request_id,
+            launcher,
+        )
+        .await
+        {
+            decoration.current_name = Some(name);
+        }
+        decorations.insert(registration.thread_id.clone(), decoration);
         log::info!("[codex-bridge] registered thread={session_id} before first prompt");
         pending.remove(session_id);
     } else {
         log::debug!("[codex-bridge] eager registration for thread={session_id} failed; will retry");
     }
+}
+
+async fn try_decorate_thread_name<S>(
+    websocket: &mut WebSocketStream<S>,
+    pending: &mut HashMap<String, ThreadRegistration>,
+    decoration: &ThreadNameDecoration,
+    current_name: Option<&str>,
+    request_id: &mut i64,
+    launcher: &Option<SharedLauncherState>,
+) -> Option<String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let launcher = launcher.as_ref()?;
+    if launcher.lock().await.state.thread_id.as_deref() != Some(&decoration.thread_id) {
+        return None;
+    }
+    let desired = marshal_decorated_thread_name(current_name, &decoration.nickname)?;
+    if current_name == Some(desired.as_str()) {
+        return None;
+    }
+    match set_thread_name(websocket, &decoration.thread_id, &desired, request_id).await {
+        Ok(notifications) => {
+            apply_lifecycle_notifications(pending, notifications);
+            Some(desired)
+        }
+        Err(error) => {
+            log::debug!(
+                "[codex-bridge] could not decorate thread={} name: {error:#}",
+                decoration.thread_id
+            );
+            None
+        }
+    }
+}
+
+async fn set_thread_name<S>(
+    websocket: &mut WebSocketStream<S>,
+    thread_id: &str,
+    name: &str,
+    request_id: &mut i64,
+) -> Result<Vec<Value>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let id = *request_id;
+    *request_id += 1;
+    write_rpc(
+        websocket,
+        &json!({
+            "id": id,
+            "method": "thread/name/set",
+            "params": {
+                "threadId": thread_id,
+                "name": name,
+            },
+        }),
+    )
+    .await?;
+    read_response_collecting(websocket, id)
+        .await
+        .map(|(_, notifications)| notifications)
+}
+
+fn marshal_decorated_thread_name(current_name: Option<&str>, nickname: &str) -> Option<String> {
+    let base = strip_marshal_thread_name_prefix(current_name?.trim()).trim();
+    if base.is_empty() {
+        return None;
+    }
+    let marker = format!("[marshal:{nickname}]");
+    Some(format!("{marker} {base}"))
+}
+
+fn strip_marshal_thread_name_prefix(name: &str) -> &str {
+    let mut base = name;
+    while let Some(rest) = base.strip_prefix("[marshal:") {
+        let Some(end) = rest.find(']') else {
+            break;
+        };
+        let nickname = &rest[..end];
+        if nickname.is_empty()
+            || !nickname
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            break;
+        }
+        base = rest[end + 1..].trim_start();
+    }
+    base
 }
 
 /// Direct, unread, hook-owned sessions on this host. Hook-owned Codex sessions
@@ -1939,33 +2185,18 @@ mod tests {
     }
 
     #[test]
-    fn launcher_state_records_one_matching_thread_across_server_generations() {
+    fn launcher_state_records_selected_thread_across_server_generations() {
         let temp = tempfile::tempdir().expect("launcher state tempdir");
         let path = temp.path().join("state.json");
         let mut writer = LauncherStateWriter::new(path.clone(), PathBuf::from("/work/pulse"), None);
 
         writer.connected().expect("first app-server connection");
         writer
-            .observe(&ThreadRegistration {
-                thread_id: "other-thread".into(),
-                session_id: "other-thread".into(),
-                cwd: "/work/other".into(),
-            })
-            .expect("ignore other cwd");
+            .selected("owned-thread")
+            .expect("record selected thread");
         writer
-            .observe(&ThreadRegistration {
-                thread_id: "owned-thread".into(),
-                session_id: "root-session".into(),
-                cwd: "/work/pulse".into(),
-            })
-            .expect("record matching thread");
-        writer
-            .observe(&ThreadRegistration {
-                thread_id: "later-thread".into(),
-                session_id: "later-thread".into(),
-                cwd: "/work/pulse".into(),
-            })
-            .expect("retain first matching thread");
+            .selected("later-thread")
+            .expect("retain first selection");
         writer
             .connected()
             .expect("replacement app-server connection");
@@ -1999,31 +2230,6 @@ mod tests {
                 "01a04397-805f-73e0-8d8a-b0aada4e0105".into(),
             ]),
             None
-        );
-    }
-
-    #[test]
-    fn launcher_state_retains_explicit_thread_over_same_cwd_events() {
-        let temp = tempfile::tempdir().expect("launcher state tempdir");
-        let path = temp.path().join("state.json");
-        let mut writer = LauncherStateWriter::new(
-            path.clone(),
-            PathBuf::from("/work/pulse"),
-            Some("expected-thread".into()),
-        );
-
-        writer.connected().expect("app-server connection");
-        writer
-            .observe(&ThreadRegistration {
-                thread_id: "concurrent-thread".into(),
-                session_id: "concurrent-thread".into(),
-                cwd: "/work/pulse".into(),
-            })
-            .expect("ignore concurrent thread");
-
-        assert_eq!(
-            read_launcher_state(&path).and_then(|state| state.thread_id),
-            Some("expected-thread".into())
         );
     }
 
@@ -2204,7 +2410,8 @@ mod tests {
                 "thread": {
                     "id": "child-thread",
                     "sessionId": "root-session",
-                    "cwd": "/work/pulse"
+                    "cwd": "/work/pulse",
+                    "name": "auth refactor"
                 }
             }
         });
@@ -2214,6 +2421,7 @@ mod tests {
                 thread_id: "child-thread".into(),
                 session_id: "root-session".into(),
                 cwd: "/work/pulse".into(),
+                name: Some("auth refactor".into()),
             })
         );
         assert!(
@@ -2222,6 +2430,61 @@ mod tests {
                 "params": {}
             }))
             .is_none()
+        );
+    }
+
+    #[test]
+    fn thread_name_decoration_preserves_the_codex_title() {
+        assert_eq!(
+            marshal_decorated_thread_name(Some("auth refactor"), "sunny-summit"),
+            Some("[marshal:sunny-summit] auth refactor".into())
+        );
+        assert_eq!(marshal_decorated_thread_name(None, "sunny-summit"), None);
+        assert_eq!(
+            marshal_decorated_thread_name(
+                Some("[marshal:sunny-summit] auth refactor"),
+                "sunny-summit"
+            ),
+            Some("[marshal:sunny-summit] auth refactor".into())
+        );
+        assert_eq!(
+            marshal_decorated_thread_name(Some("[marshal:old-nick] auth refactor"), "new-nick"),
+            Some("[marshal:new-nick] auth refactor".into())
+        );
+        assert_eq!(
+            marshal_decorated_thread_name(Some("[draft] auth refactor"), "sunny-summit"),
+            Some("[marshal:sunny-summit] [draft] auth refactor".into())
+        );
+        assert_eq!(
+            marshal_decorated_thread_name(
+                Some("[marshal:old] [marshal:older] auth refactor"),
+                "new-nick"
+            ),
+            Some("[marshal:new-nick] auth refactor".into())
+        );
+    }
+
+    #[test]
+    fn thread_name_update_accepts_current_and_legacy_payload_shapes() {
+        assert_eq!(
+            thread_name_update(&json!({
+                "method": "thread/name/updated",
+                "params": { "threadId": "thread-a", "threadName": "new title" }
+            })),
+            Some(ThreadNameUpdate {
+                thread_id: "thread-a".into(),
+                name: Some("new title".into()),
+            })
+        );
+        assert_eq!(
+            thread_name_update(&json!({
+                "method": "thread/name/updated",
+                "params": { "threadId": "thread-a", "name": "new title" }
+            })),
+            Some(ThreadNameUpdate {
+                thread_id: "thread-a".into(),
+                name: Some("new title".into()),
+            })
         );
     }
 
@@ -2326,8 +2589,31 @@ mod tests {
             assert!(n > 0, "hook request closed before body");
             request.extend_from_slice(&chunk[..n]);
         }
+        let body =
+            String::from_utf8_lossy(&request[header_end + 4..header_end + 4 + content_length]);
+        let response_body = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .map(|session_id| {
+                json!({
+                    "session_id": session_id,
+                    "nickname": marshal_entities::nickname(&session_id),
+                })
+                .to_string()
+            })
+            .unwrap_or_default();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .write_all(response.as_bytes())
             .await
             .expect("reply to hook request");
         String::from_utf8(request).expect("UTF-8 hook request")
@@ -2350,6 +2636,12 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let (send_notification, receive_notification) = oneshot::channel::<()>();
+        let launcher_directory = tempfile::tempdir().unwrap();
+        let launcher = Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
+            launcher_directory.path().join("launcher.json"),
+            PathBuf::from("/work/before-prompt"),
+            Some("thread-before-prompt".into()),
+        )));
 
         let app_server = tokio::spawn(async move {
             let (stream, _) = app_listener.accept().await.expect("accept bridge");
@@ -2379,12 +2671,65 @@ mod tests {
                             "thread": {
                                 "id": "thread-before-prompt",
                                 "sessionId": "session-before-prompt",
-                                "cwd": "/work/before-prompt"
+                                "cwd": "/work/before-prompt",
+                                "name": "auth refactor"
                             }
                         }
                     })
                     .to_string()
                     .into(),
+                ))
+                .await
+                .unwrap();
+            let name_set = websocket.next().await.unwrap().unwrap();
+            let name_set: Value = serde_json::from_str(name_set.to_text().unwrap()).unwrap();
+            assert_eq!(name_set["method"], "thread/name/set");
+            assert_eq!(name_set["params"]["threadId"], "thread-before-prompt");
+            assert_eq!(
+                name_set["params"]["name"],
+                format!(
+                    "[marshal:{}] auth refactor",
+                    marshal_entities::nickname("session-before-prompt")
+                )
+            );
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({ "id": name_set["id"], "result": {} })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "method": "thread/name/updated",
+                        "params": {
+                            "threadId": "thread-before-prompt",
+                            "threadName": "generated follow-up"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let renamed = websocket.next().await.unwrap().unwrap();
+            let renamed: Value = serde_json::from_str(renamed.to_text().unwrap()).unwrap();
+            assert_eq!(renamed["method"], "thread/name/set");
+            assert_eq!(renamed["params"]["threadId"], "thread-before-prompt");
+            assert_eq!(
+                renamed["params"]["name"],
+                format!(
+                    "[marshal:{}] generated follow-up",
+                    marshal_entities::nickname("session-before-prompt")
+                )
+            );
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({ "id": renamed["id"], "result": {} })
+                        .to_string()
+                        .into(),
                 ))
                 .await
                 .unwrap();
@@ -2397,7 +2742,7 @@ mod tests {
             AppServerEndpoint::WebSocket(format!("ws://{app_address}")),
             format!("http://{hook_address}"),
             Some(ready_file.clone()),
-            None,
+            Some(launcher),
         ));
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -2422,8 +2767,11 @@ mod tests {
         assert_eq!(body["session_id"], "session-before-prompt");
         assert_eq!(body["cwd"], "/work/before-prompt");
 
+        tokio::time::timeout(Duration::from_secs(2), app_server)
+            .await
+            .expect("name decoration RPC")
+            .unwrap();
         watcher.abort();
-        app_server.await.unwrap();
         let _ = fs::remove_file(ready_file);
     }
 
@@ -2526,7 +2874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tui_proxy_records_connection_scoped_thread_started() {
+    async fn tui_proxy_records_correlated_thread_start_response() {
         let app_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -2554,11 +2902,14 @@ mod tests {
         let app_server = tokio::spawn(async move {
             let (stream, _) = app_listener.accept().await.unwrap();
             let mut websocket = accept_async(stream).await.unwrap();
+            let request = websocket.next().await.unwrap().unwrap();
+            let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+            assert_eq!(request["method"], "thread/start");
             websocket
                 .send(WebSocketMessage::Text(
                     json!({
-                        "method": "thread/started",
-                        "params": {
+                        "id": request["id"],
+                        "result": {
                             "thread": {
                                 "id": "picker-thread",
                                 "sessionId": "picker-session",
@@ -2576,9 +2927,16 @@ mod tests {
         let (mut tui, _) = connect_async(format!("ws://{proxy_address}"))
             .await
             .unwrap();
-        let event = tui.next().await.unwrap().unwrap();
-        let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
-        assert_eq!(event["params"]["thread"]["id"], "picker-thread");
+        tui.send(WebSocketMessage::Text(
+            json!({ "id": 42, "method": "thread/start", "params": {} })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let response = tui.next().await.unwrap().unwrap();
+        let response: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+        assert_eq!(response["result"]["thread"]["id"], "picker-thread");
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
