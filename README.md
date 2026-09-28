@@ -209,6 +209,12 @@ The launcher waits for the bridge's lifecycle subscription before attaching
 the TUI, so `thread/started` registers new and resumed sessions on the Marshal
 roster before their first prompt. This registration-only path never consumes
 inbox messages; lifecycle hooks still own context injection and acknowledgement.
+After Codex or the user names the selected thread, the bridge prefixes the
+title with its stable Marshal handle, for example
+`[sunny-summit] Fix reconnect handling`. Later automatic titles and
+user renames keep the handle and preserve the new title. The bridge does not
+name an empty thread, because doing so would prevent Codex from generating its
+normal title.
 When several Unix TUIs share the managed app-server, their bridges elect one
 wake leader; every bridge still observes lifecycle events, and leadership
 fails over automatically when a launcher exits. Windows app-servers are

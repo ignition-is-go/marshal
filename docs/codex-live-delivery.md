@@ -131,17 +131,28 @@ client. Marshal needs a second app-server connection because Codex hooks only
 run at turn boundaries and therefore cannot wake an idle TUI. The TUI remains
 the normal Codex executable and owns all user interaction and thread state.
 
-That second connection also gives the launcher an authoritative lifecycle
-signal during managed app-server updates. `codex-run` records the `thread.id`
-from the TUI's `thread/started` event. If the TUI then loses its transport while
+The per-TUI proxy records the selected `thread.id` from an explicit
+`thread/resume` request or the response to that TUI's `thread/start` request.
+It does not claim a thread from a shared `thread/started` notification, because
+another TUI on the same app-server can produce that notification. If the TUI
+then loses its transport while
 the lifecycle connection reports an app-server disconnect and a successfully
 initialized replacement connection, the launcher starts a fresh TUI process
 with `resume <thread.id>`. It preserves invocation-level model, profile,
 permission, working-directory, and display flags, but never replays positional
 prompts or image inputs. Normal user exits and non-transport failures are not
 restarted. An explicit UUID passed to `codex resume` pins the launcher to that
-thread immediately; a new or picker-selected session learns it from the first
-matching lifecycle event and keeps it across later server generations.
+thread immediately. A new or picker-selected session learns the id from its
+own proxied request and response, then keeps it across later server generations.
+
+The bridge uses the same ownership proof to add the Marshal nickname to the
+Codex thread name. It waits for a non-empty Codex name, then writes
+`[<nickname>] <existing name>` through `thread/name/set`. A
+`thread/name/updated` event applies the rule again after an automatic title or
+a user rename. The marker is parseable, so resumes, bridge restarts, and
+repeated events do not add duplicate prefixes. A bridge that has no per-TUI
+ownership proof continues registration and wake delivery but does not rename
+threads.
 
 This follows the app-server connection lifecycle rather than attempting to
 preserve a dead socket: every replacement connection performs `initialize` /
