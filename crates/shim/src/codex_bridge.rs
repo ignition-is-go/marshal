@@ -31,7 +31,6 @@
 //! backend with no control socket, so there is nowhere safe for a peer process
 //! to send `turn/start`; it retains hook-boundary inbox delivery.
 
-#[cfg(windows)]
 use std::net::{TcpListener, TcpStream};
 use std::{
     collections::{HashMap, HashSet},
@@ -79,7 +78,6 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(8);
 const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
 const TUI_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
-#[cfg(windows)]
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const WAKE_PROMPT: &str = "Handle the injected <marshal_inbox>; if absent, read unread direct \
 Marshal messages. Then continue your current task.";
@@ -855,6 +853,13 @@ fn stop_owned_app_server(app_server: &mut LaunchedAppServer) {
 
 #[cfg(unix)]
 fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
+    if managed_daemon_is_behind(codex) {
+        eprintln!(
+            "Codex app-server is behind the installed CLI; starting this session on an isolated current-generation app-server"
+        );
+        return launch_isolated_app_server(codex);
+    }
+
     let daemon_status = Command::new(codex)
         .args(["app-server", "daemon", "start"])
         .stdin(Stdio::null())
@@ -882,6 +887,37 @@ fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
 
 #[cfg(windows)]
 fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
+    launch_isolated_app_server(codex)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedDaemonVersion {
+    status: String,
+    cli_version: String,
+    app_server_version: Option<String>,
+}
+
+#[cfg(unix)]
+fn managed_daemon_is_behind(codex: &str) -> bool {
+    let Ok(output) = Command::new(codex)
+        .args(["app-server", "daemon", "version"])
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && managed_daemon_version_is_behind(&output.stdout)
+}
+
+fn managed_daemon_version_is_behind(encoded: &[u8]) -> bool {
+    serde_json::from_slice::<ManagedDaemonVersion>(encoded).is_ok_and(|version| {
+        version.status == "running"
+            && version.app_server_version.as_deref() != Some(version.cli_version.as_str())
+    })
+}
+
+fn launch_isolated_app_server(codex: &str) -> Result<LaunchedAppServer> {
     let endpoint = ephemeral_loopback_endpoint()?;
     let mut child = Command::new(codex)
         .args(["app-server", "--listen", &endpoint])
@@ -910,7 +946,6 @@ fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
     })
 }
 
-#[cfg(windows)]
 fn ephemeral_loopback_endpoint() -> Result<String> {
     let listener =
         TcpListener::bind(("127.0.0.1", 0)).context("reserving a local app-server port")?;
@@ -922,7 +957,6 @@ fn ephemeral_loopback_endpoint() -> Result<String> {
     Ok(format!("ws://127.0.0.1:{port}"))
 }
 
-#[cfg(windows)]
 fn wait_for_app_server(child: &mut Child, endpoint: &str) -> Result<()> {
     let address = loopback_address(endpoint)?;
     let deadline = Instant::now() + APP_SERVER_START_TIMEOUT;
@@ -2253,6 +2287,20 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args, ["resume", "--last", "--yolo"]);
+    }
+
+    #[test]
+    fn stale_managed_daemon_routes_new_launchers_to_an_isolated_server() {
+        assert!(managed_daemon_version_is_behind(
+            br#"{"status":"running","cliVersion":"0.159.2","appServerVersion":"0.154.0"}"#
+        ));
+        assert!(!managed_daemon_version_is_behind(
+            br#"{"status":"running","cliVersion":"0.159.2","appServerVersion":"0.159.2"}"#
+        ));
+        assert!(!managed_daemon_version_is_behind(
+            br#"{"status":"stopped","cliVersion":"0.159.2","appServerVersion":null}"#
+        ));
+        assert!(!managed_daemon_version_is_behind(b"not json"));
     }
 
     #[test]

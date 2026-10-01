@@ -126,6 +126,18 @@ On Linux and macOS, `codex-run` performs three actions:
 3. runs `codex --remote unix:// ...`; the resulting `thread/started` event
    registers the session before any prompt is required.
 
+When the installed CLI is newer than the running managed app-server,
+`codex-run` does not attach a new session to the stale daemon. It starts an
+isolated loopback app-server from the installed binary for that launcher. The
+existing launchers remain attached to the old daemon, while every new local
+launcher gets the new Codex version immediately. The isolated server exits with
+its TUI. Once the managed daemon reaches the CLI version, new launchers share it
+again.
+
+This generation split applies to local `codex-run` sessions. Codex Remote
+Control exposes one managed server identity per `CODEX_HOME`; Codex must roll
+that server through its managed daemon lifecycle.
+
 The wrapper is a Marshal integration boundary, not a replacement Codex
 client. Marshal needs a second app-server connection because Codex hooks only
 run at turn boundaries and therefore cannot wake an idle TUI. The TUI remains
