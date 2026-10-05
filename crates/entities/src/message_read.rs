@@ -12,14 +12,22 @@
 use myko::myko_item;
 use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
 
-use crate::{message::Message, session::Session};
+use crate::message::Message;
 
 #[myko_item]
 pub struct MessageRead {
+    /// Cascade on the *message*: an ack is meaningless once its message is gone,
+    /// so it dies with the message. This is the ack's primary lifetime owner.
     #[belongs_to(Message)]
     pub message_id: crate::message::MessageId,
 
-    #[belongs_to(Session)]
+    /// NOT a `belongs_to(Session)` cascade: an ack is a fact about (message,
+    /// reader) and outlives the reader's session row. Harnesses re-register
+    /// under the same session id after a reload or resume (marshal-pi across
+    /// `/reload`, the Claude shim on `--resume`, a pull session repaired after
+    /// the reap backstop), so a session DEL is often a reconnect. Cascading
+    /// here made every re-registration see the direct messages it had already
+    /// read as unread, and the inbox handed them over again.
     pub session_id: crate::session::SessionId,
 
     /// Wall-clock millis when this session marked the message read.
