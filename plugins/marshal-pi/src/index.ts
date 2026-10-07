@@ -28,7 +28,7 @@ import { Type } from "typebox";
 import { MarshalDaemon } from "./daemon.ts";
 import { resolveIdentity, type Identity } from "./identity.ts";
 import type { NotifyChannelMeta, SessionItem } from "./entities.ts";
-import { livePushText } from "./inbound.ts";
+import { deliverLivePush } from "./live-push.ts";
 
 const DEFAULT_ADDRESS = "ws://localhost:6155";
 type MarshalToolResult = AgentToolResult<Record<string, unknown>>;
@@ -102,27 +102,14 @@ async function init(pi: ExtensionAPI) {
       sessionCtx.ui.notify(`marshal: new message from ${who}`, "info");
     }
 
-    const text = livePushText(meta, who);
-    void (async () => {
-      try {
-        if (text) {
-          await pi.sendMessage(
-            { customType: "marshal-channel", content: text, display: true },
-            { deliverAs: "steer", triggerTurn: true },
-          );
-          if (daemon) await daemon.drainInbox(sid).catch(() => {});
-        } else {
-          const inbox = await daemon!.drainInbox(sid).catch(() => null);
-          if (!inbox) return;
-          await pi.sendMessage(
-            { customType: "marshal-channel", content: inbox, display: true },
-            { deliverAs: "steer", triggerTurn: true },
-          );
-        }
-      } catch (e) {
-        log(`live push injection failed: ${String(e)}`);
-      }
-    })();
+    deliverLivePush(meta, who, {
+      inject: (content) =>
+        pi.sendMessage(
+          { customType: "marshal-channel", content, display: true },
+          { deliverAs: "steer", triggerTurn: true },
+        ),
+      drainInbox: () => (daemon ? daemon.drainInbox(sid) : Promise.resolve(null)),
+    }).catch((e) => log(`live push injection failed: ${String(e)}`));
   }
 
   // ── Status helpers ────────────────────────────────────────────────────
