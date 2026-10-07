@@ -28,6 +28,7 @@ import { Type } from "typebox";
 import { MarshalDaemon } from "./daemon.ts";
 import { resolveIdentity, type Identity } from "./identity.ts";
 import type { NotifyChannelMeta, SessionItem } from "./entities.ts";
+import { livePushText } from "./inbound.ts";
 
 const DEFAULT_ADDRESS = "ws://localhost:6155";
 type MarshalToolResult = AgentToolResult<Record<string, unknown>>;
@@ -101,7 +102,7 @@ async function init(pi: ExtensionAPI) {
       sessionCtx.ui.notify(`marshal: new message from ${who}`, "info");
     }
 
-    const text = meta.body ? `new message from ${who}: ${meta.body}` : undefined;
+    const text = livePushText(meta, who);
     void (async () => {
       try {
         if (text) {
