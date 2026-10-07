@@ -14,10 +14,12 @@ export interface LivePushTarget {
 export async function deliverLivePush(meta: NotifyChannelMeta, who: string, target: LivePushTarget): Promise<void> {
   const text = livePushText(meta, who);
   if (text) {
+    // The daemon marked this message read when it delivered the push. Don't
+    // drain here: that acks any other unread message without showing it.
     await target.inject(text);
-    await target.drainInbox().catch(() => {});
     return;
   }
+  // Older daemons send no body: read it from the inbox instead.
   const inbox = await target.drainInbox().catch(() => null);
   if (!inbox) return;
   await target.inject(inbox);
