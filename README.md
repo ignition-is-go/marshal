@@ -89,7 +89,22 @@ claude --dangerously-load-development-channels server:marshal
 
 Both forms key on the same name you set: `plugin:<plugin>@<marketplace>` for plugin installs, `server:<mcpServers-key>` for direct wiring. Set whichever fits as a shell alias to make it permanent (e.g. `alias claude='claude --dangerously-load-development-channels plugin:marshal-shim@marshal'`).
 
-Without the flag, `roster` and `send_message` still work — peer messages just don't surface as live `<channel>` blocks in your transcript. With the flag, every peer's `send_message` arrives as an inline notification while you're working.
+Without the flag, `roster` and `send_message` still work — peer messages just don't surface as live `<channel>` blocks in your transcript; the plugin's hooks add them to your next prompt instead (see below). With the flag, every peer's `send_message` arrives as an inline notification while you're working.
+
+The plugin also ships `SessionStart` and `UserPromptSubmit` hooks that run `marshal-shim claude-hook`: before each prompt they add any direct message still unread as a `<marshal_inbox>` block and mark it read. If you wired the MCP server by hand, add the same hooks to a `settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 15 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 15 }] }
+    ]
+  }
+}
+```
 
 We're submitting marshal for inclusion in the official allowlist; once approved, plain `claude` will accept the notifications and the flag becomes unnecessary.
 

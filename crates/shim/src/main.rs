@@ -95,7 +95,16 @@ fn main() -> Result<()> {
         Some("codex-hook") => {
             let ep = argv.next().unwrap_or_else(|| "prompt-submit".to_string());
             let base = argv.next();
-            codex_hook::run(&ep, base.as_deref());
+            codex_hook::run(&ep, base.as_deref(), codex_hook::Harness::Codex);
+            return Ok(());
+        }
+        // The same bridge for Claude Code, which the Claude plugin's
+        // `hooks/hooks.json` runs at SessionStart and UserPromptSubmit so a
+        // message the live channel didn't show still reaches the session.
+        Some("claude-hook") => {
+            let ep = argv.next().unwrap_or_else(|| "prompt-submit".to_string());
+            let base = argv.next();
+            codex_hook::run(&ep, base.as_deref(), codex_hook::Harness::Claude);
             return Ok(());
         }
         // One-shot cross-platform setup: wire marshal into a Codex install
