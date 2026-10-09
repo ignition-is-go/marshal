@@ -180,10 +180,7 @@ async fn serve() -> Result<()> {
     // role-deployed per-host config file. Config-wins makes the file the
     // per-host source of truth; env becomes a deliberate one-off
     // override the operator can apply by deleting the file.
-    let daemon_address = read_address_from_config_file()
-        .or_else(|| std::env::var(ADDRESS_ENV).ok())
-        .or_else(|| std::env::var(ADDRESS_ENV_LEGACY).ok())
-        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string());
+    let daemon_address = daemon_address();
 
     log::info!("[marshal-shim] connecting to {daemon_address}");
 
@@ -923,6 +920,28 @@ fn emit_session_del(client: &MykoClient, session: &Session) -> Result<()> {
 /// non-empty trimmed line from the first readable file. Trailing newlines
 /// and surrounding whitespace are stripped so an operator can `echo URL >
 /// daemon-address` without worrying about formatting.
+/// The daemon this shim connects to, in the order described in `main`:
+/// address file, then `MARSHAL_DAEMON_ADDRESS`, then `MYKO_ADDRESS`, then
+/// localhost. The Claude/Codex hook bridge derives its hook URL from the same
+/// answer.
+pub(crate) fn daemon_address() -> String {
+    first_daemon_address(
+        read_address_from_config_file(),
+        std::env::var(ADDRESS_ENV).ok(),
+        std::env::var(ADDRESS_ENV_LEGACY).ok(),
+    )
+}
+
+fn first_daemon_address(
+    file: Option<String>,
+    env: Option<String>,
+    legacy_env: Option<String>,
+) -> String {
+    file.or(env)
+        .or(legacy_env)
+        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string())
+}
+
 pub(crate) fn read_address_from_config_file() -> Option<String> {
     for path in config_file_candidates(ADDRESS_FILE) {
         if let Ok(contents) = std::fs::read_to_string(&path) {
@@ -1279,9 +1298,34 @@ fn detect_host() -> HostInfo {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_address_file_outranks_the_env_vars() {
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            first_daemon_address(
+                some("ws://file:6155"),
+                some("ws://env:6155"),
+                some("ws://old:6155")
+            ),
+            "ws://file:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, some("ws://env:6155"), some("ws://old:6155")),
+            "ws://env:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, None, some("ws://old:6155")),
+            "ws://old:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, None, None),
+            DEFAULT_DAEMON_ADDRESS
+        );
+    }
     use super::{
-        ROSTER_MISS_TICKS, default_current_task, detect_git_branch, resolve_git_head_dir,
-        roster_miss_step,
+        DEFAULT_DAEMON_ADDRESS, ROSTER_MISS_TICKS, default_current_task, detect_git_branch,
+        first_daemon_address, resolve_git_head_dir, roster_miss_step,
     };
     use std::process::Command;
 

@@ -23,15 +23,23 @@
 //! `marshal-shim claude-hook <session-start|prompt-submit>` is the same bridge
 //! for Claude Code, whose hooks take the same JSON in and out. The Claude
 //! plugin ships it as `hooks/hooks.json`, so a Claude session also pulls the
-//! messages its live channel didn't show: a session launched without the
-//! channels flag, or a push that never reached it.
+//! messages its live channel didn't show, such as every message in a session
+//! launched without the channels flag.
 
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
 
 const HOOK_PORT: u16 = 6156;
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// The whole request, connect to last byte. A hook blocks the agent's turn
+/// (Claude's UserPromptSubmit holds the prompt), so a daemon that is down,
+/// unreachable or stalled costs at most this, then the turn goes on without
+/// the inbox.
+const DEADLINE: Duration = Duration::from_secs(3);
+/// A real answer is a few KiB; anything past this isn't the daemon's inbox.
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+/// Per address tried, so an unreachable first address leaves time for the next.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Which agent runs the hook. The daemon's session block differs: Codex has
 /// to name itself on every write, Claude's shim does that for it.
@@ -157,13 +165,11 @@ fn resolve_base(base_override: Option<&str>) -> String {
     {
         return b.trim_end_matches('/').to_string();
     }
-    // Fall back to the same daemon address the shim's MCP path uses, remapped
-    // from the WS endpoint to the plain-HTTP hook port.
-    let ws = std::env::var(crate::ADDRESS_ENV)
-        .ok()
-        .or_else(crate::read_address_from_config_file)
-        .unwrap_or_default();
-    base_from_daemon(&ws)
+    // Fall back to the daemon the shim's MCP path connects to, resolved the
+    // same way (address file first), remapped from the WS endpoint to the
+    // plain-HTTP hook port. Resolving it differently would let the hook
+    // register and read the session on a different daemon than the shim.
+    base_from_daemon(&crate::daemon_address())
 }
 
 fn base_from_daemon(daemon: &str) -> String {
@@ -198,10 +204,17 @@ fn http_post(base: &str, path: &str, body: &str) -> Option<String> {
         Some((h, p)) => (h, p.parse::<u16>().ok()?),
         None => (hostport, 80),
     };
-    let sock = format!("{host}:{port}").to_socket_addrs().ok()?.next()?;
-    let mut stream = TcpStream::connect_timeout(&sock, TIMEOUT).ok()?;
-    stream.set_read_timeout(Some(TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(TIMEOUT)).ok()?;
+    let deadline = Instant::now() + DEADLINE;
+    let left = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+    };
+    let addrs = resolve_within(format!("{host}:{port}"), left()?)?;
+    let mut stream = addrs
+        .into_iter()
+        .find_map(|sock| TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT.min(left()?)).ok())?;
+    stream.set_write_timeout(left()).ok()?;
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -209,7 +222,19 @@ fn http_post(base: &str, path: &str, body: &str) -> Option<String> {
     );
     stream.write_all(req.as_bytes()).ok()?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).ok()?;
+    let mut chunk = [0u8; 8192];
+    loop {
+        // Re-arm the read timeout with what's left, so a daemon that trickles
+        // bytes can't stretch the request past the deadline.
+        stream.set_read_timeout(Some(left()?)).ok()?;
+        match stream.read(&mut chunk).ok()? {
+            0 => break,
+            read => buf.extend_from_slice(&chunk[..read]),
+        }
+        if buf.len() > MAX_RESPONSE_BYTES {
+            return None;
+        }
+    }
     let text = String::from_utf8_lossy(&buf);
     let idx = text.find("\r\n\r\n")?;
     let status = text[..idx].lines().next()?.split_whitespace().nth(1)?;
@@ -217,6 +242,17 @@ fn http_post(base: &str, path: &str, body: &str) -> Option<String> {
         return None;
     }
     Some(text[idx + 4..].to_string())
+}
+
+/// Resolve `hostport`, giving up after `limit`. `getaddrinfo` blocks with no
+/// timeout of its own, so it runs on a helper thread; a resolver that stalls
+/// leaves that thread behind, and the process exits right after anyway.
+fn resolve_within(hostport: String, limit: Duration) -> Option<Vec<SocketAddr>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(hostport.to_socket_addrs().map(Iterator::collect));
+    });
+    rx.recv_timeout(limit).ok()?.ok()
 }
 
 fn short_host() -> String {
