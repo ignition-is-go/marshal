@@ -22,7 +22,10 @@ mod tools;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use hyphae::{Gettable, Watchable};
-use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session, SessionId};
+use marshal_entities::{
+    AckMessages, AckMessagesResult, GetAllSessions, HostInfo, MessageId, NotifyChannel, Session,
+    SessionId,
+};
 use mcp::ServerConfig;
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -292,7 +295,9 @@ async fn serve() -> Result<()> {
         host: Some(host.clone()),
         project: project.clone(),
         channels_enabled,
-        acks_pushes: None,
+        // The drain task below acks each direct push once it is written to
+        // Claude, so the daemon can leave it unread until then.
+        acks_pushes: (!is_codex).then_some(true),
     };
     let session = Arc::new(Mutex::new(session));
 
@@ -818,6 +823,7 @@ async fn serve() -> Result<()> {
     });
 
     let notify_rx = Mutex::new(Some(notify_rx));
+    let client_for_acks = Arc::clone(&client);
     let served = mcp::serve_stdio(config, handler, Arc::clone(&activity), move |notifier| {
         // Spawn a task that drains the NotifyChannel buffer and emits each
         // one onto stdout via the MCP writer. The buffer accumulated any
@@ -825,7 +831,7 @@ async fn serve() -> Result<()> {
         if let Some(mut rx) = notify_rx.lock().ok().and_then(|mut g| g.take()) {
             tokio::spawn(async move {
                 while let Some(cmd) = rx.recv().await {
-                    notifier.channel(cmd.content, cmd.meta);
+                    forward_push(&notifier, &client_for_acks, cmd);
                 }
             });
             log::info!("[marshal-shim] notification drain task started");
@@ -841,6 +847,49 @@ async fn serve() -> Result<()> {
     }
     log::info!("[marshal-shim] stdin closed; deregistering and exiting");
     deregister_and_exit(&client, &session, is_codex);
+}
+
+/// Hand a daemon push to Claude. A direct message or @mention ping is acked
+/// once it has been written and flushed to Claude's stdin: the daemon leaves
+/// a direct message unread until then (our Session sets `acks_pushes`), so
+/// one that never gets this far comes back in the next inbox pull. A failed
+/// write, or an ack that doesn't land, leaves it unread; showing it twice
+/// beats losing it. A flushed line is not proof Claude showed it (Claude may
+/// stop reading and die with it in the pipe), but MCP notifications have no
+/// ack, so this is as far as the shim can see. A mention ping is a direct message too, so acking it keeps
+/// the per-turn inbox from showing it again. Any other push is passed on
+/// without an ack.
+fn forward_push(notifier: &mcp::Notifier, client: &Arc<MykoClient>, cmd: NotifyChannel) {
+    let kind = cmd.meta.get("kind").and_then(serde_json::Value::as_str);
+    let acked_message_id = matches!(kind, Some("new_message" | "mention"))
+        .then(|| {
+            cmd.meta
+                .get("message_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .flatten()
+        .map(|id| MessageId(Arc::from(id)));
+    let Some(message_id) = acked_message_id else {
+        notifier.channel(cmd.content, cmd.meta);
+        return;
+    };
+    let written = notifier.channel_written(cmd.content, cmd.meta);
+    let client = Arc::clone(client);
+    tokio::spawn(async move {
+        if written.await.is_err() {
+            log::warn!(
+                "[marshal-shim] push {} not written to Claude; left unread",
+                message_id.0
+            );
+            return;
+        }
+        // Fire-and-forget like the liveness setters: a lost ack leaves the
+        // message unread, which the next inbox pull repairs.
+        let _ = client.send_command::<AckMessages, AckMessagesResult>(&AckMessages {
+            message_ids: vec![message_id],
+            as_session: None,
+        });
+    });
 }
 
 /// Best-effort roster deregistration followed by a hard process exit.
