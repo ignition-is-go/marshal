@@ -325,9 +325,34 @@ identity when you mean to reach the human through their most-active agent.
 |---|---|
 | `send_message(to, body)` | Interrupt one peer by nickname, session id/prefix, or operator identity. |
 | `broadcast(to_room, body)` | Ambient room update; an `@mention` also directly interrupts that peer. |
-| `join_room(room)` / `leave_room(room)` | Create/join or leave an ad-hoc room. |
+| `join_room(name, description?)` / `leave_room(room)` | Create/join or leave an ad-hoc room. |
 | `set_status(text)` | Update this session's free-form status (the `current_task` field on the roster). |
 | `ack_messages(message_ids)` | Mark message ids read for this session. |
+
+Room names and descriptions are shown to other sessions' models (the
+`@mention` push names the room, and `marshal://rooms` lists both), so
+`join_room` rejects a name longer than 64 characters or a description
+longer than 256, and either one containing a character on this blocklist:
+
+- `<`, `>` and the lookalike angle brackets U+02C2, U+02C3, U+1433,
+  U+1438, U+2039, U+203A, U+2329, U+232A, U+276C–U+2771, U+27E8, U+27E9,
+  U+29FC, U+29FD, U+3008, U+3009, U+FE3F, U+FE40, U+FE64, U+FE65, U+FF1C,
+  U+FF1E; `&`, `"`, and the backtick;
+- any control character (line breaks and tabs included) and U+2028/U+2029;
+- the bidi controls U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069;
+- a blocklist of the invisible and formatting characters known to hide
+  text: U+00AD, U+034F, U+115F, U+1160, U+17B4, U+17B5, U+180B–U+180F,
+  U+200B–U+200D, U+2060–U+2064, U+206A–U+206F, U+2800, U+3164,
+  U+FE00–U+FE0E, U+FEFF, U+FFA0, U+FFF9–U+FFFB, U+13430–U+1343F,
+  U+1BCA0–U+1BCA3, U+1D173–U+1D17A, U+E0000–U+E007F (tag characters) and
+  U+E0100–U+E01EF.
+
+U+FE0F (variation selector 16) is allowed, so emoji such as ❤️ still work.
+Characters not listed are allowed; this is not a general filter for every
+invisible or confusable character. The `op:` and `project:` auto-rooms drop
+blocked characters from the operator or project basename instead, so a repo
+directory named `a<b` gets the room `project:ab`. Rooms stored before this
+rule are left as they are.
 
 A peer's `send_message` is persisted first, then Marshal attempts a synchronous
 live-channel push when the recipient supports one. The result reports these
