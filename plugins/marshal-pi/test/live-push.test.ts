@@ -35,6 +35,15 @@ describe("deliverLivePush", () => {
     expect(session.unread).toEqual(["new message from bob: sent while you were reconnecting"]);
   });
 
+  test("keeps the truncation notice and still leaves the inbox alone", async () => {
+    const session = fakeSession(["new message from bob: still unread"]);
+    await deliverLivePush({ body: "the first part", body_truncated: true, message_id: "msg_1" }, "alice", session.target);
+    expect(session.injected).toEqual([
+      "new message from alice: the first part\n[preview truncated; read the full message with marshal_messages (message msg_1)]",
+    ]);
+    expect(session.unread).toEqual(["new message from bob: still unread"]);
+  });
+
   test("falls back to the inbox when the push has no body", async () => {
     const meta: NotifyChannelMeta = { from_session: "ses_a" };
     const session = fakeSession(["new message from alice: hello"]);
