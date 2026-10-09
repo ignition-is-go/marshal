@@ -357,8 +357,8 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
         );
         if truncated {
             line.push_str(&format!(
-                "  [truncated; full message {} remains in marshal://messages]\n",
-                m.message_id.0
+                "  {}\n",
+                marshal_entities::truncated_notice(m.message_id.0.as_ref())
             ));
         }
         line
