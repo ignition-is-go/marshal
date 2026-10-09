@@ -30,6 +30,38 @@ const DEFAULT_HOOK_BIND: &str = "127.0.0.1:6156";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Answer `--help` / `--version` before anything starts, and refuse any
+    // other argument: configuration comes from the environment only, so an
+    // argument here is a mistake, and ignoring it would start a real daemon.
+    // `args_os`, so an argument that isn't UTF-8 is refused, not a panic.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match args.first().and_then(|arg| arg.to_str()) {
+        Some("-h" | "--help") => {
+            print!("{}", usage());
+            return Ok(());
+        }
+        Some("-V" | "--version") => {
+            println!("marshal-daemon {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
+    }
+    // The daemon always runs in the foreground. `--foreground` stays accepted,
+    // alone, because earlier docs told people to pass it, so a unit file
+    // written from them keeps working.
+    let unknown = match args.first() {
+        Some(first) if first.as_os_str() == "--foreground" => args.get(1),
+        first => first,
+    };
+    if let Some(arg) = unknown {
+        eprintln!(
+            "marshal-daemon: unknown argument: {}",
+            arg.to_string_lossy()
+        );
+        eprintln!("Try 'marshal-daemon --help'.");
+        std::process::exit(2);
+    }
+
     init_logging();
 
     // Resolve via the system resolver (not bare `parse`) so a mesh DNS
@@ -111,6 +143,31 @@ async fn main() -> Result<()> {
     log::info!("marshal-daemon listening on ws://{bind_addr}, hooks on http://{hook_bind}");
     server.run().await.map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
+}
+
+/// The `--help` text. The daemon takes no other arguments; it reads its
+/// configuration from the environment.
+fn usage() -> String {
+    format!(
+        "marshal-daemon {version}
+Marshal coordination daemon: serves the session roster, rooms and messages
+to marshal-shim, marshal-tui and the agent plugins.
+
+Usage: marshal-daemon [OPTIONS]
+
+Options:
+  -h, --help     Print this help and exit
+  -V, --version  Print the version and exit
+
+Environment:
+  MARSHAL_BIND       WebSocket and MCP listen address (default {DEFAULT_BIND})
+  MARSHAL_HOOK_BIND  HTTP hook listen address (default {DEFAULT_HOOK_BIND})
+  MYKO_POSTGRES_URL  Postgres URL for durable state; without it the daemon
+                     runs ephemeral and keeps nothing across a restart
+  RUST_LOG           Log filter (default info)
+",
+        version = env!("CARGO_PKG_VERSION"),
+    )
 }
 
 /// Resolve a bind spec from `env_var` (or `default`) via the system
