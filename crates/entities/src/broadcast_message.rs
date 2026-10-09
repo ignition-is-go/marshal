@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use crate::{
     message::{CONTEXT_BODY_MAX_CHARS, Message, MessageId, context_preview},
+    message_read::{MessageRead, MessageReadId},
     room::{GetAllRooms, Room, RoomId},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
@@ -225,7 +226,7 @@ impl CommandHandler for BroadcastMessage {
             if target.channels_enabled != Some(false)
                 && let Some(cid) = target.client_id.as_ref()
             {
-                crate::send_message::push_to_client(
+                let pushed = crate::send_message::push_to_client(
                     cid.0.as_ref(),
                     mention_push_content(
                         &from_nickname,
@@ -247,6 +248,20 @@ impl CommandHandler for BroadcastMessage {
                         "sent_at": now,
                     }),
                 );
+                // Same dedup as SendMessage: a pushed ping is marked read, so
+                // the per-turn inbox (which reads unread direct messages, and
+                // the ping is one) doesn't show it a second time.
+                if pushed {
+                    let read_id = MessageRead::make_id(ping.id.0.as_ref(), target.id.0.as_ref());
+                    if let Err(e) = ctx.emit_set(&MessageRead {
+                        id: MessageReadId(Arc::from(read_id.as_str())),
+                        message_id: ping.id.clone(),
+                        session_id: target.id.clone(),
+                        read_at: now,
+                    }) {
+                        log::warn!("[broadcast] mention inbox dedup write failed: {e:?}");
+                    }
+                }
             }
             mentioned.push(target.id.clone());
         }
