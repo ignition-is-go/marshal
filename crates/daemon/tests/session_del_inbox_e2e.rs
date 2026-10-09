@@ -254,6 +254,14 @@ fn del_session_then_reregister_does_not_reinject_acked_direct_dm() {
         store_count(&server.ctx, Message::ENTITY_NAME_STATIC),
         store_count(&server.ctx, MessageRead::ENTITY_NAME_STATIC),
         store_count(&server.ctx, RoomMember::ENTITY_NAME_STATIC));
+    // The DM outlives its recipient's DEL: the session comes back under the
+    // same id. Without this, a cascade that deleted the DM would also pass
+    // the read check below, since a deleted message is never re-injected.
+    assert_eq!(
+        store_count(&server.ctx, Message::ENTITY_NAME_STATIC),
+        1,
+        "a direct message must survive its recipient session being DEL'd"
+    );
 
     // 4. B re-registers the SAME session id.
     send_session_set(&client_b, &s);
