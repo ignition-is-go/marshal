@@ -19,7 +19,7 @@ use myko::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    room::{GetAllRooms, Room, RoomId, RoomKind},
+    room::{GetAllRooms, Room, RoomId, RoomKind, validate_room_description, validate_room_name},
     room_member::{GetAllRoomMembers, RoomMember, RoomMemberId},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
@@ -30,10 +30,14 @@ use crate::{
 pub struct JoinRoom {
     /// User-supplied display name. Slugified into the room id; rooms
     /// with reserved prefixes (`everyone`, `host:`, `op:`, `project:`)
-    /// are blocked so users can't shadow auto-rooms.
+    /// are blocked so users can't shadow auto-rooms. Rejected when it is
+    /// longer than `ROOM_NAME_MAX_CHARS` characters or contains a character
+    /// `is_forbidden_room_text_char` blocks; `FORBIDDEN_RANGES` in
+    /// `room.rs` is the exact list (see `validate_room_name`).
     pub name: String,
 
-    /// Optional human-readable purpose, surfaced in `list_rooms`.
+    /// Optional human-readable purpose, surfaced in `list_rooms`. Same
+    /// character rule as `name`, capped at `ROOM_DESCRIPTION_MAX_CHARS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
@@ -65,6 +69,13 @@ impl CommandHandler for JoinRoom {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
+        // The name and description reach other sessions' model context
+        // (the @mention push, marshal://rooms). Check them first, so no
+        // later error message quotes a name that failed the rule.
+        validate_room_name(&self.name).map_err(|e| err(&ctx, &e))?;
+        if let Some(description) = self.description.as_deref() {
+            validate_room_description(description).map_err(|e| err(&ctx, &e))?;
+        }
         if is_reserved_room_name(&self.name) {
             return Err(err(
                 &ctx,
