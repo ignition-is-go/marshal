@@ -22,7 +22,9 @@ pub struct Room {
     /// Display name. For auto-rooms, equal to `id`. For ad-hoc rooms,
     /// the user-supplied label (which `id` is slugified from). Follows the
     /// room text rule (`is_forbidden_room_text_char`, `ROOM_NAME_MAX_CHARS`)
-    /// for rooms created since that rule; older stored rooms are not migrated.
+    /// at creation; the daemon's cleanup sweep repairs a stored name that
+    /// breaks it (keeping `id`), so an older or directly-SET auto-room's
+    /// name can briefly differ from its id.
     #[myko_setter]
     pub name: String,
 
