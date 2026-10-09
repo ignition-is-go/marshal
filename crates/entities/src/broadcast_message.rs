@@ -227,7 +227,12 @@ impl CommandHandler for BroadcastMessage {
             {
                 crate::send_message::push_to_client(
                     cid.0.as_ref(),
-                    mention_push_content(&from_nickname, &room.name, to_operator.as_deref()),
+                    mention_push_content(
+                        &from_nickname,
+                        &room.name,
+                        to_operator.as_deref(),
+                        body_truncated.then_some(ping.id.0.as_ref()),
+                    ),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "mention",
@@ -347,14 +352,16 @@ pub(crate) fn mention_push_content(
     from_nickname: &str,
     room_name: &str,
     to_operator: Option<&str>,
+    truncated_id: Option<&str>,
 ) -> String {
-    match to_operator {
+    let banner = match to_operator {
         Some(op) => format!(
             "{} {from_nickname} mentioned you in {room_name}.",
             crate::message::operator_relay_notice(op)
         ),
         None => format!("{from_nickname} mentioned you in {room_name}"),
-    }
+    };
+    crate::send_message::with_truncated_notice(banner, truncated_id)
 }
 
 #[cfg(test)]
@@ -364,15 +371,23 @@ mod push_content_tests {
     #[test]
     fn agent_mention_banner_is_unchanged() {
         assert_eq!(
-            mention_push_content("fleet-wolf", "everyone", None),
+            mention_push_content("fleet-wolf", "everyone", None, None),
             "fleet-wolf mentioned you in everyone"
         );
     }
 
     #[test]
     fn human_mention_banner_opens_with_the_relay_contract() {
-        let content = mention_push_content("fleet-wolf", "everyone", Some("max@lucid.rocks"));
+        let content = mention_push_content("fleet-wolf", "everyone", Some("max@lucid.rocks"), None);
         assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
         assert!(content.ends_with("fleet-wolf mentioned you in everyone."));
+    }
+
+    #[test]
+    fn a_cut_preview_says_where_the_full_mention_is() {
+        assert_eq!(
+            mention_push_content("fleet-wolf", "everyone", None, Some("m-1")),
+            "fleet-wolf mentioned you in everyone [truncated; full message m-1 remains in marshal://messages]"
+        );
     }
 }
