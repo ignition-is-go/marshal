@@ -1,0 +1,19 @@
+{
+  "description": "Pull this session's unread Marshal messages into the turn, for messages the live channel didn't show.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 15 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 15 }
+        ]
+      }
+    ]
+  }
+}

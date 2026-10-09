@@ -19,6 +19,12 @@
 //!
 //! Best-effort by design: any failure prints nothing and returns, so marshal
 //! can never block or break a Codex turn.
+//!
+//! `marshal-shim claude-hook <session-start|prompt-submit>` is the same bridge
+//! for Claude Code, whose hooks take the same JSON in and out. The Claude
+//! plugin ships it as `hooks/hooks.json`, so a Claude session also pulls the
+//! messages its live channel didn't show: a session launched without the
+//! channels flag, or a push that never reached it.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -27,10 +33,27 @@ use std::time::Duration;
 const HOOK_PORT: u16 = 6156;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Which agent runs the hook. The daemon's session block differs: Codex has
+/// to name itself on every write, Claude's shim does that for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Harness {
+    Codex,
+    Claude,
+}
+
+impl Harness {
+    fn query_value(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+}
+
 /// `ep` is `session-start` or `prompt-submit`; `base_override` is an optional
 /// explicit `http://host:port` (the deploy role passes it so the hook doesn't
 /// depend on env the Codex hook process may not inherit).
-pub fn run(ep: &str, base_override: Option<&str>) {
+pub fn run(ep: &str, base_override: Option<&str>, harness: Harness) {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let v: serde_json::Value =
@@ -62,9 +85,10 @@ pub fn run(ep: &str, base_override: Option<&str>) {
         json_str(cwd)
     );
     let path = format!(
-        "/hook/{endpoint}?host={}&operator={}&harness=codex",
+        "/hook/{endpoint}?host={}&operator={}&harness={}",
         url_q(&host),
-        url_q(&op)
+        url_q(&op),
+        harness.query_value()
     );
 
     let Some(resp) = http_post(&base, &path, &body) else {
