@@ -18,6 +18,8 @@ use crate::message::Message;
 pub struct MessageRead {
     /// Cascade on the *message*: an ack is meaningless once its message is gone,
     /// so it dies with the message. This is the ack's primary lifetime owner.
+    /// The TTL prune deletes messages without cascading, so the daemon's
+    /// cleanup also sweeps acks whose message is gone (`sweep_orphan_reads`).
     #[belongs_to(Message)]
     pub message_id: crate::message::MessageId,
 
