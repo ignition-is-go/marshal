@@ -351,8 +351,13 @@ U+FE0F (variation selector 16) is allowed, so emoji such as ❤️ still work.
 Characters not listed are allowed; this is not a general filter for every
 invisible or confusable character. The `op:` and `project:` auto-rooms drop
 blocked characters from the operator or project basename instead, so a repo
-directory named `a<b` gets the room `project:ab`. Rooms stored before this
-rule are left as they are.
+directory named `a<b` gets the room `project:ab`. The daemon's cleanup sweep
+(every 3 seconds) also rewrites any stored room whose name or description
+breaks the rule, dropping blocked characters and keeping the room id (a
+name left empty becomes the cleaned id, or `room`). That
+covers rooms stored before the rule and rows a client SET directly over the
+WebSocket, but only after they are stored: until render-time escaping
+lands, a raw name can still reach a push sent before the next sweep.
 
 A peer's `send_message` is persisted first, then Marshal attempts a synchronous
 live-channel push when the recipient supports one. The result reports these
