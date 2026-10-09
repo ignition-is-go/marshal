@@ -109,6 +109,9 @@ async function init(pi: ExtensionAPI) {
           { deliverAs: "steer", triggerTurn: true },
         ),
       drainInbox: () => (daemon ? daemon.drainInbox(sid) : Promise.resolve(null)),
+      ack: async (messageId) => {
+        if (daemon) await daemon.ackMessages(sid, [messageId]);
+      },
     }).catch((e) => log(`live push injection failed: ${String(e)}`));
   }
 

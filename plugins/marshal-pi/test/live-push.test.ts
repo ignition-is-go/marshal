@@ -7,8 +7,10 @@ import { deliverLivePush, type LivePushTarget } from "../src/live-push.ts";
 // the rendered block, like MarshalDaemon.drainInbox.
 function fakeSession(unread: string[]) {
   const injected: string[] = [];
+  const acked: string[] = [];
   const target: LivePushTarget = {
     inject: async (content) => { injected.push(content); },
+    ack: async (messageId) => { acked.push(messageId); },
     drainInbox: async () => {
       if (unread.length === 0) return null;
       const block = unread.join("\n");
@@ -16,7 +18,7 @@ function fakeSession(unread: string[]) {
       return block;
     },
   };
-  return { target, injected, unread };
+  return { target, injected, unread, acked };
 }
 
 describe("deliverLivePush", () => {
@@ -33,6 +35,21 @@ describe("deliverLivePush", () => {
     await deliverLivePush({ body: "hello" }, "alice", session.target);
     expect(session.injected).toEqual(["new message from alice: hello"]);
     expect(session.unread).toEqual(["new message from bob: sent while you were reconnecting"]);
+  });
+
+  // A direct push is already read when it arrives, but a room @mention is not:
+  // ack the pushed message itself so the next inbox doesn't show it again.
+  test("acks the pushed message and nothing else", async () => {
+    const session = fakeSession(["new message from bob: still unread"]);
+    await deliverLivePush({ body: "@you look at this", message_id: "msg_7" }, "alice", session.target);
+    expect(session.acked).toEqual(["msg_7"]);
+    expect(session.unread).toEqual(["new message from bob: still unread"]);
+  });
+
+  test("acks nothing when the push names no message", async () => {
+    const session = fakeSession([]);
+    await deliverLivePush({ body: "hello" }, "alice", session.target);
+    expect(session.acked).toEqual([]);
   });
 
   test("keeps the truncation notice and still leaves the inbox alone", async () => {
