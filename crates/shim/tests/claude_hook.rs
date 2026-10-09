@@ -100,7 +100,7 @@ fn a_prompt_hook_surfaces_the_inbox_as_prompt_context() {
         request.line
     );
     assert!(
-        !request.line.contains("harness=codex"),
+        request.line.contains("&harness=claude"),
         "Claude must not get Codex's asSession guidance: {}",
         request.line
     );
@@ -142,8 +142,10 @@ fn a_session_start_hook_surfaces_identity_as_session_context() {
 
 #[test]
 fn an_empty_inbox_adds_nothing() {
-    let (base, _seen) = fake_daemon("");
+    let (base, seen) = fake_daemon("");
     assert_eq!(claude_hook("prompt-submit", &base), "");
+    seen.recv_timeout(Duration::from_secs(5))
+        .expect("the hook must still have asked the daemon");
 }
 
 #[test]
@@ -188,4 +190,25 @@ fn the_plugin_hooks_run_the_shim_for_their_own_event() {
             );
         }
     }
+}
+
+#[test]
+fn a_daemon_that_never_answers_holds_the_prompt_only_briefly() {
+    // Accepts the connection, then says nothing.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent daemon");
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let silent = thread::spawn(move || {
+        let held = listener.accept();
+        thread::sleep(Duration::from_secs(6));
+        drop(held);
+    });
+
+    let started = std::time::Instant::now();
+    assert_eq!(claude_hook("prompt-submit", &base), "");
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(4),
+        "held the prompt for {waited:?}"
+    );
+    drop(silent);
 }
