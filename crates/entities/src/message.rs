@@ -53,29 +53,32 @@ pub struct Message {
     /// pull it. In the pull-via-hook model the recipient reads on its
     /// next turn — which can be after the sender's SessionEnd — so
     /// cascading on the sender would silently delete unread messages in
-    /// that window. The message's lifetime is governed by the *recipient*
-    /// instead (the `to_session_id` / `to_room_id` cascades below).
+    /// that window. No recipient cascade either (see `to_session_id`); a
+    /// message lives until the daemon's TTL sweep prunes it.
     pub from_session_id: SessionId,
 
     /// Direct recipient — set for 1:1 sends, `None` for broadcasts.
-    /// Cascade-DELs the message when the recipient session is DEL'd.
+    /// NOT a `belongs_to(Session)` cascade: a recipient's session row is DEL'd
+    /// and re-SET under the same id on a reload, a resume or a reaped pull
+    /// session's next hook, and its direct messages must still be there. The
+    /// `#[belongs_to(Session, optional)]` this field used to carry never
+    /// registered (myko only accepts a bare type there, ignition-is-go/myko#93),
+    /// so dropping it changes nothing at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[belongs_to(Session, optional)]
     pub to_session_id: Option<SessionId>,
 
     /// Broadcast recipient — set for room sends, `None` for direct
-    /// sends. Cascade-DELs when the room is DEL'd. (Auto-rooms like
-    /// `everyone` and `host:*` are never DEL'd, so broadcasts to them
-    /// effectively persist forever.)
+    /// sends. Not a `belongs_to(Room)` cascade, for the same reason as
+    /// `to_session_id`: the attribute it used to carry never registered.
+    /// Broadcasts are pruned by the daemon's TTL sweep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[belongs_to(Room, optional)]
     pub to_room_id: Option<crate::room::RoomId>,
 
     /// When this direct message was addressed to a *human* — via their operator
     /// identity (the `op:`/`human:`/email tier of recipient resolution) rather
     /// than to one specific agent — this holds that operator string (e.g.
-    /// `max@lucid.rocks`). The message is still routed to, and cascades on, the
-    /// operator's most-active session via `to_session_id`; this marks it as
+    /// `max@lucid.rocks`). The message is still routed to the operator's
+    /// most-active session via `to_session_id`; this marks it as
     /// human-addressed so the receiving agent surfaces it to its operator
     /// instead of treating it as ordinary peer chatter, and the UI console can
     /// toast it for that operator regardless of which agent it landed on. `None`
