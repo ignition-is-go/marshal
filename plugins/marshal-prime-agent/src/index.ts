@@ -23,6 +23,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { MarshalDaemon } from "./daemon.ts";
+import { pullForTurn } from "./inbox-pull.ts";
 import { resolveIdentity, type Identity } from "./identity.ts";
 import type { NotifyChannelMeta, SessionItem } from "./entities.ts";
 import { shouldRegisterPrimeAgentSession } from "./runtime.ts";
@@ -111,12 +112,19 @@ async function init(pi: ExtensionAPI) {
           );
         } else {
           // Compatibility fallback for older daemons that omit body metadata.
-          const inbox = await daemon!.drainInbox(sid).catch(() => null);
-          if (!inbox) return;
-          await pi.sendMessage(
-            { customType: "marshal-channel", content: inbox, display: true, details: meta },
-            { deliverAs: "steer", triggerTurn: true },
-          );
+          // The pull is acked only once it has been injected.
+          const pull = await daemon!.pullInbox(sid);
+          if (!pull) return;
+          try {
+            await pi.sendMessage(
+              { customType: "marshal-channel", content: pull.text, display: true, details: meta },
+              { deliverAs: "steer", triggerTurn: true },
+            );
+          } catch (e) {
+            pull.release();
+            throw e;
+          }
+          await pull.commit().catch(() => log("inbox ack failed"));
         }
       } catch (e) {
         log(`live push injection failed: ${String(e)}`);
@@ -328,19 +336,21 @@ async function init(pi: ExtensionAPI) {
     // Add marshal system prompt context (once per turn, before the LLM call).
     result.systemPrompt = event.systemPrompt + "\n\n" + SYSTEM_PROMPT_BLOCK;
 
-    // Drain any missed inbox messages — only if the daemon is connected.
-    if (daemon && sessionId && daemon.isConnected()) {
-      daemon.registerSession(sessionId); // self-heal a dropped roster row
-      const inbox = await Promise.race([
-        daemon.drainInbox(sessionId).catch(() => null),
-        new Promise<null>((r) => setTimeout(() => r(null), 2000)),
-      ]);
-      if (inbox) {
+    // Pull any missed inbox messages — only if the daemon is connected. The
+    // pull is acked only once its text goes into this turn; one that misses
+    // the deadline is released, so its messages stay unread for the next turn.
+    const d = daemon;
+    const sid = sessionId;
+    if (d && sid && d.isConnected()) {
+      d.registerSession(sid); // self-heal a dropped roster row
+      const pull = await pullForTurn(() => d.pullInbox(sid), 2000);
+      if (pull) {
         result.message = {
           customType: "marshal-inbox",
-          content: inbox,
+          content: pull.text,
           display: true,
         };
+        void pull.commit().catch(() => log("inbox ack failed"));
       }
     }
 
