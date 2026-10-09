@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -140,6 +140,25 @@ impl Notifier {
     /// strings here so callers can pass arbitrary objects without thinking
     /// about the wire constraint.
     pub fn channel(&self, content: impl Into<String>, meta: Value) {
+        self.send_channel(content.into(), meta, None);
+    }
+
+    /// [`Self::channel`], plus a receiver that resolves once the notification
+    /// has been written to the client and flushed. If it can't be written
+    /// (the client is gone, the writer stopped), the sender is dropped and
+    /// the receiver yields an error instead, so a caller waiting on it never
+    /// mistakes an unwritten notification for a delivered one.
+    pub fn channel_written(
+        &self,
+        content: impl Into<String>,
+        meta: Value,
+    ) -> oneshot::Receiver<()> {
+        let (written_tx, written_rx) = oneshot::channel();
+        self.send_channel(content.into(), meta, Some(written_tx));
+        written_rx
+    }
+
+    fn send_channel(&self, content: String, meta: Value, written: Option<oneshot::Sender<()>>) {
         let coerced = match meta {
             Value::Object(map) => {
                 let stringified: serde_json::Map<String, Value> = map
@@ -162,7 +181,7 @@ impl Notifier {
             .unwrap_or("?")
             .to_string();
         let params = serde_json::json!({
-            "content": content.into(),
+            "content": content,
             "meta": coerced,
         });
         // Trace the handoff into the writer task: a missing log here
@@ -177,7 +196,11 @@ impl Notifier {
         log::info!(
             "[trace-pushpipe] site=Notifier::channel kind={kind} content_len={serialized_len}",
         );
-        self.send_raw("notifications/claude/channel", params);
+        let _ = self.out_tx.send(OutboundMessage::Notification {
+            method: "notifications/claude/channel".to_string(),
+            params,
+            written,
+        });
     }
 
     /// Send a `notifications/message` (logging) event.
@@ -196,6 +219,7 @@ impl Notifier {
         let _ = self.out_tx.send(OutboundMessage::Notification {
             method: method.to_string(),
             params,
+            written: None,
         });
     }
 }
@@ -248,9 +272,21 @@ struct JsonRpcNotification {
 
 #[derive(Debug)]
 enum OutboundMessage {
-    Reply { id: Value, result: Value },
-    Error { id: Value, body: JsonRpcErrorBody },
-    Notification { method: String, params: Value },
+    Reply {
+        id: Value,
+        result: Value,
+    },
+    Error {
+        id: Value,
+        body: JsonRpcErrorBody,
+    },
+    Notification {
+        method: String,
+        params: Value,
+        /// Told once the line has been written and flushed; dropped unsent
+        /// if it never is.
+        written: Option<oneshot::Sender<()>>,
+    },
 }
 
 // =============================================================================
@@ -380,7 +416,7 @@ where
                             }
                         }
                     }
-                    OutboundMessage::Notification { method, params } => {
+                    OutboundMessage::Notification { method, params, .. } => {
                         let n = JsonRpcNotification {
                             jsonrpc: "2.0",
                             method: method.clone(),
@@ -401,7 +437,7 @@ where
                 // OS pipe (writer task gone, stdout closed, etc.).
                 let is_notification = matches!(&msg, OutboundMessage::Notification { .. });
                 let notification_kind = match &msg {
-                    OutboundMessage::Notification { method, params } => {
+                    OutboundMessage::Notification { method, params, .. } => {
                         let kind = params
                             .get("meta")
                             .and_then(|m| m.get("kind"))
@@ -426,6 +462,13 @@ where
                     log::info!(
                         "[trace-pushpipe] site=writer_task wrote method={method} kind={kind} bytes={line_bytes}",
                     );
+                }
+                if let OutboundMessage::Notification {
+                    written: Some(written),
+                    ..
+                } = msg
+                {
+                    let _ = written.send(());
                 }
             }
         })
@@ -650,6 +693,7 @@ fn tool_outcome_to_result(outcome: ToolOutcome) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tokio::io::duplex;
 
     struct EchoHandler;
@@ -855,6 +899,81 @@ mod tests {
         assert_eq!(n["method"], "notifications/claude/channel");
         assert_eq!(n["params"]["content"], "hello");
         assert_eq!(n["params"]["meta"]["source"], "test");
+
+        drop(client_w);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn a_written_channel_notification_is_confirmed_once_the_client_can_read_it() {
+        // A pipe too small for the line: the write can only finish once the
+        // client reads, so a confirmation sent before that would be early.
+        let (client_w, server_r) = duplex(64 * 1024);
+        let (server_w, client_r) = duplex(16);
+        let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(serve(
+            make_config(),
+            Arc::new(EchoHandler),
+            Arc::new(Activity::new()),
+            move |notifier| {
+                let written =
+                    notifier.channel_written("hello", serde_json::json!({"kind": "new_message"}));
+                let _ = written_tx.send(written);
+            },
+            server_r,
+            server_w,
+        ));
+
+        let mut written = written_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut written)
+                .await
+                .is_err(),
+            "confirmed before the client read the notification"
+        );
+
+        let mut client_r = client_r;
+        let line = read_line(&mut client_r).await;
+        let n: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(n["params"]["content"], "hello");
+        tokio::time::timeout(Duration::from_secs(5), written)
+            .await
+            .expect("never confirmed")
+            .expect("confirmation dropped");
+
+        drop(client_w);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn a_channel_notification_that_cannot_be_written_is_never_confirmed() {
+        let (client_w, server_r) = duplex(64 * 1024);
+        let (server_w, client_r) = duplex(64 * 1024);
+        drop(client_r);
+        let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(serve(
+            make_config(),
+            Arc::new(EchoHandler),
+            Arc::new(Activity::new()),
+            move |notifier| {
+                let written =
+                    notifier.channel_written("hello", serde_json::json!({"kind": "new_message"}));
+                let _ = written_tx.send(written);
+            },
+            server_r,
+            server_w,
+        ));
+
+        let written = written_rx.await.unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), written)
+            .await
+            .expect("neither confirmed nor dropped");
+        assert!(
+            outcome.is_err(),
+            "confirmed a notification nobody could read"
+        );
 
         drop(client_w);
         let _ = server.await;
