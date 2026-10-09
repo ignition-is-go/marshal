@@ -98,7 +98,8 @@ pub enum LivePushStatus {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub enum WakeStatus {
-    /// The live push landed and marked the durable inbox copy read.
+    /// The live push landed. The durable inbox copy is marked read then, or,
+    /// for a recipient that acks its own pushes, when it acks.
     NotNeeded,
     /// The recipient is connected but does not render channel pushes (a Codex
     /// bridge, or any channels-off harness), so the message will be picked up by
@@ -249,7 +250,12 @@ impl CommandHandler for SendMessage {
         // recipient sees every direct message TWICE (once live, once in the
         // inbox). Best-effort: a failed write just falls back to that harmless
         // double-surface.
-        if delivered_live {
+        //
+        // "Delivered" here only means the push was queued on the connection,
+        // so a connection that stops being read and then dies loses it, already
+        // marked read. A recipient that acks its own pushes (`acks_pushes`)
+        // is left unread until that ack instead.
+        if delivered_live && recipient.acks_pushes != Some(true) {
             let read_id = MessageRead::make_id(msg.id.0.as_ref(), recipient.id.0.as_ref());
             if let Err(e) = ctx.emit_set(&MessageRead {
                 id: MessageReadId(Arc::from(read_id.as_str())),

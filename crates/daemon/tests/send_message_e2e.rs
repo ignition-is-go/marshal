@@ -21,8 +21,8 @@ use std::{
 
 use hyphae::{Gettable, Materialize};
 use marshal_entities::{
-    GetAllSessions, LivePushStatus, Message, NotifyChannel, SendMessage, SendMessageResult,
-    Session, SessionId, WakeStatus,
+    AckMessages, AckMessagesResult, GetAllSessions, LivePushStatus, Message, MessageId,
+    MessageRead, NotifyChannel, SendMessage, SendMessageResult, Session, SessionId, WakeStatus,
 };
 use myko::{
     client::{ConnectionStatus, MykoClient, MykoProtocol},
@@ -128,6 +128,7 @@ fn make_session(id: &str) -> Session {
         host: None,
         project: None,
         channels_enabled: None,
+        acks_pushes: None,
     }
 }
 
@@ -141,6 +142,145 @@ fn message_count(ctx: &MykoServerContext) -> usize {
         .get(Message::ENTITY_NAME_STATIC)
         .map(|store| store.entries().materialize().get().len())
         .unwrap_or(0)
+}
+
+fn read_count(ctx: &MykoServerContext) -> usize {
+    ctx.registry
+        .get(MessageRead::ENTITY_NAME_STATIC)
+        .map(|store| store.entries().materialize().get().len())
+        .unwrap_or(0)
+}
+
+/// Connects sender A (`sess-alpha`) and recipient B (`bravo`) and waits until
+/// both are on the roster with a client bound. Returns both clients and the
+/// slot B's pushes land in.
+fn connect_pair(
+    addr: &str,
+    bravo: &Session,
+) -> (MykoClient, MykoClient, Arc<Mutex<Option<NotifyChannel>>>) {
+    let client_a = MykoClient::new();
+    client_a.set_protocol(MykoProtocol::JSON);
+    let client_b = MykoClient::new();
+    client_b.set_protocol(MykoProtocol::JSON);
+
+    let received: Arc<Mutex<Option<NotifyChannel>>> = Arc::new(Mutex::new(None));
+    let received_for_handler = Arc::clone(&received);
+    let notify_guard = client_b.on_command::<NotifyChannel, _>(move |cmd, _responder| {
+        *received_for_handler.lock().expect("notify mutex") = Some(cmd);
+    });
+    Box::leak(Box::new(notify_guard));
+
+    let b_sessions = client_b.watch_query::<GetAllSessions>(GetAllSessions {});
+    let a_sessions = client_a.watch_query::<GetAllSessions>(GetAllSessions {});
+    Box::leak(Box::new(b_sessions));
+
+    client_a.set_address(Some(addr.to_string()));
+    client_b.set_address(Some(addr.to_string()));
+    for (label, client) in [("A connected", &client_a), ("B connected", &client_b)] {
+        let s = client.connection_status();
+        wait_for(label, move || {
+            matches!(s.get(), ConnectionStatus::Connected(_))
+        });
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    send_session_set(&client_a, &make_session("sess-alpha"));
+    send_session_set(&client_b, bravo);
+    let bravo_id = bravo.id.clone();
+    wait_for("both sessions visible with client_ids", move || {
+        let s = a_sessions.get();
+        let a = s.iter().find(|x| x.id.0.as_ref() == "sess-alpha");
+        let b = s.iter().find(|x| x.id == bravo_id);
+        matches!((a, b), (Some(a), Some(b)) if a.client_id.is_some() && b.client_id.is_some())
+    });
+    (client_a, client_b, received)
+}
+
+fn send_and_wait(client: &MykoClient, to: &str, body: &str) -> SendMessageResult {
+    let cmd = SendMessage {
+        to_session_id: SessionId(Arc::from(to)),
+        body: body.into(),
+        as_session: None,
+    };
+    let cell = client.send_command::<SendMessage, SendMessageResult>(&cmd);
+    let waiting = cell.clone();
+    wait_for("send_command response", move || {
+        matches!(waiting.get(), Some(Ok(_)))
+    });
+    cell.get().expect("response").expect("ok")
+}
+
+/// A client that doesn't ack pushes has its pushed message marked read by the
+/// daemon, so its next inbox pull doesn't show it a second time.
+#[test]
+fn a_push_is_marked_read_for_a_session_that_does_not_ack_pushes() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    marshal_entities::link();
+    daemon::link();
+    let port = pick_free_port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let server = spawn_server(bind);
+
+    let (client_a, _client_b, received) =
+        connect_pair(&format!("ws://{bind}"), &make_session("sess-bravo"));
+    let result = send_and_wait(&client_a, "sess-bravo", "pushed");
+    assert_eq!(result.live_push, LivePushStatus::Delivered);
+    wait_for("B received the push", move || {
+        received.lock().expect("notify mutex").is_some()
+    });
+    let ctx = server.ctx.clone();
+    wait_for("the push is marked read", move || read_count(&ctx) == 1);
+
+    server.shutdown();
+}
+
+/// A client that acks pushes itself keeps a pushed message unread until it
+/// says it has shown it. A push lost on the way (the connection stopped being
+/// read, then died) stays unread for the next pull instead of being marked
+/// read unseen.
+#[test]
+fn a_session_that_acks_pushes_keeps_a_push_unread_until_it_acks() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    marshal_entities::link();
+    daemon::link();
+    let port = pick_free_port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let server = spawn_server(bind);
+
+    let mut bravo = make_session("sess-bravo-acks");
+    bravo.acks_pushes = Some(true);
+    let (client_a, client_b, received) = connect_pair(&format!("ws://{bind}"), &bravo);
+    let result = send_and_wait(&client_a, "sess-bravo-acks", "pushed");
+    assert_eq!(result.live_push, LivePushStatus::Delivered);
+    assert!(result.delivered_live);
+    {
+        let received = Arc::clone(&received);
+        wait_for("B received the push", move || {
+            received.lock().expect("notify mutex").is_some()
+        });
+    }
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        read_count(&server.ctx),
+        0,
+        "a push to a session that acks pushes must stay unread until it acks"
+    );
+
+    let push = received.lock().unwrap().take().expect("push");
+    let message_id = push
+        .meta
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .expect("push names its message");
+    let ack = client_b.send_command::<AckMessages, AckMessagesResult>(&AckMessages {
+        message_ids: vec![MessageId(Arc::from(message_id))],
+        as_session: None,
+    });
+    wait_for("B's ack response", move || matches!(ack.get(), Some(Ok(_))));
+    let ctx = server.ctx.clone();
+    wait_for("the ack marks it read", move || read_count(&ctx) == 1);
+
+    server.shutdown();
 }
 
 #[test]

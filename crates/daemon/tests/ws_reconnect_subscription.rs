@@ -114,6 +114,7 @@ fn session_set_event(id: &str) -> MEvent {
         host: None,
         project: None,
         channels_enabled: None,
+        acks_pushes: None,
     };
     MEvent::from_item(&session, MEventType::SET, &uuid::Uuid::new_v4().to_string())
 }

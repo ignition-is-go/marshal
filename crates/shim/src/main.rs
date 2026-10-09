@@ -292,6 +292,7 @@ async fn serve() -> Result<()> {
         host: Some(host.clone()),
         project: project.clone(),
         channels_enabled,
+        acks_pushes: None,
     };
     let session = Arc::new(Mutex::new(session));
 
