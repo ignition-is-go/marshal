@@ -254,6 +254,7 @@ fn register_hook_session(
             host,
             project,
             channels_enabled: None,
+            acks_pushes: None,
         },
     };
     if let Err(e) = cmd_ctx.emit_set(&session) {
@@ -305,6 +306,7 @@ fn handle_session_end(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome 
         host: None,
         project: None,
         channels_enabled: None,
+        acks_pushes: None,
     };
     if let Err(e) = cmd_ctx.emit_del(&stub) {
         log::warn!("[hook] session-end DEL failed for {sid}: {e:?}");

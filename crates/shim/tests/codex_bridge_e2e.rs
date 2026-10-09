@@ -480,6 +480,7 @@ fn hook_session(id: &str, cwd: &str) -> Session {
         }),
         project: Some("wake-canary".into()),
         channels_enabled: None,
+        acks_pushes: None,
     }
 }
 
