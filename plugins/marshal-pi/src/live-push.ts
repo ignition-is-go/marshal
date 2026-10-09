@@ -9,14 +9,18 @@ export interface LivePushTarget {
   inject(content: string): Promise<void> | void;
   /** Read, ack and render this session's unread direct messages. */
   drainInbox(): Promise<string | null>;
+  /** Mark one message read for this session. */
+  ack(messageId: string): Promise<void>;
 }
 
 export async function deliverLivePush(meta: NotifyChannelMeta, who: string, target: LivePushTarget): Promise<void> {
   const text = livePushText(meta, who);
   if (text) {
-    // The daemon marked this message read when it delivered the push. Don't
-    // drain here: that acks any other unread message without showing it.
+    // Don't drain here: that acks any other unread message without showing
+    // it. Ack the pushed message alone: the daemon marks a direct push read
+    // when it delivers it, but not a room @mention.
     await target.inject(text);
+    if (meta.message_id) await target.ack(meta.message_id).catch(() => {});
     return;
   }
   // Older daemons send no body: read it from the inbox instead.
