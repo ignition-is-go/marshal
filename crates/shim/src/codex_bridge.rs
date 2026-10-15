@@ -2415,6 +2415,7 @@ mod tests {
             client_id: (!hook_owned).then(|| myko::entities::client::ClientId(Arc::from("client"))),
             pid: 1,
             cwd: "/repo".into(),
+            agent_id: None,
             git_branch: None,
             current_task: None,
             session_name: None,
