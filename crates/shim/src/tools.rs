@@ -645,8 +645,8 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
             description: "Create or join an ad-hoc room. Reserved prefixes (everyone, host:, op:, project:) are blocked — those auto-rooms are managed by the daemon. Returns whether this call created the room and whether it added a new membership row.".into(),
             input_schema: write_schema(is_codex,
                 json!({
-                    "name":        { "type": "string", "description": "Display name; slugified into the room id (e.g. \"Frontend Redesign\" -> frontend-redesign)." },
-                    "description": { "type": "string", "description": "Optional human-readable purpose." }
+                    "name":        { "type": "string", "description": "Display name; slugified into the room id (e.g. \"Frontend Redesign\" -> frontend-redesign). At most 64 characters. Rejected: angle brackets and the listed lookalike angle brackets, ampersands, double quotes, backticks, control characters and line separators, bidi controls, and a blocklist of the invisible and formatting characters known to hide text (variation selector 16 is allowed)." },
+                    "description": { "type": "string", "description": "Optional human-readable purpose. At most 256 characters; same character rule as name." }
                 }),
                 &["name"],
             ),
