@@ -27,10 +27,10 @@ Add an MCP entry — one entry per Claude Code config; every session uses the sa
 
 The shim auto-starts the daemon on first connect via a detached background process. No systemd needed.
 
-To run the daemon manually for debugging:
+To run the daemon manually for debugging (it stays in the foreground; `marshal-daemon --help` lists the environment it reads):
 
 ```
-marshal-daemon --foreground
+marshal-daemon
 ```
 
 ## State
