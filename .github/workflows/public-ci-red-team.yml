@@ -130,3 +130,81 @@ jobs:
 
       - name: Hold for runtime inspection
         run: sleep 60
+
+  windows-boundary-probes:
+    name: Windows VM boundary probes
+    runs-on: public-ci-windows
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify disposable VM identity and capacity
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $computer = Get-CimInstance Win32_ComputerSystem
+          $os = Get-CimInstance Win32_OperatingSystem
+          $computer | Format-List Manufacturer, Model, NumberOfLogicalProcessors, TotalPhysicalMemory
+          $os | Format-List Caption, Version, BuildNumber
+          if ($computer.NumberOfLogicalProcessors -gt 16) { throw 'Guest exceeded its 16-vCPU boundary' }
+          if ($computer.TotalPhysicalMemory -gt 44GB) { throw 'Guest exceeded its 40-GiB memory boundary' }
+          if (-not (Test-Path 'C:\actions-runner\run.cmd')) { throw 'Pinned runner is absent' }
+
+      - name: Reject host resources and unexpected mounts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $forbidden = @(
+            'C:\host',
+            'C:\ProgramData\docker\pipe\docker_engine',
+            '\\.\pipe\docker_engine',
+            '\\.\pipe\containerd-containerd',
+            '\\.\PhysicalDrive1'
+          )
+          foreach ($path in $forbidden) {
+            if (Test-Path $path) { throw "Forbidden host resource is visible: $path" }
+          }
+          $disks = @(Get-CimInstance Win32_DiskDrive)
+          if ($disks.Count -ne 1) {
+            throw "Unexpected physical disks: $($disks.DeviceID -join ', ')"
+          }
+
+      - name: Reject private and metadata network reachability
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Assert-TcpBlocked([string]$HostName, [int]$Port) {
+            $client = [Net.Sockets.TcpClient]::new()
+            try {
+              $connect = $client.ConnectAsync($HostName, $Port)
+              if ($connect.Wait(3000) -and $client.Connected) {
+                throw "Private endpoint is reachable: ${HostName}:$Port"
+              }
+            } finally {
+              $client.Dispose()
+            }
+          }
+          Assert-TcpBlocked 192.168.1.159 6443
+          Assert-TcpBlocked 192.168.1.30 22
+          Assert-TcpBlocked 192.168.1.31 445
+          Assert-TcpBlocked 10.43.0.1 443
+          Assert-TcpBlocked 169.254.169.254 80
+          Assert-TcpBlocked 100.64.0.1 443
+          $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 https://api.github.com/meta
+          if ($response.StatusCode -ne 200) { throw 'Public HTTPS egress failed' }
+
+      - name: Reject infrastructure credentials and cross-job persistence
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $forbiddenNames = 'AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AZURE_CLIENT_SECRET','KUBECONFIG','TF_TOKEN_app_terraform_io','PVE_API_TOKEN'
+          foreach ($name in $forbiddenNames) {
+            if (Test-Path "env:$name") { throw "Infrastructure credential is exposed: $name" }
+          }
+          $marker = 'C:\actions-runner\_work\.public-ci-windows-red-team-marker'
+          if (Test-Path $marker) { throw 'State persisted from an earlier job' }
+          Set-Content -Path $marker -Value $env:GITHUB_RUN_ID
+
+      - name: Hold for runtime inspection
+        shell: powershell
+        run: Start-Sleep -Seconds 60
