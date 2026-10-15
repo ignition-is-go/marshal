@@ -51,11 +51,16 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ignition-is-go/pulse-actions/actions/setup-rust@v1.1.1
         with:
           # Public runners are disposable and intentionally have no ambient
           # Rust components. The release script formats the stamped manifests.
           components: rustfmt
+          cache-shared-key: marshal-release-linux-v1
+          compiler-cache-endpoint: ${{ secrets.CI_CACHE_ENDPOINT }}
+          compiler-cache-bucket: ${{ secrets.CI_CACHE_BUCKET }}
+          compiler-cache-access-key: ${{ secrets.CI_CACHE_ACCESS_KEY }}
+          compiler-cache-secret-key: ${{ secrets.CI_CACHE_SECRET_KEY }}
       - name: Install release system dependencies
         run: |
           # The public runner network permits Ubuntu mirrors over HTTPS only.
@@ -67,7 +72,6 @@ jobs:
             build-essential gh jq libssl-dev pkg-config
           gh --version
           jq --version
-      - uses: Swatinem/rust-cache@v2
       # Prebuilt trunk (fast) — builds the marshal-ui WASM bundle shipped as a
       # release asset below.
       - uses: taiki-e/install-action@v2
@@ -271,8 +275,13 @@ jobs:
           npm --version
           test "$(node -p 'Number(process.versions.node.split(`.`)[0]) >= 22')" = true
           test "$(npm --version | awk -F. '{ print ($1 > 11 || ($1 == 11 && $2 >= 5)) ? "true" : "false" }')" = true
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ignition-is-go/pulse-actions/actions/setup-rust@v1.1.1
+        with:
+          cache-shared-key: marshal-publish-linux-v1
+          compiler-cache-endpoint: ${{ secrets.CI_CACHE_ENDPOINT }}
+          compiler-cache-bucket: ${{ secrets.CI_CACHE_BUCKET }}
+          compiler-cache-access-key: ${{ secrets.CI_CACHE_ACCESS_KEY }}
+          compiler-cache-secret-key: ${{ secrets.CI_CACHE_SECRET_KEY }}
       - run: cargo install cargo-flux
       - name: Publish crates and plugins
         run: cargo flux run publish
@@ -296,8 +305,13 @@ jobs:
         with:
           # Build the exact commit the release job stamped + tagged.
           ref: v${{ needs.release.outputs.version }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ignition-is-go/pulse-actions/actions/setup-rust@v1.1.1
+        with:
+          cache-shared-key: marshal-release-macos-v1
+          compiler-cache-endpoint: ${{ secrets.CI_CACHE_ENDPOINT }}
+          compiler-cache-bucket: ${{ secrets.CI_CACHE_BUCKET }}
+          compiler-cache-access-key: ${{ secrets.CI_CACHE_ACCESS_KEY }}
+          compiler-cache-secret-key: ${{ secrets.CI_CACHE_SECRET_KEY }}
       - name: Build + upload macOS marshal-shim
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
