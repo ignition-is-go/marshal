@@ -179,7 +179,7 @@ fn http_post(base: &str, path: &str, body: &str) -> Option<String> {
     stream.set_read_timeout(Some(TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(TIMEOUT)).ok()?;
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
@@ -242,6 +242,55 @@ fn url_q(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_requests_preserve_the_non_default_port_in_host() {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let authority = listener.local_addr().unwrap().to_string();
+        let expected = format!("Host: {authority}\r\n");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                assert!(!line.is_empty(), "request ended before headers");
+                headers.push_str(&line);
+            }
+            let mut body = [0; 2];
+            reader.read_exact(&mut body).unwrap();
+            assert_eq!(&body, b"{}");
+            let status = if headers.contains(&expected) {
+                "200 OK"
+            } else {
+                "400 Bad Request"
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            )
+            .unwrap();
+        });
+        let response = http_post(
+            &format!("http://{authority}"),
+            "/hook/session-register",
+            "{}",
+        );
+        server.join().unwrap();
+        assert_eq!(
+            response.as_deref(),
+            Some("ok"),
+            "strict HTTP authority validation rejected the hook request"
+        );
+    }
 
     #[test]
     fn derives_hook_base_from_daemon_authority() {
