@@ -260,9 +260,15 @@ async function init(pi: ExtensionAPI) {
   // ── Agent state → marshal status ───────────────────────────────────────
 
   pi.on("before_agent_start", async (event, _ctx) => {
+    // pi 1.2.0 also fires this for a run started by pi.sendMessage(...,
+    // { triggerTurn: true }), such as a live push. That event has messageType
+    // "custom" and no prompt. The run continues the last prompt's work, so it
+    // keeps that prompt's activity and status.
+    const prompt = (event as { prompt?: unknown }).prompt;
+    if (typeof prompt !== "string") return;
     resetActivity();
-    lastPrompt = event.prompt;
-    pushMarshalStatus(`🤔 "${truncate(event.prompt, 80)}"`);
+    lastPrompt = prompt;
+    pushMarshalStatus(`🤔 "${truncate(prompt, 80)}"`);
   });
 
   pi.on("agent_start", async (_event, _ctx) => {
