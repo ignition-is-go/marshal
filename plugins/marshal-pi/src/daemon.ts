@@ -41,6 +41,7 @@ import {
   type SessionNicknameItem,
 } from "./entities.ts";
 import type { Identity } from "./identity.ts";
+import { InboxPuller, type InboxPull } from "./inbox-pull.ts";
 
 const LIVENESS_INTERVAL_MS = 5_000;
 const INBOX_PULL_LIMIT = 20;
@@ -82,7 +83,11 @@ export class MarshalDaemon {
   private roster: SessionItem[] = [];
   private nicknames: SessionNicknameItem[] = [];
 
-  private readonly draining = new Map<string, Promise<string | null>>();
+  private readonly inbox = new InboxPuller<MessageView>({
+    read: (sessionId) => this.readUnread(sessionId),
+    ack: async (sessionId, messageIds) => { await this.sendForInbox(ackMessages(sessionId, messageIds)); },
+    render: (messages) => this.renderInbox(messages),
+  });
   private notifyHandler: NotifyHandler | null = null;
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private started = false;
@@ -254,13 +259,23 @@ export class MarshalDaemon {
     return `- [${m.messageId}] ${this.senderLabel(m.fromSessionId)}: ${m.body}`;
   }
 
-  drainInbox(sessionId: string): Promise<string | null> {
+  /**
+   * Read the unread inbox without acking it. Commit the pull once its text is
+   * in the conversation, or release it if it never gets there, so a message is
+   * never marked read without having been shown.
+   */
+  pullInbox(sessionId: string): Promise<InboxPull | null> {
     if (!this.connected) return Promise.resolve(null);
-    const prev = this.draining.get(sessionId) ?? Promise.resolve<string | null>(null);
-    const next = prev.catch(() => null).then(() => this.drainInboxInner(sessionId));
-    this.draining.set(sessionId, next);
-    void next.finally(() => { if (this.draining.get(sessionId) === next) this.draining.delete(sessionId); });
-    return next;
+    return this.inbox.pull(sessionId).catch(() => null);
+  }
+
+  /** Pull and commit in one step: the messages are acked before the caller
+   *  shows them. Only the live-push path still uses it. */
+  async drainInbox(sessionId: string): Promise<string | null> {
+    const pull = await this.pullInbox(sessionId);
+    if (!pull) return null;
+    await pull.commit().catch(() => this.log("inbox ack failed"));
+    return pull.text;
   }
 
   nicknameFor(sessionId: string): string {
@@ -275,7 +290,7 @@ export class MarshalDaemon {
 
   // ── Internals ──────────────────────────────────────────────────────────
 
-  private async drainInboxInner(sessionId: string): Promise<string | null> {
+  private async readUnread(sessionId: string): Promise<MessageView[] | null> {
     let result: ReadMessagesResult | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -293,13 +308,7 @@ export class MarshalDaemon {
       if (result.messages && result.messages.length > 0) break;
       if (attempt < 2) await new Promise((r) => setTimeout(r, 100 * (attempt + 1)));
     }
-    if (!result?.messages?.length) return null;
-
-    const block = this.renderInbox(result.messages);
-    try {
-      await this.sendForInbox(ackMessages(sessionId, result.messages.map((m) => m.messageId)));
-    } catch { this.log("inbox ack failed"); }
-    return block;
+    return result?.messages?.length ? result.messages : null;
   }
 
   private renderInbox(messages: MessageView[]): string {
