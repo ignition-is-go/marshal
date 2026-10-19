@@ -64,10 +64,19 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::{
-    WebSocketStream, accept_async, connect_async, tungstenite::Message as WebSocketMessage,
+    WebSocketStream, accept_async_with_config, connect_async_with_config,
+    tungstenite::{Message as WebSocketMessage, protocol::WebSocketConfig},
 };
 #[cfg(unix)]
-use tokio_tungstenite::{client_async, tungstenite::client::IntoClientRequest};
+use tokio_tungstenite::{client_async_with_config, tungstenite::client::IntoClientRequest};
+
+// Plugin catalogs can exceed tungstenite's default 16 MiB frame limit. Match
+// the app-server's large local RPC payloads while retaining a bounded limit.
+fn app_server_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_frame_size(Some(128 * 1024 * 1024))
+        .max_message_size(Some(128 * 1024 * 1024))
+}
 
 const DEFAULT_POLL: Duration = Duration::from_millis(750);
 const WAKE_COALESCE_WINDOW: Duration = Duration::from_secs(30);
@@ -701,18 +710,20 @@ async fn run_unix_tui_proxy(
         let launcher = launcher.clone();
         tokio::spawn(async move {
             let result = async {
-                let downstream = accept_async(stream)
-                    .await
-                    .context("accepting Codex TUI WebSocket")?;
+                let downstream =
+                    accept_async_with_config(stream, Some(app_server_websocket_config()))
+                        .await
+                        .context("accepting Codex TUI WebSocket")?;
                 let stream = tokio::net::UnixStream::connect(&upstream)
                     .await
                     .with_context(|| format!("connecting TUI proxy to {}", upstream.display()))?;
                 let request = "ws://localhost/"
                     .into_client_request()
                     .context("building TUI proxy upstream request")?;
-                let (upstream, _) = client_async(request, stream)
-                    .await
-                    .context("upgrading TUI proxy upstream WebSocket")?;
+                let (upstream, _) =
+                    client_async_with_config(request, stream, Some(app_server_websocket_config()))
+                        .await
+                        .context("upgrading TUI proxy upstream WebSocket")?;
                 relay_tui_websocket(downstream, upstream, launcher).await
             }
             .await;
@@ -737,12 +748,17 @@ async fn run_tcp_tui_proxy(
         let launcher = launcher.clone();
         tokio::spawn(async move {
             let result = async {
-                let downstream = accept_async(stream)
-                    .await
-                    .context("accepting Codex TUI WebSocket")?;
-                let (upstream, _) = connect_async(&upstream)
-                    .await
-                    .with_context(|| format!("connecting TUI proxy to {upstream}"))?;
+                let downstream =
+                    accept_async_with_config(stream, Some(app_server_websocket_config()))
+                        .await
+                        .context("accepting Codex TUI WebSocket")?;
+                let (upstream, _) = connect_async_with_config(
+                    &upstream,
+                    Some(app_server_websocket_config()),
+                    false,
+                )
+                .await
+                .with_context(|| format!("connecting TUI proxy to {upstream}"))?;
                 relay_tui_websocket(downstream, upstream, launcher).await
             }
             .await;
@@ -1356,7 +1372,11 @@ async fn watch_app_server_registrations(
     loop {
         let result = match &app_server {
             AppServerEndpoint::WebSocket(endpoint) => {
-                let connection = tokio::time::timeout(RPC_TIMEOUT, connect_async(endpoint)).await;
+                let connection = tokio::time::timeout(
+                    RPC_TIMEOUT,
+                    connect_async_with_config(endpoint, Some(app_server_websocket_config()), false),
+                )
+                .await;
                 match connection {
                     Ok(Ok((mut websocket, _))) => {
                         monitor_registration_connection(
@@ -1417,10 +1437,13 @@ async fn monitor_registrations_over_unix(
     let request = "ws://localhost/"
         .into_client_request()
         .context("building app-server WebSocket request")?;
-    let (mut websocket, _) = tokio::time::timeout(RPC_TIMEOUT, client_async(request, stream))
-        .await
-        .context("timed out upgrading Codex app-server connection")?
-        .context("upgrading Codex app-server Unix socket to WebSocket")?;
+    let (mut websocket, _) = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_async_with_config(request, stream, Some(app_server_websocket_config())),
+    )
+    .await
+    .context("timed out upgrading Codex app-server connection")?
+    .context("upgrading Codex app-server Unix socket to WebSocket")?;
     monitor_registration_connection(
         &mut websocket,
         hook_base,
@@ -2010,10 +2033,13 @@ fn unread_local_codex_sessions(
 async fn start_thread(app_server: &AppServerEndpoint, session_id: &SessionId) -> Result<String> {
     match app_server {
         AppServerEndpoint::WebSocket(endpoint) => {
-            let (mut websocket, _) = tokio::time::timeout(RPC_TIMEOUT, connect_async(endpoint))
-                .await
-                .context("timed out connecting to Codex app-server")?
-                .with_context(|| format!("connecting to {endpoint}"))?;
+            let (mut websocket, _) = tokio::time::timeout(
+                RPC_TIMEOUT,
+                connect_async_with_config(endpoint, Some(app_server_websocket_config()), false),
+            )
+            .await
+            .context("timed out connecting to Codex app-server")?
+            .with_context(|| format!("connecting to {endpoint}"))?;
             initialize_and_start(&mut websocket, session_id).await
         }
         AppServerEndpoint::Unix(socket) => start_thread_over_unix(socket, session_id).await,
@@ -2034,10 +2060,13 @@ async fn start_thread_over_unix(socket: &Path, session_id: &SessionId) -> Result
     let request = "ws://localhost/"
         .into_client_request()
         .context("building app-server WebSocket request")?;
-    let (mut websocket, _) = tokio::time::timeout(RPC_TIMEOUT, client_async(request, stream))
-        .await
-        .context("timed out upgrading Codex app-server connection")?
-        .context("upgrading Codex app-server Unix socket to WebSocket")?;
+    let (mut websocket, _) = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_async_with_config(request, stream, Some(app_server_websocket_config())),
+    )
+    .await
+    .context("timed out upgrading Codex app-server connection")?
+    .context("upgrading Codex app-server Unix socket to WebSocket")?;
 
     initialize_and_start(&mut websocket, session_id).await
 }
@@ -2207,7 +2236,7 @@ mod tests {
     use super::*;
     use marshal_entities::{HostInfo, MessageId, MessageReadId};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::{accept_async, connect_async};
 
     #[test]
     fn detects_explicit_codex_working_directory_arguments() {
@@ -3163,5 +3192,66 @@ mod tests {
 
         proxy.abort();
         app_server.await.unwrap();
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tui_proxy_relays_plugin_catalog_larger_than_default_frame_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let app_path = directory.path().join("app.sock");
+        let proxy_path = directory.path().join("proxy.sock");
+        let listener = tokio::net::UnixListener::bind(&app_path).unwrap();
+        let proxy = spawn_tui_proxy(
+            Some(AppServerEndpoint::Unix(proxy_path.clone())),
+            AppServerEndpoint::Unix(app_path),
+            None,
+        )
+        .await
+        .unwrap();
+        let payload = json!({"id": 1, "result": "x".repeat(17 * 1024 * 1024)}).to_string();
+        let expected_len = payload.len();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            ws.next().await.unwrap().unwrap();
+            ws.send(WebSocketMessage::Text(payload.into()))
+                .await
+                .unwrap();
+            ws.next().await.unwrap().unwrap();
+            ws.send(WebSocketMessage::Text("{\"id\":2,\"result\":true}".into()))
+                .await
+                .unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(proxy_path).await.unwrap();
+        let (mut tui, _) = client_async_with_config(
+            "ws://localhost/".into_client_request().unwrap(),
+            stream,
+            Some(app_server_websocket_config()),
+        )
+        .await
+        .unwrap();
+        tui.send(WebSocketMessage::Text(
+            "{\"id\":1,\"method\":\"plugin/list\"}".into(),
+        ))
+        .await
+        .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(10), tui.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.to_text().unwrap().len(), expected_len);
+        tui.send(WebSocketMessage::Text(
+            "{\"id\":2,\"method\":\"thread/loaded/list\"}".into(),
+        ))
+        .await
+        .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), tui.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.to_text().unwrap(), "{\"id\":2,\"result\":true}");
+        server.await.unwrap();
+        proxy.abort();
     }
 }
