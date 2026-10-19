@@ -32,11 +32,9 @@ use myko::{core::item::Eventable, server::MykoServerContext, utils::downcast_ite
 /// to survive a WHOLE-FLEET reconnect after a daemon restart: on restart every
 /// session replays from disk carrying a stale `client_id`, and the in-memory
 /// `disconnected_since` map is empty, so all sessions enter the grace at once.
-/// Too short and a slow-to-redial shim gets reaped — cascading its UNREAD
-/// direct messages away (belongs_to(Session), review R5) — before it
-/// reconnects to read them. 60s gives the fleet room to re-dial; a genuinely
-/// dead session just lingers that long (and the roster's liveness fields show
-/// it going stale).
+/// 60s gives a slow-to-redial shim room to reconnect; a genuinely dead session
+/// just lingers that long (and the roster's liveness fields show it going
+/// stale).
 pub const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// Activity backstop for pull/hook sessions (`client_id: None`). They have no
@@ -47,18 +45,12 @@ pub const STALE_AFTER: Duration = Duration::from_secs(60);
 ///
 /// Safe by construction: every prompt-submit hook idempotently re-registers
 /// the session (see `hooks::register_hook_session`), so a live TUI idle past
-/// the backstop gets its row repaired on its next prompt. The cost of a
-/// false-positive reap is bounded — unread direct messages older than the
-/// backstop cascade away with the row — while the cost of no backstop is
-/// unbounded store growth. Sized generously above any plausible think-time
-/// gap of a live session.
+/// the backstop gets its row repaired on its next prompt. Sized generously
+/// above any plausible think-time gap of a live session.
 pub const PULL_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Messages older than this are pruned by `sweep_messages`, regardless of
-/// recipient. Direct messages already cascade away with a DEL'd recipient
-/// session; this bounds the ones that DON'T — broadcasts addressed to the
-/// never-DEL'd `everyone`/`op:`/`project:` rooms, which otherwise accumulate
-/// forever (review R6/D). DELing a Message cascades its `MessageRead` rows.
+/// recipient. DELing a Message cascades its `MessageRead` rows.
 pub const MESSAGE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Run the message-retention sweep every N session-sweeper ticks. The scan is

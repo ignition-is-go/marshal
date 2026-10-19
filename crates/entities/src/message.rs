@@ -2,7 +2,7 @@ use myko::myko_item;
 use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
 
 use crate::room::Room;
-use crate::session::{Session, SessionId};
+use crate::session::SessionId;
 
 /// Maximum body size placed directly into a model-facing notification.
 ///
@@ -54,14 +54,14 @@ pub struct Message {
     /// pull it. In the pull-via-hook model the recipient reads on its
     /// next turn — which can be after the sender's SessionEnd — so
     /// cascading on the sender would silently delete unread messages in
-    /// that window. The message's lifetime is governed by the *recipient*
-    /// instead (the `to_session_id` / `to_room_id` cascades below).
+    /// that window. Message retention governs its lifetime instead.
     pub from_session_id: SessionId,
 
-    /// Direct recipient — set for 1:1 sends, `None` for broadcasts.
-    /// Cascade-DELs the message when the recipient session is DEL'd.
+    /// Direct recipient — set for 1:1 sends, `None` for broadcasts. This is
+    /// deliberately not a `belongs_to(Session)` cascade: session presence is
+    /// ephemeral, while a resumable conversation's inbox remains durable
+    /// until message retention deletes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[belongs_to(Session)]
     pub to_session_id: Option<SessionId>,
 
     /// Broadcast recipient — set for room sends, `None` for direct
@@ -75,8 +75,8 @@ pub struct Message {
     /// When this direct message was addressed to a *human* — via their operator
     /// identity (the `op:`/`human:`/email tier of recipient resolution) rather
     /// than to one specific agent — this holds that operator string (e.g.
-    /// `max@lucid.rocks`). The message is still routed to, and cascades on, the
-    /// operator's most-active session via `to_session_id`; this marks it as
+    /// `max@lucid.rocks`). The message is still routed to the operator's
+    /// most-active session via `to_session_id`; this marks it as
     /// human-addressed so the receiving agent surfaces it to its operator
     /// instead of treating it as ordinary peer chatter, and the UI console can
     /// toast it for that operator regardless of which agent it landed on. `None`
