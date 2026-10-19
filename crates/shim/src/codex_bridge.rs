@@ -70,8 +70,8 @@ use tokio_tungstenite::{
 #[cfg(unix)]
 use tokio_tungstenite::{client_async_with_config, tungstenite::client::IntoClientRequest};
 
-// Plugin catalogs can exceed tungstenite's default 16 MiB frame limit. Match
-// the app-server's large local RPC payloads while retaining a bounded limit.
+// Match Codex 0.163.0's REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE:
+// https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/app-server-client/src/remote.rs#L67
 fn app_server_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_frame_size(Some(128 * 1024 * 1024))
