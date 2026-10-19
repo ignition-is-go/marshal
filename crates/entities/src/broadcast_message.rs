@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use crate::{
     message::{CONTEXT_BODY_MAX_CHARS, Message, MessageId, context_preview},
+    message_read::{MessageRead, MessageReadId},
     room::{GetAllRooms, Room, RoomId},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
@@ -225,9 +226,14 @@ impl CommandHandler for BroadcastMessage {
             if target.channels_enabled != Some(false)
                 && let Some(cid) = target.client_id.as_ref()
             {
-                crate::send_message::push_to_client(
+                let pushed = crate::send_message::push_to_client(
                     cid.0.as_ref(),
-                    mention_push_content(&from_nickname, &room.name, to_operator.as_deref()),
+                    mention_push_content(
+                        &from_nickname,
+                        &room.name,
+                        to_operator.as_deref(),
+                        body_truncated.then_some(ping.id.0.as_ref()),
+                    ),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "mention",
@@ -242,6 +248,20 @@ impl CommandHandler for BroadcastMessage {
                         "sent_at": now,
                     }),
                 );
+                // Same dedup as SendMessage: a pushed ping is marked read, so
+                // the per-turn inbox (which reads unread direct messages, and
+                // the ping is one) doesn't show it a second time.
+                if pushed {
+                    let read_id = MessageRead::make_id(ping.id.0.as_ref(), target.id.0.as_ref());
+                    if let Err(e) = ctx.emit_set(&MessageRead {
+                        id: MessageReadId(Arc::from(read_id.as_str())),
+                        message_id: ping.id.clone(),
+                        session_id: target.id.clone(),
+                        read_at: now,
+                    }) {
+                        log::warn!("[broadcast] mention inbox dedup write failed: {e:?}");
+                    }
+                }
             }
             mentioned.push(target.id.clone());
         }
@@ -347,14 +367,16 @@ pub(crate) fn mention_push_content(
     from_nickname: &str,
     room_name: &str,
     to_operator: Option<&str>,
+    truncated_id: Option<&str>,
 ) -> String {
-    match to_operator {
+    let banner = match to_operator {
         Some(op) => format!(
             "{} {from_nickname} mentioned you in {room_name}.",
             crate::message::operator_relay_notice(op)
         ),
         None => format!("{from_nickname} mentioned you in {room_name}"),
-    }
+    };
+    crate::send_message::with_truncated_notice(banner, truncated_id)
 }
 
 #[cfg(test)]
@@ -364,15 +386,23 @@ mod push_content_tests {
     #[test]
     fn agent_mention_banner_is_unchanged() {
         assert_eq!(
-            mention_push_content("fleet-wolf", "everyone", None),
+            mention_push_content("fleet-wolf", "everyone", None, None),
             "fleet-wolf mentioned you in everyone"
         );
     }
 
     #[test]
     fn human_mention_banner_opens_with_the_relay_contract() {
-        let content = mention_push_content("fleet-wolf", "everyone", Some("max@lucid.rocks"));
+        let content = mention_push_content("fleet-wolf", "everyone", Some("max@lucid.rocks"), None);
         assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
         assert!(content.ends_with("fleet-wolf mentioned you in everyone."));
+    }
+
+    #[test]
+    fn a_cut_preview_says_where_the_full_mention_is() {
+        assert_eq!(
+            mention_push_content("fleet-wolf", "everyone", None, Some("m-1")),
+            "fleet-wolf mentioned you in everyone [truncated; full message m-1 remains in marshal://messages]"
+        );
     }
 }

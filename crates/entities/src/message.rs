@@ -33,6 +33,14 @@ pub fn operator_relay_notice(operator: &str) -> String {
     )
 }
 
+/// Where to read the whole of a message whose preview was cut. Shared by the
+/// live pushes and the hook inbox so every surface says it the same way:
+/// without it, an agent that sees only the preview has no hint the rest
+/// exists.
+pub fn truncated_notice(message_id: &str) -> String {
+    format!("[truncated; full message {message_id} remains in marshal://messages]")
+}
+
 /// A message in the bus. Polymorphic recipient — either a peer session
 /// (direct send) or a room (broadcast). Exactly one of `to_session_id`
 /// and `to_room_id` is set; serde defaults to `None` on the absent
