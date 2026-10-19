@@ -364,9 +364,11 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
             .unwrap_or_else(|_| marshal_entities::nickname(m.from_session_id.0.as_ref()));
         let (preview, truncated) = context_preview(&m.body, per_message_chars);
         let head = format!("- from {}: ", peer_handle(&sender));
+        // The id is escaped like a handle: SendMessage mints a UUID, but the
+        // store takes any SET.
         let notice = format!(
             "  {}\n",
-            marshal_entities::truncated_notice(m.message_id.0.as_ref())
+            marshal_entities::truncated_notice(&peer_handle(m.message_id.0.as_ref()))
         );
         // Escaping grows text up to fivefold, so the char cap alone doesn't
         // bound the line. No line may outgrow the whole budget: the first
