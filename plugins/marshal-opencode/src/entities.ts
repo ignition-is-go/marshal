@@ -228,10 +228,13 @@ export const NOTIFY_CHANNEL_COMMAND_ID = "NotifyChannel";
 export interface NotifyChannelMeta {
   source?: string;
   kind?: string;
+  message_id?: string;
   from_session?: string;
   from_nickname?: string;
   to_session?: string;
   body?: string;
+  /** True when `body` is a preview the daemon cut short. */
+  body_truncated?: boolean;
   sent_at?: number;
 }
 
