@@ -12,14 +12,15 @@
 use myko::myko_item;
 use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
 
-use crate::{message::Message, session::Session};
+use crate::message::Message;
 
 #[myko_item]
 pub struct MessageRead {
     #[belongs_to(Message)]
     pub message_id: crate::message::MessageId,
 
-    #[belongs_to(Session)]
+    // A session row records ephemeral presence. A resumable conversation's
+    // read state must survive that row being deleted and recreated.
     pub session_id: crate::session::SessionId,
 
     /// Wall-clock millis when this session marked the message read.

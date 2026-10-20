@@ -16,7 +16,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use marshal_entities::{GetAllMessages, GetAllSessions, Message, SendMessage, Session, SessionId};
+use marshal_entities::{
+    GetAllMessageReads, GetAllMessages, GetAllSessions, Message, MessageRead, SendMessage, Session,
+    SessionId,
+};
 use myko::{
     command::{CommandContext, CommandHandler},
     entities::client::ClientId,
@@ -228,6 +231,117 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     assert!(
         !body2.contains("HOOK-E2E-PROBE-marker"),
         "message re-surfaced after a successful hook write — the post-write ack didn't run; got: {body2:?}"
+    );
+
+    let stored: Vec<Arc<Message>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessages {})
+        .expect("query acknowledged message");
+    let acknowledged = stored
+        .iter()
+        .find(|message| message.body == "HOOK-E2E-PROBE-marker")
+        .expect("acknowledged Message must remain stored")
+        .clone();
+    let reads: Vec<Arc<MessageRead>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessageReads {})
+        .expect("query message reads");
+    assert!(
+        reads.iter().any(|read| {
+            read.message_id == acknowledged.id
+                && read.session_id == SessionId(Arc::from("recipient"))
+        }),
+        "successful hook write must persist its recipient read receipt"
+    );
+
+    SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "HOOK-E2E-QUEUED-marker".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists unread message before session end");
+
+    // Codex resumes a thread under the same session id after the terminal has
+    // emitted SessionEnd. Messages and read receipts outlive that ephemeral
+    // presence row, so ending the session must neither lose unread inbox nor
+    // turn acknowledged history back into unread inbox.
+    let ended = http_post(addr, "/hook/session-end", r#"{"session_id":"recipient"}"#);
+    assert_eq!(ended, "");
+    let after_end: Vec<Arc<Message>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessages {})
+        .expect("query messages after session end");
+    assert!(
+        after_end
+            .iter()
+            .any(|message| message.id == acknowledged.id),
+        "session end must retain acknowledged direct messages"
+    );
+    assert!(
+        after_end
+            .iter()
+            .any(|message| message.body == "HOOK-E2E-QUEUED-marker"),
+        "session end must retain unread direct messages"
+    );
+    let reads_after_end: Vec<Arc<MessageRead>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessageReads {})
+        .expect("query message reads after session end");
+    assert!(
+        reads_after_end
+            .iter()
+            .any(|read| read.message_id == acknowledged.id),
+        "session end must retain read receipts for durable messages"
+    );
+    let resumed = http_post(
+        addr,
+        "/hook/session-register?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    let resumed: serde_json::Value =
+        serde_json::from_str(&resumed).expect("resumed registration identity JSON");
+    assert_eq!(resumed["session_id"], "recipient");
+    let after_resume = http_post(
+        addr,
+        "/hook/prompt-submit",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert!(
+        !after_resume.contains("HOOK-E2E-PROBE-marker"),
+        "acknowledged message replayed after same-id session resume; got: {after_resume:?}"
+    );
+    assert!(
+        after_resume.contains("HOOK-E2E-QUEUED-marker"),
+        "unread message queued before session end did not surface after resume; got: {after_resume:?}"
+    );
+
+    SendMessage {
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "HOOK-E2E-NEW-marker".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists new message after resume");
+    let new_after_resume = http_post(
+        addr,
+        "/hook/prompt-submit",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert!(
+        new_after_resume.contains("HOOK-E2E-NEW-marker"),
+        "new unread message did not surface after resume; got: {new_after_resume:?}"
+    );
+
+    let deleted = MEvent::from_item(
+        acknowledged.as_ref(),
+        MEventType::DEL,
+        &Uuid::new_v4().to_string(),
+    );
+    ctx.apply_event_batch(vec![deleted])
+        .expect("delete acknowledged Message");
+    let reads: Vec<Arc<MessageRead>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessageReads {})
+        .expect("query message reads after Message deletion");
+    assert!(
+        reads.iter().all(|read| read.message_id != acknowledged.id),
+        "deleting a Message must cascade-delete its read receipts"
     );
 
     // Automatic delivery carries a bounded, UTF-8-safe preview. The complete
