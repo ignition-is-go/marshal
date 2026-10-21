@@ -21,10 +21,14 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
       - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ignition-is-go/pulse-actions/actions/setup-rust@v1.1.1
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+          cache-shared-key: marshal-ci-linux-v1
+          compiler-cache-endpoint: ${{ secrets.CI_CACHE_ENDPOINT }}
+          compiler-cache-bucket: ${{ secrets.CI_CACHE_BUCKET }}
+          compiler-cache-access-key: ${{ secrets.CI_CACHE_ACCESS_KEY }}
+          compiler-cache-secret-key: ${{ secrets.CI_CACHE_SECRET_KEY }}
 
       - run: cargo install cargo-flux
       - uses: actions/setup-node@v4
@@ -54,10 +58,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ignition-is-go/pulse-actions/actions/setup-rust@v1.1.1
         with:
           targets: x86_64-pc-windows-gnu
-      - uses: Swatinem/rust-cache@v2
+          cache-shared-key: marshal-ci-windows-cross-v1
+          compiler-cache-endpoint: ${{ secrets.CI_CACHE_ENDPOINT }}
+          compiler-cache-bucket: ${{ secrets.CI_CACHE_BUCKET }}
+          compiler-cache-access-key: ${{ secrets.CI_CACHE_ACCESS_KEY }}
+          compiler-cache-secret-key: ${{ secrets.CI_CACHE_SECRET_KEY }}
       - name: Install mingw-w64 cross linker
         # Bound apt's network waits (Acquire timeouts + retries) so a flaky
         # azure.archive.ubuntu.com mirror can't hang the job indefinitely —
