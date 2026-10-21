@@ -58,6 +58,7 @@ mod tests {
             client_id: None,
             pid: 4321,
             cwd: "/home/x".into(),
+            agent_id: None,
             git_branch: None,
             current_task: None,
             session_name: None,
@@ -89,6 +90,7 @@ mod tests {
             client_id: None,
             pid: 1,
             cwd: "/repo".into(),
+            agent_id: Some("session:pulse-workspace".into()),
             git_branch: None,
             current_task: None,
             session_name: Some("auth refactor".into()),
@@ -108,6 +110,7 @@ mod tests {
             channels_enabled: None,
         };
         let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["agentId"], "session:pulse-workspace");
         assert_eq!(json["operator"], "trevor");
         assert_eq!(json["host"]["name"], "laptop");
         assert_eq!(json["host"]["os"], "linux");
@@ -143,6 +146,14 @@ pub struct Session {
 
     /// Working directory the client launched from.
     pub cwd: String,
+
+    /// Stable identity supplied by the embedding application, when one owns
+    /// this harness session. Unlike [`Session::id`], which is the harness's
+    /// native conversation identity, this value correlates the live process
+    /// with its durable record in the embedding control plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[myko_setter]
+    pub agent_id: Option<String>,
 
     /// Git branch in `cwd`, if it's a repo. Pushed by the shim's HEAD watcher
     /// on checkout/switch (event-driven, not sampled at startup) so peers see
