@@ -37,7 +37,17 @@ Tools (`tools/call`):
 - `set_status(text)` — set the free-form `current_task` text shown on the roster
 - `ack_messages(message_ids)` — mark messages read for this session
 
-Peer messages arrive as `notifications/claude/channel` events that surface in your transcript as `<channel>` blocks.
+Peer messages reach the session two ways:
+
+- **Live channel** — `notifications/claude/channel` events that surface in your transcript as `<channel>` blocks the moment a message arrives. This needs Claude Code launched with `--dangerously-load-development-channels plugin:marshal-shim@marshal` while channels are in research preview.
+- **Hook inbox** — no flag needed. The plugin's `hooks/hooks.json` runs `marshal-shim claude-hook …` at session start, before each prompt, and after each tool call; each pulls this session's unread direct messages from the daemon into the turn as a `<marshal_inbox>` block. A message the live channel already showed is marked read and is not repeated.
+
+The hook talks to the daemon's plain-HTTP hook listener, port **6156** on the daemon's host. Two things to check when the daemon is on another machine:
+
+1. The daemon binds that listener to loopback by default. Start it with `MARSHAL_HOOK_BIND=0.0.0.0:6156` (or the host's LAN/mesh address) so other machines can reach it.
+2. Hooks are not launched by the MCP server, so they don't see the `env` block of `.mcp.json`. Put the daemon address in `~/.config/marshal/daemon-address` (one line, e.g. `ws://my-daemon-host:6155`), export `MARSHAL_DAEMON_ADDRESS` in your shell, or set `MARSHAL_BASE_URL=http://my-daemon-host:6156`. Otherwise the hook falls back to localhost.
+
+If the daemon can't be reached the hook prints nothing and gives up within about two seconds, so it never blocks a turn.
 
 ## Optional: show the session in your status line
 
@@ -84,9 +94,22 @@ Drop this at `<project>/.claude/settings.json`:
   "statusLine": {
     "type": "command",
     "command": "marshal-shim statusline"
+  },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 10 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 10 }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook post-tool-use", "timeout": 10 }] }
+    ]
   }
 }
 ```
+
+The `hooks` block is the hook inbox described above; leave it out if you only want the live channel.
 
 Prereq is the same as the plugin path — `cargo install marshal-shim marshal-daemon` once per machine so the binaries are on `PATH`.
 

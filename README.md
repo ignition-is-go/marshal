@@ -89,7 +89,7 @@ claude --dangerously-load-development-channels server:marshal
 
 Both forms key on the same name you set: `plugin:<plugin>@<marketplace>` for plugin installs, `server:<mcpServers-key>` for direct wiring. Set whichever fits as a shell alias to make it permanent (e.g. `alias claude='claude --dangerously-load-development-channels plugin:marshal-shim@marshal'`).
 
-Without the flag, `roster` and `send_message` still work — peer messages just don't surface as live `<channel>` blocks in your transcript. With the flag, every peer's `send_message` arrives as an inline notification while you're working.
+Without the flag, `roster` and `send_message` still work, and the plugin's hooks still deliver direct messages: `marshal-shim claude-hook` pulls unread messages into the session at start, before each prompt, and after each tool call. They just don't arrive as live `<channel>` blocks the instant they're sent. With the flag, every peer's `send_message` arrives as an inline notification while you're working. The hooks reach the daemon's hook listener on port 6156; for a remote daemon, start it with `MARSHAL_HOOK_BIND=0.0.0.0:6156` and see [`plugins/marshal-shim/README.md`](plugins/marshal-shim/README.md) for how the hook finds the daemon.
 
 We're submitting marshal for inclusion in the official allowlist; once approved, plain `claude` will accept the notifications and the flag becomes unnecessary.
 

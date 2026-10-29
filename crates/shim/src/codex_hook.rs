@@ -17,8 +17,12 @@
 //! the tokio runtime (like `--check` / `statusline`): one small blocking HTTP
 //! POST, no async, no WebSocket.
 //!
+//! `marshal-shim claude-hook <session-start|prompt-submit|post-tool-use>` runs
+//! the same bridge for Claude Code (see [`Harness`]), so Claude sessions get the
+//! inbox without the live-channel launch flag.
+//!
 //! Best-effort by design: any failure prints nothing and returns, so marshal
-//! can never block or break a Codex turn.
+//! can never block or break a Codex or Claude turn.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -27,10 +31,44 @@ use std::time::Duration;
 const HOOK_PORT: u16 = 6156;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Which agent harness invoked the hook. Both send the same hook JSON and read
+/// the same `hookSpecificOutput.additionalContext`; they differ in the
+/// `harness=` the daemon sees (it words the `<marshal_session>` block per
+/// harness) and in how long a request may take.
+#[derive(Clone, Copy)]
+pub enum Harness {
+    Codex,
+    /// Claude Code, via `marshal-shim claude-hook`. Its `PostToolUse` hook runs
+    /// after every tool call, so a slow daemon must not stall each one for the
+    /// Codex budget.
+    Claude,
+}
+
+impl Harness {
+    fn name(self) -> &'static str {
+        match self {
+            Harness::Codex => "codex",
+            Harness::Claude => "claude",
+        }
+    }
+
+    fn timeout(self) -> Duration {
+        match self {
+            Harness::Codex => TIMEOUT,
+            Harness::Claude => Duration::from_secs(2),
+        }
+    }
+}
+
 /// `ep` is `session-start` or `prompt-submit`; `base_override` is an optional
 /// explicit `http://host:port` (the deploy role passes it so the hook doesn't
 /// depend on env the Codex hook process may not inherit).
 pub fn run(ep: &str, base_override: Option<&str>) {
+    run_for(Harness::Codex, ep, base_override);
+}
+
+/// Shared hook body for both harnesses.
+pub fn run_for(harness: Harness, ep: &str, base_override: Option<&str>) {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let v: serde_json::Value =
@@ -62,12 +100,13 @@ pub fn run(ep: &str, base_override: Option<&str>) {
         json_str(cwd)
     );
     let path = format!(
-        "/hook/{endpoint}?host={}&operator={}&harness=codex",
+        "/hook/{endpoint}?host={}&operator={}&harness={}",
         url_q(&host),
-        url_q(&op)
+        url_q(&op),
+        harness.name()
     );
 
-    let Some(resp) = http_post(&base, &path, &body) else {
+    let Some(resp) = http_post(&base, &path, &body, harness.timeout()) else {
         return;
     };
     let resp = resp.trim_end_matches(['\n', '\r', ' ']);
@@ -95,7 +134,7 @@ pub(crate) fn register_session(base: &str, session_id: &str, cwd: &str) -> Optio
         url_q(&short_host()),
         url_q(&operator())
     );
-    let response = http_post(base, &path, &body)?;
+    let response = http_post(base, &path, &body, TIMEOUT)?;
     if let Ok(identity) = serde_json::from_str::<serde_json::Value>(&response)
         && identity.get("session_id").and_then(|v| v.as_str()) == Some(session_id)
         && let Some(nickname) = identity
@@ -167,17 +206,17 @@ fn base_from_daemon(daemon: &str) -> String {
 
 /// Minimal blocking HTTP/1.1 POST. The daemon replies `Content-Length` +
 /// `Connection: close`, so we read to EOF and return the body. `None` on any
-/// transport failure.
-fn http_post(base: &str, path: &str, body: &str) -> Option<String> {
+/// transport failure. `timeout` bounds the connect and each read/write.
+fn http_post(base: &str, path: &str, body: &str, timeout: Duration) -> Option<String> {
     let hostport = base.strip_prefix("http://")?.trim_end_matches('/');
     let (host, port) = match hostport.rsplit_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().ok()?),
         None => (hostport, 80),
     };
     let sock = format!("{host}:{port}").to_socket_addrs().ok()?.next()?;
-    let mut stream = TcpStream::connect_timeout(&sock, TIMEOUT).ok()?;
-    stream.set_read_timeout(Some(TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(TIMEOUT)).ok()?;
+    let mut stream = TcpStream::connect_timeout(&sock, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -283,6 +322,7 @@ mod tests {
             &format!("http://{authority}"),
             "/hook/session-register",
             "{}",
+            TIMEOUT,
         );
         server.join().unwrap();
         assert_eq!(

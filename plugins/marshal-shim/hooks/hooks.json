@@ -1,0 +1,26 @@
+{
+  "description": "Deliver unread Marshal direct messages into the session at start, before each prompt, and after each tool call. Works without the live-channel launch flag.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "marshal-shim claude-hook post-tool-use", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

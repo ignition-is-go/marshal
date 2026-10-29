@@ -181,10 +181,38 @@ pub fn parent_cmdline() -> Vec<String> {
     {
         windows_parent_cmdline().unwrap_or_default()
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_parent_cmdline().unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Vec::new()
     }
+}
+
+/// macOS has no `/proc`, so ask `ps` for the parent's argv. Without this the
+/// detection is always unknown on a Mac, and the daemon treats an unknown
+/// session as able to render pushes: it pushes into a flagless Claude (which
+/// drops the notification) and marks the message read, so the inbox hook never
+/// shows it.
+#[cfg(target_os = "macos")]
+fn macos_parent_cmdline() -> Option<Vec<String>> {
+    let ppid = unsafe { libc::getppid() };
+    // `-ww` disables column truncation; `args=` prints argv with no header.
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-o", "args=", "-p", &ppid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if line.is_empty() {
+        return None;
+    }
+    // Substring-matched after joining, like the Windows path.
+    Some(vec![line])
 }
 
 /// Windows: read the parent's CommandLine via the supported WMI query
@@ -223,6 +251,19 @@ mod tests {
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// The test process always has a parent (cargo or the test runner), so a
+    /// readable cmdline is expected; an empty one means detection is broken
+    /// and every Mac session would report "unknown".
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reads_the_parent_cmdline() {
+        let cmd = super::parent_cmdline();
+        assert!(
+            cmd.iter().any(|s| !s.trim().is_empty()),
+            "parent cmdline unreadable on macOS: {cmd:?}"
+        );
     }
 
     #[test]

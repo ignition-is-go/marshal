@@ -98,6 +98,17 @@ fn main() -> Result<()> {
             codex_hook::run(&ep, base.as_deref());
             return Ok(());
         }
+        // Claude Code hook bridge: the same bridge, run from the plugin's
+        // `hooks/hooks.json` as `marshal-shim claude-hook
+        // session-start|prompt-submit|post-tool-use`. It pulls unread direct
+        // messages into the turn, so a session launched without the channels
+        // flag still receives them.
+        Some("claude-hook") => {
+            let ep = argv.next().unwrap_or_else(|| "prompt-submit".to_string());
+            let base = argv.next();
+            codex_hook::run_for(codex_hook::Harness::Claude, &ep, base.as_deref());
+            return Ok(());
+        }
         // One-shot cross-platform setup: wire marshal into a Codex install
         // (CLI / IDE / desktop app) by writing the config.toml + AGENTS.md
         // managed blocks. For laptops / the desktop app where there's no
