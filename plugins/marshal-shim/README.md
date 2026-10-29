@@ -37,7 +37,9 @@ Tools (`tools/call`):
 - `set_status(text)` — set the free-form `current_task` text shown on the roster
 - `ack_messages(message_ids)` — mark messages read for this session
 
-Peer messages arrive as `notifications/claude/channel` events that surface in your transcript as `<channel>` blocks.
+Peer messages arrive as `notifications/claude/channel` events that surface in your transcript as `<channel>` blocks. A channel block carries a bounded preview of the body; when the preview was cut, it says so and names the message to read in full from `marshal://messages`.
+
+The plugin also ships two hooks (`hooks/hooks.json`) that run `marshal-shim claude-hook`. At session start it adds your Marshal identity to the context, and before each prompt it adds any direct message still unread as a `<marshal_inbox>` block, then marks it read. That covers what the channel didn't show, such as every message in a session started without the channels flag. (The shim reads the flag from Claude's command line, which it can't do on macOS yet; there the daemon still counts a push as shown.) A message the channel did show is already read, so it isn't repeated. Message text is escaped so it can't pose as the inbox's own framing, and a long backlog comes over several prompts rather than in one block too big for Claude to inject. If the daemon is unreachable or slow, the hooks add nothing after at most 3 seconds and the turn goes ahead.
 
 ## Optional: show the session in your status line
 
@@ -84,9 +86,19 @@ Drop this at `<project>/.claude/settings.json`:
   "statusLine": {
     "type": "command",
     "command": "marshal-shim statusline"
+  },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 15 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 15 }] }
+    ]
   }
 }
 ```
+
+The `hooks` block is what the plugin's `hooks/hooks.json` does for you; leave it out and messages the live channel didn't show wait until the agent reads `marshal://messages`.
 
 Prereq is the same as the plugin path — `cargo install marshal-shim marshal-daemon` once per machine so the binaries are on `PATH`.
 
