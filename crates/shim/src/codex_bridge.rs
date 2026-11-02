@@ -12,9 +12,9 @@
 //! 3. attach the TUI with `codex --remote`.
 //!
 //! Unix uses Codex's managed Unix-domain-socket daemon. Native Windows does not
-//! have that daemon. With MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE, Windows
-//! attaches to a persistent authenticated server shared with Remote Control.
-//! Otherwise it supervises an isolated server for the lifetime of the TUI.
+//! have that daemon. Windows discovers the persistent authenticated server
+//! in CODEX_HOME/remote-control, or uses MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE
+//! when explicitly set. Unmanaged homes use an isolated server for the TUI.
 //!
 //! The bridge watches marshal's durable message/read views. When a direct
 //! unread message targets a hook-owned session on this host, it asks the local
@@ -451,7 +451,7 @@ fn cleanup_proxy(app_server: &LaunchedAppServer) {
 }
 
 fn run_native_codex(codex: &str, args: &[String], bridge_error: &anyhow::Error) -> Result<()> {
-    if std::env::var_os("MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE").is_some() {
+    if shared_connection_path().is_some() {
         anyhow::bail!(
             "shared Codex server unavailable: {bridge_error:#}; no isolated session was started"
         );
@@ -968,8 +968,34 @@ struct SharedConnection {
     token: String,
 }
 
+fn shared_connection_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE") {
+        return Some(PathBuf::from(path));
+    }
+    #[cfg(windows)]
+    {
+        let home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join(".codex"))
+            })?;
+        return managed_connection_path(&home);
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+#[cfg(any(windows, test))]
+fn managed_connection_path(home: &Path) -> Option<PathBuf> {
+    let directory = home.join("remote-control");
+    let connection = directory.join("connection.json");
+    // A managed server being restarted must fail visibly, not create an
+    // isolated writer that Remote Control cannot attach to.
+    (connection.exists() || directory.join("start.ps1").exists()).then_some(connection)
+}
+
 fn shared_connection() -> Result<Option<SharedConnection>> {
-    let Some(path) = std::env::var_os("MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE") else {
+    let Some(path) = shared_connection_path() else {
         return Ok(None);
     };
     let connection: SharedConnection = serde_json::from_slice(
@@ -2599,6 +2625,27 @@ mod tests {
 
         retain_active_cooldowns(&mut cooldowns, now + Duration::from_secs(31));
         assert!(cooldowns.is_empty());
+    }
+
+    #[test]
+    fn managed_windows_home_does_not_depend_on_shell_environment() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(managed_connection_path(home.path()), None);
+        let directory = home.path().join("remote-control");
+        fs::create_dir(&directory).unwrap();
+        let connection = directory.join("connection.json");
+        fs::write(
+            &connection,
+            r#"{"endpoint":"ws://127.0.0.1:12345","token":"test"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            managed_connection_path(home.path()),
+            Some(connection.clone())
+        );
+        fs::write(directory.join("start.ps1"), "managed server").unwrap();
+        fs::remove_file(&connection).unwrap();
+        assert_eq!(managed_connection_path(home.path()), Some(connection));
     }
 
     #[test]
