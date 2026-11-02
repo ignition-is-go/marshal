@@ -12,8 +12,9 @@
 //! 3. attach the TUI with `codex --remote`.
 //!
 //! Unix uses Codex's managed Unix-domain-socket daemon. Native Windows does not
-//! have that daemon, so the launcher supervises one app-server process on an
-//! ephemeral loopback-only WebSocket port and tears it down with the TUI.
+//! have that daemon. With MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE, Windows
+//! attaches to a persistent authenticated server shared with Remote Control.
+//! Otherwise it supervises an isolated server for the lifetime of the TUI.
 //!
 //! The bridge watches marshal's durable message/read views. When a direct
 //! unread message targets a hook-owned session on this host, it asks the local
@@ -61,14 +62,14 @@ use marshal_entities::{
 use myko::client::MykoClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use tokio_tungstenite::client_async_with_config;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, handshake::client::Request};
 use tokio_tungstenite::{
     WebSocketStream, accept_async_with_config, connect_async_with_config,
     tungstenite::{Message as WebSocketMessage, protocol::WebSocketConfig},
 };
-#[cfg(unix)]
-use tokio_tungstenite::{client_async_with_config, tungstenite::client::IntoClientRequest};
 
 // Match Codex 0.163.0's REMOTE_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE:
 // https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/app-server-client/src/remote.rs#L67
@@ -81,7 +82,6 @@ fn app_server_websocket_config() -> WebSocketConfig {
 const DEFAULT_POLL: Duration = Duration::from_millis(750);
 const WAKE_COALESCE_WINDOW: Duration = Duration::from_secs(30);
 const RETRY_COOLDOWN: Duration = Duration::from_secs(2);
-#[cfg(unix)]
 const WAKE_LEADER_SETTLE: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(8);
 const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -106,14 +106,13 @@ impl std::fmt::Display for AppServerEndpoint {
     }
 }
 
-/// Coordinates wake ownership among bridges attached to the same Unix
+/// Coordinates wake ownership among bridges attached to the same local
 /// app-server and Marshal daemon. Lifecycle registration remains active in
 /// every bridge; only model-turn creation is elected.
 ///
 /// Unix `codex-run` launchers share one managed app-server, so without this
 /// lock every per-TUI bridge sees the same unread row and submits the same
-/// `turn/start`. Windows launchers own isolated app-servers and therefore do
-/// not contend.
+/// `turn/start`. Windows uses an exclusive file handle for the same election.
 #[cfg(unix)]
 #[derive(Debug)]
 struct WakeLeadership {
@@ -174,7 +173,6 @@ impl WakeLeadership {
     }
 }
 
-#[cfg(unix)]
 fn wake_lock_path(app_server: &AppServerEndpoint, daemon: &str) -> PathBuf {
     let identity = format!("{app_server}\n{daemon}");
     let digest = Sha256::digest(identity.as_bytes());
@@ -192,18 +190,50 @@ fn wake_lock_path(app_server: &AppServerEndpoint, daemon: &str) -> PathBuf {
     directory.join(format!(".marshal-codex-wake-{suffix}.lock"))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 #[derive(Debug)]
-struct WakeLeadership;
+struct WakeLeadership {
+    lock_path: PathBuf,
+    lock: Option<fs::File>,
+    acquired_at: Option<Instant>,
+}
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 impl WakeLeadership {
-    fn new(_app_server: &AppServerEndpoint, _daemon: &str) -> Self {
-        Self
+    fn new(app_server: &AppServerEndpoint, daemon: &str) -> Self {
+        Self::at(wake_lock_path(app_server, daemon))
     }
 
-    fn ready(&mut self, _now: Instant) -> Result<bool> {
-        Ok(true)
+    fn at(lock_path: PathBuf) -> Self {
+        Self {
+            lock_path,
+            lock: None,
+            acquired_at: None,
+        }
+    }
+
+    fn ready(&mut self, now: Instant) -> Result<bool> {
+        use std::os::windows::fs::OpenOptionsExt;
+        if self.lock.is_none() {
+            match fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(&self.lock_path)
+            {
+                Ok(file) => {
+                    self.lock = Some(file);
+                    self.acquired_at = Some(now);
+                }
+                Err(error) if error.raw_os_error() == Some(32) => return Ok(false),
+                Err(error) => return Err(error).context("acquiring Windows Codex wake leadership"),
+            }
+        }
+        Ok(self
+            .acquired_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= WAKE_LEADER_SETTLE))
     }
 }
 
@@ -295,7 +325,8 @@ pub fn run_codex(args: &[String]) -> Result<()> {
              attaches the TUI to it. Direct Marshal messages can start an idle\n\
              turn; plain Codex remains inbox-at-next-boundary.\n\
              \n\
-             Set MARSHAL_CODEX_BIN to override the `codex` executable."
+             Set MARSHAL_CODEX_BIN to override the `codex` executable.\n\
+             Set MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE to attach to a persistent Windows server."
         );
         return Ok(());
     }
@@ -399,7 +430,7 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
 
     // The bridge is scoped to this interactive launcher. Multiple launchers may
     // coexist; Unix bridges elect one wake leader for their shared app-server,
-    // while Windows launchers each own an isolated app-server.
+    // and persistent Windows servers use exclusive file handles for election.
     let _ = bridge.kill();
     let _ = bridge.wait();
     let _ = fs::remove_file(&ready_file);
@@ -420,6 +451,11 @@ fn cleanup_proxy(app_server: &LaunchedAppServer) {
 }
 
 fn run_native_codex(codex: &str, args: &[String], bridge_error: &anyhow::Error) -> Result<()> {
+    if std::env::var_os("MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE").is_some() {
+        anyhow::bail!(
+            "shared Codex server unavailable: {bridge_error:#}; no isolated session was started"
+        );
+    }
     eprintln!(
         "warning: Codex live delivery is unavailable ({bridge_error:#}); starting native Codex"
     );
@@ -753,7 +789,7 @@ async fn run_tcp_tui_proxy(
                         .await
                         .context("accepting Codex TUI WebSocket")?;
                 let (upstream, _) = connect_async_with_config(
-                    &upstream,
+                    app_server_request(&upstream)?,
                     Some(app_server_websocket_config()),
                     false,
                 )
@@ -903,7 +939,73 @@ fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
 
 #[cfg(windows)]
 fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
+    if let Some(connection) = shared_connection()? {
+        return shared_app_server(&connection.endpoint);
+    }
     launch_isolated_app_server(codex)
+}
+
+#[cfg(any(windows, test))]
+fn shared_app_server(endpoint: &str) -> Result<LaunchedAppServer> {
+    loopback_address(endpoint)?;
+    let proxy = ephemeral_loopback_endpoint()?;
+    Ok(LaunchedAppServer {
+        remote: proxy.clone(),
+        bridge_args: vec![
+            "--endpoint".into(),
+            endpoint.into(),
+            "--proxy-endpoint".into(),
+            proxy,
+        ],
+        child: None,
+        proxy_path: None,
+    })
+}
+
+#[derive(Deserialize)]
+struct SharedConnection {
+    endpoint: String,
+    token: String,
+}
+
+fn shared_connection() -> Result<Option<SharedConnection>> {
+    let Some(path) = std::env::var_os("MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE") else {
+        return Ok(None);
+    };
+    let connection: SharedConnection = serde_json::from_slice(
+        &fs::read(path)
+            .context("reading shared Codex connection; check the Remote Control task")?,
+    )
+    .context("invalid shared Codex connection file")?;
+    loopback_address(&connection.endpoint)?;
+    anyhow::ensure!(
+        !connection.token.is_empty(),
+        "shared Codex connection has an empty token"
+    );
+    Ok(Some(connection))
+}
+
+fn app_server_request(endpoint: &str) -> Result<Request> {
+    let connection = shared_connection()?;
+    if let Some(connection) = &connection {
+        anyhow::ensure!(
+            connection.endpoint == endpoint,
+            "shared Codex server changed; relaunch the terminal client"
+        );
+    }
+    authenticated_request(endpoint, connection.as_ref().map(|c| c.token.as_str()))
+}
+
+fn authenticated_request(endpoint: &str, token: Option<&str>) -> Result<Request> {
+    let mut request = endpoint.into_client_request()?;
+    if let Some(token) = token {
+        let mut value = format!("Bearer {token}")
+            .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
+            .map_err(|_| anyhow::anyhow!("invalid shared Codex capability token"))?;
+        value.set_sensitive(true);
+        request.headers_mut().insert("Authorization", value);
+    }
+    Ok(request)
 }
 
 #[derive(Deserialize)]
@@ -1374,7 +1476,11 @@ async fn watch_app_server_registrations(
             AppServerEndpoint::WebSocket(endpoint) => {
                 let connection = tokio::time::timeout(
                     RPC_TIMEOUT,
-                    connect_async_with_config(endpoint, Some(app_server_websocket_config()), false),
+                    connect_async_with_config(
+                        app_server_request(endpoint)?,
+                        Some(app_server_websocket_config()),
+                        false,
+                    ),
                 )
                 .await;
                 match connection {
@@ -2035,7 +2141,11 @@ async fn start_thread(app_server: &AppServerEndpoint, session_id: &SessionId) ->
         AppServerEndpoint::WebSocket(endpoint) => {
             let (mut websocket, _) = tokio::time::timeout(
                 RPC_TIMEOUT,
-                connect_async_with_config(endpoint, Some(app_server_websocket_config()), false),
+                connect_async_with_config(
+                    app_server_request(endpoint)?,
+                    Some(app_server_websocket_config()),
+                    false,
+                ),
             )
             .await
             .context("timed out connecting to Codex app-server")?
@@ -2491,9 +2601,62 @@ mod tests {
         assert!(cooldowns.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn unix_bridges_elect_one_wake_leader_and_fail_over() {
+    fn shared_server_is_not_owned_by_terminal_launcher() {
+        let mut server = shared_app_server("ws://127.0.0.1:32123").unwrap();
+        assert!(server.child.is_none());
+        assert_eq!(server.bridge_args[1], "ws://127.0.0.1:32123");
+        assert_ne!(server.remote, server.bridge_args[1]);
+        stop_owned_app_server(&mut server);
+        assert!(shared_app_server("ws://192.168.1.1:32123").is_err());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)] // tungstenite requires this callback error type.
+    async fn authenticated_shared_server_accepts_two_clients() {
+        use tokio_tungstenite::{accept_hdr_async, tungstenite::handshake::server::Response};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let socket = accept_hdr_async(stream, |request: &Request, response: Response| {
+                    assert_eq!(request.headers()["Authorization"], "Bearer test-capability");
+                    Ok(response)
+                })
+                .await
+                .unwrap();
+                connections.push(socket);
+            }
+            for mut socket in connections {
+                socket
+                    .send(WebSocketMessage::Text("shared-thread".into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut clients = Vec::new();
+        for _ in 0..2 {
+            let request = authenticated_request(&endpoint, Some("test-capability")).unwrap();
+            assert!(request.headers()["Authorization"].is_sensitive());
+            let (socket, _) = connect_async_with_config(request, None, false)
+                .await
+                .unwrap();
+            clients.push(socket);
+        }
+        for mut client in clients {
+            assert_eq!(
+                client.next().await.unwrap().unwrap().into_text().unwrap(),
+                "shared-thread"
+            );
+        }
+        server.await.unwrap();
+        assert!(authenticated_request(&endpoint, Some("bad\nheader")).is_err());
+    }
+
+    #[test]
+    fn bridges_elect_one_wake_leader_and_fail_over() {
         let path = std::env::temp_dir().join(format!(
             "marshal-codex-leader-test-{}.lock",
             uuid::Uuid::new_v4()
