@@ -38,5 +38,5 @@
     "check": "tsc --noEmit"
   },
   "type": "module",
-  "version": "0.53.8"
+  "version": "0.53.9"
 }
