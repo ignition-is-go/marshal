@@ -620,7 +620,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct messages interrupt one recipient and consume transcript context. Send only a request, blocker, ownership conflict, or result that changes the recipient's next action within their assigned task. No routine progress, FYI, acknowledgements, or reciprocal updates. Receiving a message does not require a reply. Batch necessary details. Address by nickname, session id/prefix, or operator email. `persisted` confirms storage; `live_push` covers synchronous delivery; `wake` may remain `unobserved` because wake happens asynchronously.".into(),
+            description: "Direct messages interrupt one recipient and consume transcript context. Coordinate shared-resource access, dependencies, and interference within assigned scope. Make reply expectations explicit in the body: 'Reply needed: <question>', 'Confirm: <agreement or handoff>', or 'No reply needed'. Stop once answered or agreed; reopen for changed conditions or conflicts. Batch necessary details. Address by nickname, session id/prefix, or operator email. `persisted` confirms storage; `live_push` covers synchronous delivery; `wake` may remain `unobserved` because wake happens asynchronously.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to":   { "type": "string", "description": "Nickname, session id/prefix, or operator email from the roster." },
@@ -631,7 +631,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "broadcast".into(),
-            description: "Send only when multiple room members need the same actionable information for their assigned work. Do not broadcast routine progress or FYI. An @mention also creates a direct interrupt, so use one only when that peer needs to act or reply. Returns counts plus bounded failure and mention details.".into(),
+            description: "Coordinate a shared resource or dependency with affected room members. Name any agents whose confirmation is required; others need not reply. Use 'No reply needed' for a completed notice. Avoid routine progress unless requested or needed for coordination. An @mention also creates a direct interrupt, so use one only when that peer needs to act or reply. Returns counts plus bounded failure and mention details.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },

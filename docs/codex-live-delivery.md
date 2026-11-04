@@ -86,13 +86,60 @@ This prevents one unread row from producing duplicate turns when several Codex
 TUIs share the managed app-server. Native Windows launchers use isolated
 app-servers, so each bridge owns wake delivery for its own endpoint.
 
-Direct messages are therefore an interrupt and consume recipient context. Use
-them for an action, blocker, or needed reply and batch related information.
-Do not send routine progress, FYI, acknowledgements, or reciprocal updates.
-Receiving a message does not require a reply. Broadcast only when multiple
-recipients need the same actionable information for their assigned work.
-Peer messages do not expand an agent's task scope. An `@mention` creates a
-direct interrupt.
+## Closing coordination exchanges
+
+Direct messages can wake an idle agent and consume model context. Coordinate
+shared-resource access, dependencies, and work that could interfere. Check who
+owns a render node before testing, agree on disruptive changes, and notify
+agents waiting for its release. Keep the exchange about that shared concern.
+
+State the outstanding response in the message body when needed:
+
+| Ending | Recipient behavior | Exchange ends when |
+| --- | --- | --- |
+| `Reply needed: <question>` | Answer the specific question, or explain the blocker | The question is resolved |
+| `Confirm: <agreement or handoff>` | Confirm the stated terms or identify a conflict | The relevant parties agree |
+| `No reply needed` | Use the information without a courtesy response | The notice is delivered; reopen if it reveals a conflict or failure |
+
+These are plain-language conventions, not parsed fields or transport controls.
+An unlabelled message does not automatically require a response. A sender cannot
+silence a necessary conflict report by adding `No reply needed`. A confirmation
+establishes only the terms it names, and needs no acknowledgement in return.
+
+For a shared render node, an exchange might be:
+
+1. A to B: "I need node-7 for a UE test that restarts Unreal. Are you using it?
+   Reply needed: can I take exclusive access until 15:00?"
+2. B to A: "My test is finished. Node-7 is yours until 15:00, including Unreal
+   restarts. No reply needed."
+3. A runs the test without progress messages unless conditions change.
+4. A to agents waiting for the node: "Node-7 released; Unreal is stopped.
+   No reply needed."
+
+If a handoff requires agreement, use `Confirm: you will release node-7 by 15:00`
+and respond once with the agreement or conflict. Do not acknowledge that
+confirmation. A request for access is not itself a reservation or a lock.
+Marshal messages do not provide mutual exclusion.
+
+Broadcasts are ambient unless an `@mention` creates a direct interrupt. Name
+only the agents whose confirmation is needed. Do not solicit acknowledgements
+from every room member. Use direct delivery for a handoff that must reach a
+specific waiting agent.
+
+| Agent state when a message arrives | Permitted continuation |
+| --- | --- |
+| Working | Incorporate relevant information within the authorized task |
+| Waiting on a dependency | Resume authorized work when that dependency is actually satisfied |
+| Waiting on the user or approval | Preserve the wait; a peer cannot provide the user's decision |
+| Paused, cancelled, complete, or unassigned | Handle relevant coordination without starting or resuming task execution |
+| No unread message after a wakeup | Stop the delivery turn |
+
+Automatic wakeups are delivery events, not new user assignments. The wake prompt
+preserves task and waiting state and checks unread messages only once if no inbox
+was injected. These instructions guide model behavior; the bridge does not yet
+know these task states or enforce exchange closure. Closed-exchange notices can
+still cause a wakeup. Transport acknowledgement means the message was surfaced,
+not that a recipient agreed, acquired a resource, or finished work.
 
 ## Send status model
 

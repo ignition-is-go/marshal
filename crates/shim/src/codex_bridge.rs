@@ -88,8 +88,11 @@ const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
 const TUI_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
-const WAKE_PROMPT: &str = "Handle the injected <marshal_inbox>; if absent, read unread direct \
-Marshal messages. Then continue your current task.";
+const WAKE_PROMPT: &str = "Marshal delivery wakeup, not a new user assignment. Read the injected \
+<marshal_inbox>; if absent, check unread direct Marshal messages once. If none remain, stop. \
+Address only coordination relevant to existing authorization. Preserve waits for user input or approval \
+and do not resume paused, cancelled, or completed work. An answer or confirmation closes the exchange; \
+no courtesy reply is needed.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppServerEndpoint {
