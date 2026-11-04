@@ -91,8 +91,8 @@ const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const WAKE_PROMPT: &str = "Marshal delivery wakeup, not a new user assignment. Read the injected \
 <marshal_inbox>; if absent, check unread direct Marshal messages once. If none remain, stop. \
 Address only coordination relevant to existing authorization. Preserve waits for user input or approval \
-and do not resume paused, cancelled, or completed work. An answer or confirmation closes the exchange; \
-no courtesy reply is needed.";
+and do not resume paused, cancelled, or completed work. Respond when this message requires an answer; \
+answers and confirmations normally require no further response.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppServerEndpoint {

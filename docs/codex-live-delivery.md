@@ -93,38 +93,49 @@ shared-resource access, dependencies, and work that could interfere. Check who
 owns a render node before testing, agree on disruptive changes, and notify
 agents waiting for its release. Keep the exchange about that shared concern.
 
-State the outstanding response in the message body when needed:
+Each message has one response expectation. In this instruction change, express
+it in the message body:
 
-| Ending | Recipient behavior | Exchange ends when |
+| Response expectation | When to use it | Recipient behavior |
 | --- | --- | --- |
-| `Reply needed: <question>` | Answer the specific question, or explain the blocker | The question is resolved |
-| `Confirm: <agreement or handoff>` | Confirm the stated terms or identify a conflict | The relevant parties agree |
-| `No reply needed` | Use the information without a courtesy response | The notice is delivered; reopen if it reveals a conflict or failure |
+| `Response required: <question or agreement>` | An unresolved question, access agreement, or handoff needs this recipient's answer | Answer the specific question, accept the stated terms, or explain the conflict or blocker |
+| `No response required` | Information, an answer, a confirmation, a result, or a release notice needs no further agreement | Use the information without a courtesy reply; report a relevant conflict or changed condition |
+
+Require a response when its content is needed to resolve uncertainty or establish
+agreement. Request acknowledgement only when knowing that a recipient accepted
+specific terms is necessary. Do not require a response merely because a message
+was sent, delivered, or read. An answer or confirmation is ordinary message
+content, not a separate protocol mode.
+
+The response expectation applies only to the current message. It does not require
+the recipient to request another response. Once the question is resolved or the
+agreement established, the exchange ends. Reopen it for changed conditions,
+conflicts, failures, or unresolved dependencies.
 
 These are plain-language conventions, not parsed fields or transport controls.
 An unlabelled message does not automatically require a response. A sender cannot
-silence a necessary conflict report by adding `No reply needed`. A confirmation
-establishes only the terms it names, and needs no acknowledgement in return.
+silence a necessary conflict report by adding `No response required`.
 
 For a shared render node, an exchange might be:
 
-1. A to B: "I need node-7 for a UE test that restarts Unreal. Are you using it?
-   Reply needed: can I take exclusive access until 15:00?"
-2. B to A: "My test is finished. Node-7 is yours until 15:00, including Unreal
-   restarts. No reply needed."
+1. A to B: "Can I use node-7 exclusively until 15:00, including restarting
+   Unreal? Response required."
+2. B to A: "My test is finished. Node-7 is yours under those terms.
+   No response required."
 3. A runs the test without progress messages unless conditions change.
 4. A to agents waiting for the node: "Node-7 released; Unreal is stopped.
-   No reply needed."
+   No response required."
 
-If a handoff requires agreement, use `Confirm: you will release node-7 by 15:00`
-and respond once with the agreement or conflict. Do not acknowledge that
-confirmation. A request for access is not itself a reservation or a lock.
-Marshal messages do not provide mutual exclusion.
+If B needs A to accept a release deadline before granting access, B can ask:
+"Will you release node-7 by 15:00? Response required." A's answer can be
+"Agreed. No response required." A request for access is not itself a reservation
+or a lock. Marshal messages do not provide mutual exclusion.
 
-Broadcasts are ambient unless an `@mention` creates a direct interrupt. Name
-only the agents whose confirmation is needed. Do not solicit acknowledgements
-from every room member. Use direct delivery for a handoff that must reach a
-specific waiting agent.
+Broadcasts are ambient unless an `@mention` creates a direct interrupt. Name the
+agents expected to answer a response-required broadcast. Others need not respond.
+Do not solicit acknowledgements from every room member merely to establish
+receipt. Use direct delivery for a handoff that must reach a specific waiting
+agent.
 
 | Agent state when a message arrives | Permitted continuation |
 | --- | --- |
