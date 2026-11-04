@@ -406,6 +406,16 @@ async fn set_status(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolEr
     Ok(ToolOutcome::Json(json!({ "ok": true })))
 }
 
+fn response_required(args: &Value) -> Result<bool, ToolError> {
+    match args.get("response_required") {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(ToolError::invalid_params(
+            "response_required must be a boolean",
+        )),
+    }
+}
+
 async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
     let to = arg_str(
         args,
@@ -422,6 +432,7 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         .map_err(ToolError::invalid_params)?
         .unwrap_or_else(|| SessionId(std::sync::Arc::from(to.as_str())));
     let cmd = SendMessage {
+        response_required: response_required(args)?,
         to_session_id,
         body,
         as_session: caller(host, args)?,
@@ -462,6 +473,7 @@ async fn broadcast(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolErr
     let to_room = arg_str(args, "to_room", "broadcast: missing `to_room` (room id)")?;
     let body = arg_str(args, "body", "broadcast: missing `body`")?;
     let cmd = BroadcastMessage {
+        response_required: response_required(args)?,
         to_room_id: RoomId(Arc::<str>::from(to_room.as_str())),
         body,
         as_session: caller(host, args)?,
@@ -620,22 +632,24 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct messages interrupt one recipient and consume transcript context. Coordinate shared-resource access, dependencies, and interference within assigned scope. State whether this message requires a response: 'Response required: <question or agreement>' for an unresolved question, access agreement, or handoff needing an answer; otherwise 'No response required'. Answers and confirmations normally require no response. Stop once answered or agreed; reopen for changed conditions or conflicts. Batch necessary details. Address by nickname, session id/prefix, or operator email. `persisted` confirms storage; `live_push` covers synchronous delivery; `wake` may remain `unobserved` because wake happens asynchronously.".into(),
+            description: "Direct messages interrupt one recipient and consume transcript context. Coordinate shared-resource access, dependencies, and interference within assigned scope. Set response_required=true only for an unresolved question or agreement needing an answer. Keep that requirement out of the body. Answers and confirmations normally require no response. Stop once answered or agreed; reopen for changed conditions or conflicts. Batch necessary details. Address by nickname, session id/prefix, or operator email. `persisted` confirms storage; `live_push` covers synchronous delivery; `wake` may remain `unobserved` because wake happens asynchronously.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to":   { "type": "string", "description": "Nickname, session id/prefix, or operator email from the roster." },
-                    "body": { "type": "string", "description": "Message body." }
+                    "body": { "type": "string", "description": "Message body." },
+                    "response_required": { "type": "boolean", "default": false, "description": "Whether this message needs an answer. Normally false for answers, results, and release notices." }
                 }),
                 &["to", "body"],
             ),
         },
         ToolDef {
             name: "broadcast".into(),
-            description: "Coordinate a shared resource or dependency with affected room members. State whether a response is required and name the agents expected to answer. Request responses only for unresolved questions or agreements; completed notices normally require no response. Avoid routine progress unless requested or needed for coordination. An @mention also creates a direct interrupt, so use one only when that peer needs to act or reply. Returns counts plus bounded failure and mention details.".into(),
+            description: "Coordinate a shared resource or dependency with affected room members. Set response_required=true only when an answer is needed, and name the agents expected to answer. Keep that requirement out of the body. Request responses only for unresolved questions or agreements; completed notices normally require no response. Avoid routine progress unless requested or needed for coordination. An @mention also creates a direct interrupt, so use one only when that peer needs to act or reply. Returns counts plus bounded failure and mention details.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },
-                    "body":    { "type": "string", "description": "Message body." }
+                    "body":    { "type": "string", "description": "Message body." },
+                    "response_required": { "type": "boolean", "default": false, "description": "Whether the named recipients need to answer. Defaults to false." }
                 }),
                 &["to_room", "body"],
             ),
@@ -849,6 +863,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_requirement_defaults_and_rejects_non_booleans() {
+        assert!(!response_required(&json!({})).unwrap());
+        assert!(response_required(&json!({"response_required": true})).unwrap());
+        assert!(!response_required(&json!({"response_required": false})).unwrap());
+        assert!(response_required(&json!({"response_required": "true"})).is_err());
+    }
+
     use marshal_entities::{
         DeliveredRecipient, FailedRecipient, LivePushStatus, SessionNickname, SessionNicknameId,
         WakeStatus,

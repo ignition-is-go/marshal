@@ -243,9 +243,9 @@ export class MarshalDaemon {
 
   // ── Write tools (each carries asSession = the acting session) ────────────
 
-  sendMessage(asSession: string, to: string, body: string): Promise<SendMessageResult> {
+  sendMessage(asSession: string, to: string, body: string, responseRequired = false): Promise<SendMessageResult> {
     this.recordCommunication(asSession, to);
-    return this.send(sendMessage(asSession, to, body));
+    return this.send(sendMessage(asSession, to, body, responseRequired));
   }
 
   recordCommunication(sessionId: string, peerSessionId: string | undefined): void {
@@ -255,8 +255,8 @@ export class MarshalDaemon {
     this.communicated.set(sessionId, peers);
   }
 
-  broadcast(asSession: string, room: string, body: string): Promise<BroadcastMessageResult> {
-    return this.send(broadcastMessage(asSession, room, body));
+  broadcast(asSession: string, room: string, body: string, responseRequired = false): Promise<BroadcastMessageResult> {
+    return this.send(broadcastMessage(asSession, room, body, responseRequired));
   }
 
   joinRoom(asSession: string, name: string, description?: string): Promise<JoinRoomResult> {
@@ -342,7 +342,7 @@ export class MarshalDaemon {
   /** One-line render of a message for the read-history tool, with its id so the
    *  caller can ack it. */
   formatMessageLine(m: MessageView): string {
-    return `- [${m.messageId}] ${this.senderLabel(m.fromSessionId)}: ${m.body}`;
+    return `- [${m.messageId}] ${this.senderLabel(m.fromSessionId)} [response_required=${m.responseRequired ?? false}]: ${m.body}`;
   }
 
   drainInbox(sessionId: string): Promise<string | null> {
@@ -406,11 +406,11 @@ export class MarshalDaemon {
   private renderInbox(messages: MessageView[]): string {
     if (messages.length === 1) {
       const m = messages[0];
-      return `new message from ${this.senderLabel(m.fromSessionId)}: ${m.body}`;
+      return `new message from ${this.senderLabel(m.fromSessionId)} [response_required=${m.responseRequired ?? false}]: ${m.body}`;
     }
     const lines = [`${messages.length} new messages from sibling agents:`];
     for (const m of messages) {
-      lines.push(`- ${this.senderLabel(m.fromSessionId)}: ${m.body}`);
+      lines.push(`- ${this.senderLabel(m.fromSessionId)} [response_required=${m.responseRequired ?? false}]: ${m.body}`);
     }
     return lines.join("\n");
   }

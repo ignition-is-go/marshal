@@ -140,6 +140,7 @@ fn plain_broadcast_persists_one_ambient_room_message() {
     room_with_two(&ctx);
 
     let res = BroadcastMessage {
+        response_required: false,
         to_room_id: RoomId(Arc::from("everyone")),
         body: "deploy starting".into(),
         as_session: None,
@@ -169,6 +170,7 @@ fn mention_delivers_a_direct_ping_to_the_named_member() {
 
     let alice_nick = marshal_entities::nickname("alice");
     let res = BroadcastMessage {
+        response_required: true,
         to_room_id: RoomId(Arc::from("everyone")),
         body: format!("heads up @{alice_nick}, redeploying"),
         as_session: None,
@@ -178,6 +180,7 @@ fn mention_delivers_a_direct_ping_to_the_named_member() {
 
     assert_eq!(res.mentioned, vec![SessionId(Arc::from("alice"))]);
     let msgs = messages(&ctx);
+    assert!(msgs.iter().all(|message| message.response_required));
     assert_eq!(msgs.len(), 2, "ambient room message + one direct ping");
     let direct = msgs
         .iter()
@@ -204,6 +207,7 @@ fn mention_reaches_a_peer_who_is_not_a_room_member() {
 
     let out_nick = marshal_entities::nickname("outsider");
     let res = BroadcastMessage {
+        response_required: false,
         to_room_id: RoomId(Arc::from("everyone")),
         body: format!("@{out_nick} can you take a look"),
         as_session: None,
@@ -233,6 +237,7 @@ fn operator_mention_routes_to_the_humans_agent() {
     set_session(&ctx, &maxs);
 
     let res = BroadcastMessage {
+        response_required: false,
         to_room_id: RoomId(Arc::from("everyone")),
         body: "@max@lucid.rocks need a call on the redeploy".into(),
         as_session: None,
@@ -254,6 +259,7 @@ fn self_mention_is_ignored() {
 
     let sender_nick = marshal_entities::nickname("sender");
     let res = BroadcastMessage {
+        response_required: false,
         to_room_id: RoomId(Arc::from("everyone")),
         body: format!("note to self @{sender_nick}"),
         as_session: None,

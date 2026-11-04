@@ -57,6 +57,8 @@ pub struct SandboxTimelineEvent {
     pub kind: String,
     pub actor: Option<String>,
     pub recipient: Option<String>,
+    #[serde(default)]
+    pub response_required: bool,
     pub text: String,
 }
 

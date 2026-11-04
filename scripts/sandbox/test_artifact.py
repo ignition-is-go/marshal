@@ -22,11 +22,12 @@ class ArtifactTests(unittest.TestCase):
     def test_injected_peer_message_keeps_controller_provenance(self):
         events = [
             {'seconds': 1, 'kind': 'intervention', 'data': {'message_id': 'injected', 'description': 'Controller request'}},
-            {'seconds': 2, 'kind': 'message', 'data': {'messageId': 'injected', 'fromSessionId': 'one', 'toSessionId': 'two', 'body': 'Publish now'}},
+            {'seconds': 2, 'kind': 'message', 'data': {'messageId': 'injected', 'responseRequired': True, 'fromSessionId': 'one', 'toSessionId': 'two', 'body': 'Publish now'}},
         ]
         artifact = build_artifact(self.manifest, self.summary, events, '')
         self.assertEqual(artifact['timeline'][1]['kind'], 'injected_message')
         self.assertEqual(artifact['timeline'][1]['text'], 'Publish now')
+        self.assertTrue(artifact['timeline'][1]['response_required'])
 
     def test_missing_scenario_coverage_cannot_export_as_success(self):
         self.summary['checks'] = {'Late duplicate exercised': False}

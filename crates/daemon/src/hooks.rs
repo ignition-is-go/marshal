@@ -351,7 +351,10 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
         let sender = nickname_for(cmd_ctx, m.from_session_id.0.as_ref())
             .unwrap_or_else(|_| marshal_entities::nickname(m.from_session_id.0.as_ref()));
         let (preview, truncated) = context_preview(&m.body, per_message_chars);
-        let mut line = format!("- from {sender}: {preview}\n");
+        let mut line = format!(
+            "- from {sender} [response_required={}]: {preview}\n",
+            m.response_required
+        );
         if truncated {
             line.push_str(&format!(
                 "  [truncated; full message {} remains in marshal://messages]\n",

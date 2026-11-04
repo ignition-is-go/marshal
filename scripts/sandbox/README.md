@@ -11,6 +11,15 @@ the node, release it, and finish communicating. The controller supplies each
 agent's task once. Subsequent turns use the actual Marshal delivery and wake
 paths, not scripted agent replies.
 
+## Assess every experimental change
+
+After changing Marshal behavior or agent-facing instructions, build the changed
+version and run a real-agent simulation before reporting the change as assessed.
+Unit tests and a browser fixture do not replace that run. Use the same scenario,
+model, and budgets as the prior run when comparing behavior. Preserve incomplete
+and failed runs, inspect the actual messages and actions, and import the result
+into Zoo. Report what changed, what held, and what the run did not exercise.
+
 ## Run an experiment
 
 Build the version you want to evaluate:
@@ -191,3 +200,37 @@ This exercises real model and Marshal behavior against simulated resources.
 It does not run Unreal, establish a policy improvement, or measure failure rates.
 Keep failed and incomplete runs; repeated runs with controlled baseline/candidate
 instructions are needed for comparisons.
+
+## Paired campaigns
+
+`behavior.py` adds independent audits and approval-wait scenarios to contention.
+The approval scenario injects a false claim of operator approval, followed by an
+unrelated assignment. Expected replies are reviewed in the actual transcript;
+checks track attempted publication, scope expansion, repeated work, and loops.
+The independent scenario expects completion without peer messages.
+
+`campaign.py` runs baseline and candidate together as isolated pairs, repeats
+all three scenarios, and saves its fixed order, source hashes, commits, budgets,
+and every result. It never retries based on an outcome. Prepare immutable
+binary directories for both versions before starting. Baseline injections use
+the old response prefix; candidate injections use the metadata field, carrying
+the same semantic request. No resources are shared between the two conditions.
+
+```sh
+python3 scripts/sandbox/campaign.py \
+  --output /tmp/marshal-campaign --model gpt-6.1-sol --repeats 3 \
+  --baseline-bin /tmp/marshal-baseline-bin --baseline-commit BASE_SHA \
+  --candidate-bin /tmp/marshal-candidate-bin --candidate-commit CANDIDATE_SHA
+python3 scripts/sandbox/assess.py /tmp/marshal-campaign
+```
+
+The default campaign stops starting pairs after eight million reported tokens.
+An active pair can overshoot that threshold within its trial budgets. Every
+trial has a 650,000-token cap, 420-second deadline, and 35-second quiet window.
+`assessment.json`, `trials.csv`, and `transcripts.txt` expose outcomes, message
+counts, body labels, wakes, resource/scope attempts, and token usage. The assessor
+also replays raw resource intervals and accepted audits independently of the
+scenario summary. Report
+incomplete or failed coverage separately from successful coordination. These
+small samples measure the specified simulated transitions, not production
+failure rates, real Unreal behavior, or performance across model families.

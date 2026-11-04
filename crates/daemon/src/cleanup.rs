@@ -469,6 +469,7 @@ mod tests {
 
     fn set_message(ctx: &MykoServerContext, id: &str, sent_at: i64) {
         let msg = Message {
+            response_required: false,
             id: MessageId(Arc::from(id)),
             from_session_id: SessionId(Arc::from("sender")),
             to_session_id: Some(SessionId(Arc::from("recipient"))),

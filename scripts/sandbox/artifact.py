@@ -18,6 +18,7 @@ def build_artifact(manifest, summary, events, instructions):
         if event['kind'] == 'message':
             if data.get('messageId') is not None and data['messageId'] in injected_ids:
                 row['kind'] = 'injected_message'
+            row['response_required'] = data.get('responseRequired', False)
             row.update(actor=data['fromSessionId'], recipient=data.get('toSessionId', data.get('toRoomId')), text=data['body'])
         elif event['kind'] == 'node_action':
             result = data['result']

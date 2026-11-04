@@ -500,6 +500,7 @@ async fn wait_for_sessions(ctx: &Arc<MykoServerContext>, expected: &[&str]) {
 fn emit_message(ctx: &Arc<MykoServerContext>, id: &str, recipient: &str) {
     internal_context(ctx)
         .emit_set(&Message {
+            response_required: false,
             id: MessageId(Arc::from(id)),
             from_session_id: SessionId(Arc::from("wake-canary-sender")),
             to_session_id: Some(SessionId(Arc::from(recipient))),
