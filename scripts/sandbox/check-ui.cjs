@@ -16,7 +16,9 @@ fs.mkdirSync(screenshots, {recursive:true});
  page.on('pageerror', e=>errors.push(e.message));
  async function openSandbox(target) {
   await target.goto(url + '/?reset');
-  await target.getByRole('button',{name:'Sandbox',exact:true}).nth(2).click();
+  await target.getByRole('button',{name:'Roster',exact:true}).first().waitFor();
+  if(await target.getByRole('button',{name:'Roster',exact:true}).count() !== 1) throw Error('Default layout must have one pane');
+  await target.getByRole('button',{name:'Sandbox',exact:true}).first().click();
   await target.getByLabel('Import sandbox run').waitFor();
  }
  await openSandbox(page);
@@ -54,7 +56,23 @@ fs.mkdirSync(screenshots, {recursive:true});
  await other.getByLabel('Sandbox run',{exact:true}).selectOption(artifact.run_id);
  await other.getByRole('row',{name:`Messages ${artifact.messages}`,exact:true}).waitFor();
  await other.close();
+ await page.goto(url + '/');
+ await page.getByRole('button',{name:'Split H',exact:true}).first().click();
+ await page.waitForFunction(()=>JSON.parse(localStorage.getItem('marshal-ui-layout')).tree.Split);
+ await page.goto(url + '/');
+ await page.getByRole('button',{name:'Roster',exact:true}).nth(1).waitFor();
+ await page.evaluate(()=>{
+  const saved=JSON.parse(localStorage.getItem('marshal-ui-layout'));
+  saved.version=2;
+  localStorage.setItem('marshal-ui-layout',JSON.stringify(saved));
+ });
+ await page.reload();
+ await page.getByRole('button',{name:'Roster',exact:true}).first().waitFor();
+ if(await page.getByRole('button',{name:'Roster',exact:true}).count() !== 1) throw Error('Legacy layout was not replaced');
+ await page.getByRole('button',{name:'reset layout',exact:true}).click();
+ await page.getByRole('button',{name:'Roster',exact:true}).first().waitFor();
+ if(await page.getByRole('button',{name:'Roster',exact:true}).count() !== 1) throw Error('Reset restored multiple panes');
  if(errors.length)throw Error(errors.join('\n'));
- console.log(JSON.stringify({import:true,reimport_without_duplicates:true,comparison:true,instructions_and_tools:true,invalid_rejected:true,shared_history_second_browser:true,page_errors:errors,screenshots}));
+ console.log(JSON.stringify({import:true,reimport_without_duplicates:true,comparison:true,instructions_and_tools:true,invalid_rejected:true,shared_history_second_browser:true,single_pane_default:true,custom_layout_persisted:true,legacy_layout_migrated:true,page_errors:errors,screenshots}));
  } finally { await browser.close(); }
 })().catch(error=>{console.error(error);process.exit(1)});

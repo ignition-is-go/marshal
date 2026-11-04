@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use leptos_meta::{Title, provide_meta_context};
 use mullion::{
     ActivityDef, ActivityIcon, ActivityId, ActivityNode, Category, CategoryId, MullionRoot,
-    PaneEvent, PaneId, PaneNode, SplitDirection,
+    PaneEvent, PaneId, PaneNode,
 };
 use pulse_leptos_ui::{BaseStyle, PULSE_MULLION_CLASS, PulseMullionStyle, Status, StatusVariant};
 use serde::{Deserialize, Serialize};
@@ -235,7 +235,7 @@ fn items() -> Vec<ActivityNode<Slot>> {
 const LAYOUT_KEY: &str = "marshal-ui-layout";
 /// Bump when `default_layout()` changes — a persisted layout with an older
 /// version is discarded so the new default reaches everyone once.
-const LAYOUT_VERSION: u32 = 2;
+const LAYOUT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct StoredLayout {
@@ -283,51 +283,9 @@ fn save_layout(tree: &PaneNode<Slot>) {
     }
 }
 
-/// Default arrangement — a three-column IDE workspace:
-///
-/// ```text
-/// ┌──────────────┬──────────────────┬─────────────┐
-/// │   roster     │                  │   session   │
-/// │   (hero)     │     messages     │  (detail)   │
-/// ├──────────────┤     (feed)       ├─────────────┤
-/// │   rooms      │                  │   console   │
-/// └──────────────┴──────────────────┴─────────────┘
-/// ```
-///
-/// Two live views get the prime real estate: the roster (hero, top-left, with
-/// rooms tucked beneath) and the message feed (full height in the middle, where
-/// a stream wants the vertical room). The click-to-drill session detail and the
-/// operator console form a right rail — a drill-down over an action pad.
-/// Drag/resize/split to taste, or switch any pane's view from its activity bar.
+/// Start with one full-width view. Switch activities or split panes as needed.
 fn default_layout() -> PaneNode<Slot> {
-    let leaf = |id: &str| PaneNode::leaf_with_activity(PaneId::new(id), ActivityId::new(id), Slot);
-    // Column 1 (left): roster hero over rooms.
-    let left = PaneNode::Split {
-        direction: SplitDirection::Vertical,
-        ratio: 0.64,
-        first: Box::new(leaf("roster")),
-        second: Box::new(leaf("rooms")),
-    };
-    // Column 3 (right rail): session detail over the operator console.
-    let rail = PaneNode::Split {
-        direction: SplitDirection::Vertical,
-        ratio: 0.55,
-        first: Box::new(leaf("session")),
-        second: Box::new(leaf("console")),
-    };
-    // Column 2 (middle): the message feed, full height — beside the rail.
-    let middle_and_rail = PaneNode::Split {
-        direction: SplitDirection::Horizontal,
-        ratio: 0.62,
-        first: Box::new(leaf("messages")),
-        second: Box::new(rail),
-    };
-    PaneNode::Split {
-        direction: SplitDirection::Horizontal,
-        ratio: 0.38,
-        first: Box::new(left),
-        second: Box::new(middle_and_rail),
-    }
+    PaneNode::leaf_with_activity(PaneId::new("main"), ActivityId::new("roster"), Slot)
 }
 
 #[component]
