@@ -1,0 +1,7 @@
+¶ditem©dbodyy6A private compatibility probe found that an updated marshal-shim can send response_required=true to a pre-metadata daemon and receive persisted success, while ReadMessages through the updated shim reports responseRequired=false. The old daemon ignores the unknown command field; the new client defaults the absent view field to false.
+
+Reproduce with old daemon source 4f4a789 and updated client 59ca807: register two private sessions, send one direct message with response_required=true, then read the recipient inbox. Updated client + updated daemon preserves true. Body text stays unchanged in both cases.
+
+Current rollout mitigation: upgrade the daemon before updated clients, regenerate managed instructions, and refresh tool sessions. A future change should detect unsupported metadata explicitly, without returning a retry-inducing error after the message was already persisted or creating automatic duplicate messages.
+
+Probe results: /tmp/marshal-version-probes-20261104/results.json. This is protocol compatibility evidence, not a model-behavior success/failure trial.gcreatedx2026-11-04T20:26:12.751323ZlcreatedByDevomax@lucid.rockspcreatedByMachinekpulse-adminbidx cb780133e0e94d87aec2641604604d91flabelsÅmcompatibilityhprioritybP2iprojectIdx 06a27415cc7c4b7d9d9d6fe1e377e6c3etitlex2Detect unsupported reply metadata on older daemonsjchangeTypecSEThitemTypedTaskicreatedAtx2026-11-04T20:26:12.751333Zbtxx$028476a9-a64f-46a6-bce3-3b547f7ee533hsourceIdkpulse-admin
