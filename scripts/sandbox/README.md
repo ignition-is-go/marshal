@@ -257,7 +257,8 @@ polls, which agent owns the node by then, or whether the approval fault has alre
 been injected. A regression test covers late observation and newest-first history.
 The original runs that missed replay coverage remain recorded as incomplete.
 
-The follow-up resource rule keeps an announced handoff order stable unless a
+The follow-up resource rule applies when multiple peers are waiting for one
+resource. It keeps the handoff order stable unless a
 participant reports a concrete conflict. It is evaluated separately from the
 initial notification rule because three-way trials exposed crossed proposals and
 repeated order changes. No distributed locking or automatic acknowledgement is
