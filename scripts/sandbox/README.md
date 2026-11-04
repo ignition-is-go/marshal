@@ -257,9 +257,9 @@ polls, which agent owns the node by then, or whether the approval fault has alre
 been injected. A regression test covers late observation and newest-first history.
 The original runs that missed replay coverage remain recorded as incomplete.
 
-The follow-up resource rule applies when multiple peers are waiting for one
-resource. It keeps the handoff order stable unless a
-participant reports a concrete conflict. It is evaluated separately from the
-initial notification rule because three-way trials exposed crossed proposals and
-repeated order changes. No distributed locking or automatic acknowledgement is
-introduced into Marshal.
+A resource-order rule was evaluated in the follow-up trials. It reduced messages
+in three-way contention but also primed unnecessary order discussion with one
+waiter, even after conditional narrowing. That rule is not included in the
+managed guide. The guide retains the general criterion that an update should
+unblock a recipient or change their next action. The order-rule experiments and
+incomplete runs remain part of the evidence rather than being discarded.

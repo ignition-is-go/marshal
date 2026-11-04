@@ -15,7 +15,6 @@ pub const CONTEXT_BODY_MAX_CHARS: usize = 2_000;
 /// Shared agent guidance for setup and MCP initialization.
 pub const COORDINATION_GUIDANCE: &str = "Coordinate when work shares resources, has dependencies, or could interfere. \
 Check ownership before conflicting use; agree on access and disruptive changes, and notify affected peers of release or failure. \
-When multiple peers are waiting for one resource, let its current owner set the handoff order. Keep that order unless a participant reports a concrete conflict that makes it unworkable; a competing proposal alone does not require changing it. \
 Keep coordination within each agent's assigned scope.\n\
 Set response_required=true only when an unresolved question, access agreement, or handoff needs the recipient's answer. \
 Otherwise leave it false. Keep the response requirement in metadata, not the message body. \
