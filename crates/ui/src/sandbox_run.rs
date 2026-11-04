@@ -120,14 +120,7 @@ fn Conversation(artifact: SandboxArtifact) -> impl IntoView {
             .filter(|(_, event)| {
                 let focused = matches!(
                     event.kind.as_str(),
-                    "message"
-                        | "node_action"
-                        | "work_action"
-                        | "intervention"
-                        | "scenario_check"
-                        | "error"
-                        | "finished"
-                        | "interrupted"
+                    "message" | "injected_message" | "error" | "interrupted"
                 );
                 (full_trace.get() || focused)
                     && (who.is_empty()
@@ -204,11 +197,12 @@ fn TimelineRow(
         .unwrap_or('?')
         .to_uppercase()
         .to_string();
-    if event.kind == "message" {
+    if matches!(event.kind.as_str(), "message" | "injected_message") {
+        let injected = event.kind == "injected_message";
         return view! {
             <li class=format!("sb-message sb-actor-{actor_index}")>
                 <div class="sb-avatar" aria-hidden="true">{initial}</div>
-                <div class="sb-message-body"><div class="sb-message-heading"><strong>{actor}</strong><span>{recipient}</span><time>{time}</time></div>
+                <div class="sb-message-body"><div class="sb-message-heading"><strong>{actor}</strong><span>{recipient}</span>{injected.then(|| view! { <span class="sb-injected">"Test injection"</span> })}<time>{time}</time></div>
                     <p>{event.text}</p></div>
             </li>
         }.into_any();
@@ -375,11 +369,11 @@ const REVIEW_CSS: &str = r#"
 .sb-run-meta>span { opacity:.4; }
 .sb-outcome { display:flex; align-items:center; gap:6px; border:1px solid var(--color-border); padding:5px 9px; border-radius:20px; font-size:11px; white-space:nowrap; }
 .sb-outcome i { width:5px; height:5px; background:currentColor; border-radius:50%; }
-.sb-stats { margin:16px 0; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border:1px solid var(--color-border); border-radius:7px; background:var(--color-base-200); }
-.sb-stats>div { padding:14px 16px; border-right:1px solid var(--color-border); }
+.sb-stats { margin:14px 0; display:flex; flex-wrap:wrap; gap:20px; }
+.sb-stats>div { display:flex; align-items:baseline; gap:7px; }
 .sb-stats>div:last-child { border-right:0; }
-.sb-stats span { display:block; font-size:12px; color:var(--color-text-primary); margin-bottom:9px; }
-.sb-stats strong { font:23px var(--font-mono); font-weight:500; font-variant-numeric:tabular-nums; }
+.sb-stats span { font-size:12px; color:var(--sb-muted); }
+.sb-stats strong { font-size:14px; font-weight:500; font-variant-numeric:tabular-nums; }
 .sb-tabs { position:sticky; top:0; z-index:2; background:var(--color-base-100); padding-top:8px; display:flex; gap:24px; border-bottom:1px solid var(--color-border); margin-bottom:20px; }
 .sb-tabs>button { appearance:none; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--sb-muted); font-size:12px; padding:0 0 12px; cursor:pointer; }
 .sb-tabs>button:hover { color:var(--color-text-primary); }
@@ -389,16 +383,18 @@ const REVIEW_CSS: &str = r#"
 .sb-timeline-controls>.sb-search { flex:1; min-width:100px; }
 .sb-trace-toggle { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--color-text-primary); white-space:nowrap; }
 .sb-trace-toggle input { accent-color:var(--color-primary); }
-.sb-transcript { list-style:none; margin:16px 0 0; padding:0; }
-.sb-message { display:flex; align-items:flex-start; gap:12px; padding:18px 0; }
+.sb-conversation { max-width:800px; }
+.sb-transcript { list-style:none; margin:12px 0 0; padding:0; }
+.sb-message { display:flex; align-items:flex-start; gap:12px; padding:22px 0; border-bottom:1px solid var(--color-border); }
 .sb-avatar { flex:0 0 29px; width:29px; height:29px; border:1px solid var(--color-border-hover); border-radius:7px; display:grid; place-items:center; font:11px var(--font-mono); background:var(--color-base-200); color:var(--color-primary); }
 .sb-actor-1 .sb-avatar { color:#c6aff3; } .sb-actor-2 .sb-avatar { color:#e4b781; } .sb-actor-3 .sb-avatar { color:#9bc7f7; }
-.sb-message-body { flex:1; min-width:0; border:1px solid var(--color-border); border-radius:8px; padding:13px 16px; background:var(--color-base-200); }
-.sb-message-heading { display:flex; flex-wrap:wrap; align-items:center; gap:9px; font-size:11px; }
+.sb-message-body { flex:1; min-width:0; padding:0; }
+.sb-message-heading { display:flex; flex-wrap:wrap; align-items:center; gap:9px; font-size:14px; }
 .sb-message-heading strong { font-weight:600; }
 .sb-message-heading>span { color:var(--sb-muted); }
 .sb-message-heading time { margin-left:auto; color:var(--sb-muted); font:10px var(--font-mono); }
-.sb-message-body p { font-size:13px; line-height:1.75; white-space:pre-wrap; overflow-wrap:anywhere; margin:10px 0 0; }
+.sb-injected { color:var(--color-warning) !important; font-size:11px; border:1px solid currentColor; padding:2px 6px; border-radius:4px; }
+.sb-message-body p { font-size:16px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; margin:10px 0 0; }
 .sb-issues { margin:12px 0; color:var(--color-warning); font-size:12px; }
 .sb-resource-row { display:grid; grid-template-columns:6px minmax(0,1fr) auto; gap:12px; align-items:baseline; padding:10px 0 10px 12px; }
 .sb-resource-row p { margin:0; color:var(--color-text-primary); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
@@ -434,6 +430,6 @@ const REVIEW_CSS: &str = r#"
 .sb-context pre { margin:14px 0 0; padding-top:14px; border-top:1px solid var(--color-border); max-height:520px; overflow-y:auto; }
 .sb-context dl { display:grid; grid-template-columns:minmax(90px,160px) minmax(0,1fr); gap:12px; margin-top:20px; font-size:11px; }
 .sb-context dt { color:var(--sb-muted); overflow-wrap:anywhere; } .sb-context dd { margin:0; font-family:var(--font-mono); overflow-wrap:anywhere; }
-@container sandbox (max-width:850px) { .sb-stats>div { padding:12px 10px; } .sb-stats strong { font-size:20px; } .sb-timeline-controls { flex-wrap:wrap; } .sb-trace-toggle { margin-left:auto; } .sb-compare-heading { flex-direction:column; } }
-@container sandbox (max-width:500px) { .sb-run-header h3 { font-size:21px; } .sb-stats { grid-template-columns:repeat(2,1fr); } .sb-stats>div:nth-child(2) { border-right:0; } .sb-stats>div:nth-child(-n+2) { border-bottom:1px solid var(--color-border); } .sb-message { gap:8px; } .sb-avatar { flex-basis:24px; width:24px; height:24px; } .sb-message-body { padding:11px; } .sb-trace-event { margin-left:32px; } }
+@container sandbox (max-width:850px) { .sb-timeline-controls { flex-wrap:wrap; } .sb-trace-toggle { margin-left:auto; } .sb-compare-heading { flex-direction:column; } }
+@container sandbox (max-width:500px) { .sb-run-header h3 { font-size:21px; } .sb-message { gap:8px; } .sb-avatar { flex-basis:24px; width:24px; height:24px; } .sb-message-body { padding:0; } .sb-trace-event { margin-left:32px; } }
 "#;

@@ -11,10 +11,13 @@ def build_artifact(manifest, summary, events, instructions):
     identity = json.dumps({'roles': summary['roles'], 'binaries': manifest['binaries']}, sort_keys=True)
     names = {session: role for role, session in summary['roles'].items()}
     timeline = []
+    injected_ids = {event['data'].get('message_id') for event in events if event['kind'] == 'intervention'}
     for event in events:
         data = event['data']
         row = {'seconds': event['seconds'], 'kind': event['kind'], 'actor': None, 'recipient': None, 'text': ''}
         if event['kind'] == 'message':
+            if data.get('messageId') is not None and data['messageId'] in injected_ids:
+                row['kind'] = 'injected_message'
             row.update(actor=data['fromSessionId'], recipient=data.get('toSessionId', data.get('toRoomId')), text=data['body'])
         elif event['kind'] == 'node_action':
             result = data['result']
