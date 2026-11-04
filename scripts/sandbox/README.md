@@ -73,10 +73,16 @@ account metadata and experimental prompts.
 
 Open the **Sandbox** view from a pane's activity bar. Import a run's
 `sandbox-run.json` file to save it to the connected daemon's shared experiment
-history. Select another imported run as the comparison baseline. The view shows
-scenario outcomes before communication/token counts, plus a timeline of messages
-and resource actions. Enable model turns and tools for deeper inspection, or
-expand instructions and provenance to see the generated context and binary hashes.
+history. The run library is searchable by label, model, scenario, or ID.
+
+The Conversation tab leads with scenario outcomes and compact communication
+counts, followed by the peer conversation and resource transitions. Search the
+trace or filter it by agent; Full trace adds model output, task/wake prompts,
+and expandable tool calls. The Compare tab selects another run as a baseline
+and shows neutral count differences alongside task outcomes. The Context tab
+contains captured instructions, runtime/build identity, and agent identities.
+Tab navigation supports arrow keys, Home, and End. The library and review adapt
+to narrow panes as well as small browser windows.
 
 Run imports are separate `SandboxRun` records. They do not register experimental
 agents on the live roster, replay messages, or start models. Reimporting a run
@@ -134,8 +140,9 @@ They do not evaluate model behavior.
 
 To check the UI import path, serve a built UI against a dedicated loopback
 daemon, with persistence disabled. The browser check imports the supplied run
-and a test fixture, checks reimport/comparison/error handling and a second browser,
-and saves overview/timeline screenshots. It does not start models.
+and a test fixture, checks reimport, run/timeline search, agent filtering,
+comparison deltas, keyboard tabs, context/tool inspection, invalid files, and a
+second browser. It saves desktop, comparison, timeline, and mobile screenshots. It does not start models.
 
 ```sh
 npm install --prefix /tmp/marshal-ui-browser playwright@1.64.1

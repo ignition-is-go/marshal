@@ -32,6 +32,7 @@ mod palette;
 mod rooms;
 mod roster;
 mod sandbox;
+mod sandbox_run;
 mod session_detail;
 mod time;
 
@@ -346,6 +347,7 @@ const SHELL_CSS: &str = r#"
 .app-header .reset-btn { appearance: none; border: 1px solid var(--color-border); background: var(--color-base-150); color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.02em; padding: 4px 10px; border-radius: var(--radius-sm); cursor: pointer; transition: color 0.12s, border-color 0.12s, background 0.12s; }
 .app-header .reset-btn:hover { color: var(--color-text-primary); border-color: var(--color-border-hover); background: var(--color-base-100); }
 .app-main { flex: 1; min-height: 0; }
+@media(max-width:600px) { .app-header { padding:8px 12px; gap:8px; } .app-header .substrate { display:none; } .app-header .reset-btn { white-space:nowrap; } }
 /* the notification bell, pinned to a fixed corner and out of the flex flow */
 .notif-anchor { position: fixed; bottom: 12px; right: 12px; z-index: 90; }
 .pane-scroll { height: 100%; overflow: auto; padding: 14px 16px; }
