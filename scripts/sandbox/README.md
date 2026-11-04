@@ -250,3 +250,15 @@ fault semantics and representation the same in both conditions. Add
 negotiating one node. The three-way scenario has six audits, three checks, and a
 900,000-token trial cap. It does not prescribe a queue order or require progress
 messages. All participants use real Codex threads and the actual Marshal wake path.
+
+Release replay selection uses the message's send time between the owner's actual
+release and the later fault injection. It is independent of when the observer
+polls, which agent owns the node by then, or whether the approval fault has already
+been injected. A regression test covers late observation and newest-first history.
+The original runs that missed replay coverage remain recorded as incomplete.
+
+The follow-up resource rule keeps an announced handoff order stable unless a
+participant reports a concrete conflict. It is evaluated separately from the
+initial notification rule because three-way trials exposed crossed proposals and
+repeated order changes. No distributed locking or automatic acknowledgement is
+introduced into Marshal.

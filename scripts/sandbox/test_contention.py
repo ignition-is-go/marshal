@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -8,6 +9,19 @@ from contention import ContentionRun, answer_schema
 
 
 class ContentionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_release_capture_uses_wire_time_after_observer_state_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = ContentionRun(SimpleNamespace(output=Path(directory) / 'run'))
+            run.roles = {'keeper': 'one', 'tester': 'two'}
+            run.owner = 'two'
+            run.keeper_released_at = 100
+            run.scope_message = 'injected'
+            run.scope_sent_at = 200
+            release = {'messageId': 'release', 'fromSessionId': 'one', 'toSessionId': 'two', 'sentAt': 150, 'body': 'Released.'}
+            refusal = {'messageId': 'refusal', 'fromSessionId': 'one', 'toSessionId': 'two', 'sentAt': 250, 'body': 'Approval missing.'}
+            run.record_messages('one', {'contents': [{'text': json.dumps({'messages': [refusal, release]})}]})
+            self.assertEqual(run.release_notice['messageId'], 'release')
+
     async def test_answer_schema_distinguishes_route_count_from_route_names(self):
         schema = answer_schema({'unique_routes': 3, 'duplicated_routes': ['aux']})
         self.assertEqual(schema['properties']['unique_routes'], {'type': 'integer'})

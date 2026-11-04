@@ -20,7 +20,6 @@ import time
 import tomllib
 import uuid
 
-import websockets
 
 from artifact import build_artifact
 
@@ -242,6 +241,8 @@ class Run:
         return self.tested and self.owner is None and not self.violations
 
     async def execute(self):
+        import websockets
+
         home = self.output / 'codex-home'
         home.mkdir()
         auth = self.args.auth_home / 'auth.json'
