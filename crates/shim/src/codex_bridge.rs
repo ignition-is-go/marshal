@@ -88,8 +88,11 @@ const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
 const TUI_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
-const WAKE_PROMPT: &str = "Handle the injected <marshal_inbox>; if absent, read unread direct \
-Marshal messages. Then continue your current task.";
+const WAKE_PROMPT: &str = "Marshal delivery wakeup, not a new user assignment. Read the injected \
+<marshal_inbox>; if absent, check unread direct Marshal messages once. If none remain, stop. \
+Address only coordination relevant to existing authorization. Preserve waits for user input or approval \
+and do not resume paused, cancelled, or completed work. Respond when this message requires an answer; \
+answers and confirmations normally require no further response.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppServerEndpoint {
@@ -1963,6 +1966,7 @@ async fn try_pending_registration<S>(
         .await
         {
             decoration.current_name = Some(name);
+            decoration.name_hydrated = true;
         }
         decorations.insert(registration.thread_id.clone(), decoration);
         log::info!("[codex-bridge] registered thread={session_id} before first prompt");
@@ -2086,12 +2090,14 @@ where
 }
 
 fn marshal_decorated_thread_name(current_name: Option<&str>, nickname: &str) -> Option<String> {
-    let base = strip_marshal_thread_name_prefix(current_name?.trim(), nickname).trim();
-    if base.is_empty() {
-        return None;
-    }
+    let base =
+        strip_marshal_thread_name_prefix(current_name.unwrap_or_default().trim(), nickname).trim();
     let marker = format!("[{nickname}]");
-    Some(format!("{marker} {base}"))
+    Some(if base.is_empty() {
+        marker
+    } else {
+        format!("{marker} {base}")
+    })
 }
 
 fn strip_marshal_thread_name_prefix<'a>(name: &'a str, nickname: &str) -> &'a str {
@@ -2602,6 +2608,7 @@ mod tests {
 
     fn message(id: &str, recipient: Option<&str>) -> Arc<Message> {
         Arc::new(Message {
+            response_required: false,
             id: MessageId(Arc::from(id)),
             from_session_id: SessionId(Arc::from("sender")),
             to_session_id: recipient.map(|id| SessionId(Arc::from(id))),
@@ -2823,7 +2830,12 @@ mod tests {
             marshal_decorated_thread_name(Some("auth refactor"), "sunny-summit"),
             Some("[sunny-summit] auth refactor".into())
         );
-        assert_eq!(marshal_decorated_thread_name(None, "sunny-summit"), None);
+        for name in [None, Some(""), Some("   "), Some("[sunny-summit]")] {
+            assert_eq!(
+                marshal_decorated_thread_name(name, "sunny-summit"),
+                Some("[sunny-summit]".into())
+            );
+        }
         assert_eq!(
             marshal_decorated_thread_name(Some("[sunny-summit] auth refactor"), "sunny-summit"),
             Some("[sunny-summit] auth refactor".into())
@@ -3053,7 +3065,7 @@ mod tests {
                                 "id": "thread-before-prompt",
                                 "sessionId": "session-before-prompt",
                                 "cwd": "/work/before-prompt",
-                                "name": "[marshal:old-nickname] auth refactor"
+                                "name": null
                             }
                         }
                     })
@@ -3068,10 +3080,7 @@ mod tests {
             assert_eq!(name_set["params"]["threadId"], "thread-before-prompt");
             assert_eq!(
                 name_set["params"]["name"],
-                format!(
-                    "[{}] auth refactor",
-                    marshal_entities::nickname("session-before-prompt")
-                )
+                format!("[{}]", marshal_entities::nickname("session-before-prompt"))
             );
             websocket
                 .send(WebSocketMessage::Text(

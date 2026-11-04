@@ -219,6 +219,7 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
 
     // A sends to B by session id.
     let cmd = SendMessage {
+        response_required: true,
         to_session_id: SessionId(Arc::from("sess-bravo")),
         body: "hello bravo".into(),
         as_session: None, // WS path: sender resolved from the connection
@@ -273,6 +274,10 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     assert_eq!(
         push.meta.get("body_truncated"),
         Some(&serde_json::json!(false))
+    );
+    assert_eq!(
+        push.meta.get("response_required"),
+        Some(&serde_json::json!(true))
     );
     assert!(push.meta.get("message_id").is_some());
     assert_eq!(
@@ -364,6 +369,7 @@ fn live_client_with_channels_off_is_not_delivered_live() {
     }
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("sess-bravo-off")),
         body: "to a flag-off live client".into(),
         as_session: None,
@@ -474,6 +480,7 @@ fn human_addressed_push_content_carries_the_relay_contract() {
     }
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("max@lucid.rocks")),
         body: "please approve PR #527".into(),
         as_session: None,

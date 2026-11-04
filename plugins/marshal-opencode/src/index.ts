@@ -92,7 +92,7 @@ export const MarshalPlugin: Plugin = async (input) => {
     // NotifyChannel already carries the body. Inject it immediately instead of
     // racing the daemon's eventually-consistent inbox projection. Drain after
     // the prompt only to acknowledge the persisted message.
-    const text = meta.body ? `new message from ${who}: ${meta.body}` : await daemon.drainInbox(sid);
+    const text = meta.body ? `new message from ${who} [response_required=${meta.response_required ?? false}]: ${meta.body}` : await daemon.drainInbox(sid);
     if (!text) {
       log(`marshal: inbound push for ${sid} had no body and inbox was empty`);
       return;
@@ -183,10 +183,11 @@ export const MarshalPlugin: Plugin = async (input) => {
         args: {
           to: tool.schema.string().describe("recipient session id"),
           body: tool.schema.string().describe("message text"),
+          response_required: tool.schema.boolean().optional().describe("Whether this message needs an answer; defaults to false. Keep it out of the body."),
         },
         async execute(args, ctx) {
           daemon.registerSession(ctx.sessionID);
-          const r = await daemon.sendMessage(ctx.sessionID, args.to, args.body);
+          const r = await daemon.sendMessage(ctx.sessionID, args.to, args.body, args.response_required);
           const livePush = r.livePush ?? (r.deliveredLive ? "delivered" : "unknown");
           const wake = r.wake ?? (r.deliveredLive ? "not_needed" : "unobserved");
           return `sent (message ${r.messageId}; persisted=true; live_push=${livePush}; wake=${wake})`;
@@ -200,10 +201,11 @@ export const MarshalPlugin: Plugin = async (input) => {
         args: {
           room: tool.schema.string().describe("room id/name"),
           body: tool.schema.string().describe("message text"),
+          response_required: tool.schema.boolean().optional().describe("Whether this message needs an answer; defaults to false. Keep it out of the body."),
         },
         async execute(args, ctx) {
           daemon.registerSession(ctx.sessionID);
-          const r = await daemon.broadcast(ctx.sessionID, args.room, args.body);
+          const r = await daemon.broadcast(ctx.sessionID, args.room, args.body, args.response_required);
           return `broadcast to ${r.toRoomName}: delivered ${r.delivered.length}/${r.total}`;
         },
       }),

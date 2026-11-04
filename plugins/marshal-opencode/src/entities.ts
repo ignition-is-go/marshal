@@ -64,12 +64,12 @@ export interface SessionItem {
 
 // ── Write commands ───────────────────────────────────────────────────────
 
-export function sendMessage(asSession: string, toSessionId: string, body: string): MarshalCommand<SendMessageResult> {
-  return { commandId: "SendMessage", command: { toSessionId, body, asSession } };
+export function sendMessage(asSession: string, toSessionId: string, body: string, responseRequired = false): MarshalCommand<SendMessageResult> {
+  return { commandId: "SendMessage", command: { toSessionId, body, responseRequired, asSession } };
 }
 
-export function broadcastMessage(asSession: string, toRoomId: string, body: string): MarshalCommand<BroadcastMessageResult> {
-  return { commandId: "BroadcastMessage", command: { toRoomId, body, asSession } };
+export function broadcastMessage(asSession: string, toRoomId: string, body: string, responseRequired = false): MarshalCommand<BroadcastMessageResult> {
+  return { commandId: "BroadcastMessage", command: { toRoomId, body, responseRequired, asSession } };
 }
 
 export function joinRoom(asSession: string, name: string, description?: string): MarshalCommand<JoinRoomResult> {
@@ -196,6 +196,7 @@ export interface MessageView {
   fromSessionId: string;
   toSessionId?: string;
   toRoomId?: string;
+  responseRequired?: boolean;
   body: string;
   sentAt: number;
   readByMe: boolean;
@@ -231,6 +232,7 @@ export interface NotifyChannelMeta {
   from_session?: string;
   from_nickname?: string;
   to_session?: string;
+  response_required?: boolean;
   body?: string;
   sent_at?: number;
 }

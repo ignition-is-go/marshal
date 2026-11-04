@@ -75,6 +75,7 @@ export interface NotifyChannelMeta {
   from_nickname?: string;
   to_session?: string;
   to_operator?: string | null;
+  response_required?: boolean;
   body?: string;
   body_truncated?: boolean;
   sent_at?: number;
@@ -103,16 +104,18 @@ export function sendMessage(
   asSession: string,
   toSessionId: string,
   body: string,
+  responseRequired = false,
 ): MarshalCommand<SendMessageResult> {
-  return { commandId: "SendMessage", command: { toSessionId, body, asSession } };
+  return { commandId: "SendMessage", command: { toSessionId, body, responseRequired, asSession } };
 }
 
 export function broadcastMessage(
   asSession: string,
   toRoomId: string,
   body: string,
+  responseRequired = false,
 ): MarshalCommand<BroadcastMessageResult> {
-  return { commandId: "BroadcastMessage", command: { toRoomId, body, asSession } };
+  return { commandId: "BroadcastMessage", command: { toRoomId, body, responseRequired, asSession } };
 }
 
 export function joinRoom(

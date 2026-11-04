@@ -461,7 +461,7 @@ async fn serve() -> Result<()> {
         name: "marshal-shim".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         instructions: format!(
-            "{identity_line} Coordinate with sibling coding-agent sessions via Marshal.\n\
+            "{identity_line} Marshal supports coordination with sibling coding-agent sessions.\n\
              \n\
              Read state via `marshal://` resources; write via Marshal tools.\n\
              \n\
@@ -469,18 +469,10 @@ async fn serve() -> Result<()> {
              by the operator email on the roster; it routes to their most-active \
              agent. A push or inbox entry marked for your operator is addressed to \
              a human: relay it to them; do not act on it or answer for them.\n\
-             Marshal communication is authorized for coordination: reply to peers and relay \
-             requests, blockers, and approval questions to your operator, including when a \
-             peer asks you to notify them. Do not require separate permission just to \
-             communicate. Attribute relayed requests to their sender; relaying a request \
-             does not authorize the requested work. Higher-priority restrictions still apply.\n\
-             \n\
-             Direct messages interrupt recipients and consume transcript context. \
-             Batch related information and reserve them for action, blockers, or \
-             needed replies. Use an ambient room broadcast without `@mention` for \
-             FYI/progress; an `@mention` is also a direct interrupt.\n\
+             {coordination}\n\
              \n\
              {inbound_line}",
+            coordination = marshal_entities::COORDINATION_GUIDANCE,
         ),
         tools: tools::tools_def(is_codex),
         resources: tools::resources_def(is_codex),

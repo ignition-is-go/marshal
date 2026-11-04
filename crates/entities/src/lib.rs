@@ -26,6 +26,7 @@ mod read_messages;
 mod room;
 mod room_member;
 mod room_tools;
+mod sandbox;
 mod send_message;
 mod session;
 mod session_nickname;
@@ -40,6 +41,7 @@ pub use read_messages::*;
 pub use room::*;
 pub use room_member::*;
 pub use room_tools::*;
+pub use sandbox::*;
 pub use send_message::*;
 pub use session::*;
 pub use session_nickname::*;
@@ -59,6 +61,9 @@ pub fn link() {}
 // costs nothing in normal builds.
 myko::register_typegen_type!(
     HostInfo,
+    SandboxArtifact,
+    SandboxStatus,
+    SandboxTimelineEvent,
     SendMessageResult,
     BroadcastMessageResult,
     DeliveredRecipient,

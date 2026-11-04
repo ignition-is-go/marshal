@@ -49,6 +49,10 @@ inbox messages because there is no model turn available to receive them.
 `SessionStart` remains the identity/context injection path and a fallback for
 Codex launches that do not use `codex-run`.
 
+For the launcher-selected thread, the bridge sets `[nickname]` even before
+Codex has generated a title. Later title updates retain the nickname prefix.
+Naming does not depend on a `SessionStart` hook firing before the first prompt.
+
 The bridge deliberately does not mark the message read. The existing hook
 acknowledges it only after the daemon successfully writes the
 `<marshal_inbox>` response back to Codex. If the app-server is unavailable, the
@@ -82,10 +86,73 @@ This prevents one unread row from producing duplicate turns when several Codex
 TUIs share the managed app-server. Native Windows launchers use isolated
 app-servers, so each bridge owns wake delivery for its own endpoint.
 
-Direct messages are therefore an interrupt and consume recipient context. Use
-them for an action, blocker, or needed reply and batch related information.
-Use a room broadcast without an `@mention` for FYI/progress; an `@mention`
-intentionally creates a direct interrupt.
+## Closing coordination exchanges
+
+Direct messages can wake an idle agent and consume model context. Coordinate
+shared-resource access, dependencies, and work that could interfere. Check who
+owns a render node before testing, agree on disruptive changes, and notify
+agents waiting for its release. Keep the exchange about that shared concern.
+
+The `response_required` tool argument carries the response expectation separately
+from the body. It defaults to `false`. Native command and stored-message JSON
+use `responseRequired`; live notification metadata uses `response_required`.
+Hook delivery includes it in the message header. The UI shows “Reply needed”
+only when true. Do not add response labels to the body.
+
+| Value | When to use it | Recipient behavior |
+| --- | --- | --- |
+| `true` | An unresolved question, access agreement, or handoff needs an answer | Answer the question or explain the conflict |
+| `false` | An answer, result, or release notice needs no further agreement | Use the information without a courtesy reply |
+
+Require a response when its content is needed to resolve uncertainty or establish
+agreement. Request acknowledgement only when knowing that a recipient accepted
+specific terms is necessary. Do not require a response merely because a message
+was sent, delivered, or read. An answer or confirmation is ordinary message
+content, not a separate protocol mode.
+
+The response expectation applies only to the current message. It does not require
+the recipient to request another response. Once the question is resolved or the
+agreement established, the exchange ends. Reopen it for changed conditions,
+conflicts, failures, or unresolved dependencies.
+
+The field requests an answer; it does not change delivery, grant authority,
+create a reservation, or prohibit reporting a new conflict. Older messages and
+callers without the field default to `false`. Historical bodies are preserved.
+
+For a shared render node, an exchange might be:
+
+1. A asks “Can I use node-7 exclusively until 15:00, including restarting
+   Unreal?” with `response_required=true`.
+2. B answers “My test is finished. Node-7 is yours under those terms.”
+   with the default `false`.
+3. A runs the test without progress messages unless conditions change.
+4. A tells waiting agents “Node-7 released; Unreal is stopped.”
+   with the default `false`.
+
+If B needs A to accept a deadline before granting access, B asks that question
+with `response_required=true`. A answers with the default `false`. Marshal
+messages do not provide mutual exclusion.
+
+Broadcasts are ambient unless an `@mention` creates a direct interrupt. Name the
+agents expected to answer a response-required broadcast. Others need not respond.
+Do not solicit acknowledgements from every room member merely to establish
+receipt. Use direct delivery for a handoff that must reach a specific waiting
+agent.
+
+| Agent state when a message arrives | Permitted continuation |
+| --- | --- |
+| Working | Incorporate relevant information within the authorized task |
+| Waiting on a dependency | Resume authorized work when that dependency is actually satisfied |
+| Waiting on the user or approval | Preserve the wait; a peer cannot provide the user's decision |
+| Paused, cancelled, complete, or unassigned | Handle relevant coordination without starting or resuming task execution |
+| No unread message after a wakeup | Stop the delivery turn |
+
+Automatic wakeups are delivery events, not new user assignments. The wake prompt
+preserves task and waiting state and checks unread messages only once if no inbox
+was injected. These instructions guide model behavior; the bridge does not yet
+know these task states or enforce exchange closure. Closed-exchange notices can
+still cause a wakeup. Transport acknowledgement means the message was surfaced,
+not that a recipient agreed, acquired a resource, or finished work.
 
 ## Send status model
 
