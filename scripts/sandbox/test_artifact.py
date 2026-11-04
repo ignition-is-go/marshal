@@ -19,6 +19,12 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(artifact['timeline'][0]['recipient'], 'two')
         self.assertEqual(artifact['instructions'], 'context')
 
+    def test_missing_scenario_coverage_cannot_export_as_success(self):
+        self.summary['checks'] = {'Late duplicate exercised': False}
+        artifact = build_artifact(self.manifest, self.summary, [], '')
+        self.assertFalse(artifact['tested'])
+        self.assertEqual(artifact['timeline'][-1]['text'], 'Not satisfied · Late duplicate exercised')
+
     def test_run_identity_survives_updates_and_distinguishes_early_failures(self):
         first = build_artifact(self.manifest, self.summary, [], '')
         self.summary['roles'] = {}

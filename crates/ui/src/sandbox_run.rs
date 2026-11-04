@@ -120,7 +120,14 @@ fn Conversation(artifact: SandboxArtifact) -> impl IntoView {
             .filter(|(_, event)| {
                 let focused = matches!(
                     event.kind.as_str(),
-                    "message" | "node_action" | "error" | "finished" | "interrupted"
+                    "message"
+                        | "node_action"
+                        | "work_action"
+                        | "intervention"
+                        | "scenario_check"
+                        | "error"
+                        | "finished"
+                        | "interrupted"
                 );
                 (full_trace.get() || focused)
                     && (who.is_empty()
@@ -207,7 +214,7 @@ fn TimelineRow(
         }.into_any();
     }
     let text = event.text;
-    if event.kind == "node_action" {
+    if matches!(event.kind.as_str(), "node_action" | "work_action") {
         return view! { <li class="sb-resource-row"><span class="sb-event-dot" aria-hidden="true"></span><p><strong>{actor}</strong>{" · "}{text}</p><time>{time}</time></li> }.into_any();
     }
     if event.kind == "finished" {
@@ -215,6 +222,8 @@ fn TimelineRow(
     }
     let kind = match event.kind.as_str() {
         "node_action" => "Resource",
+        "intervention" => "Test injection",
+        "scenario_check" => "Check",
         "finished" => "Run ended",
         "error" => "Error",
         "interrupted" => "Interrupted",

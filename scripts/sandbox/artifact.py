@@ -25,6 +25,12 @@ def build_artifact(manifest, summary, events, instructions):
             if result.get('error'):
                 text += f" · {result['error']}"
             row.update(actor=data['actor'], text=text)
+        elif event['kind'] == 'work_action':
+            result = data['result']
+            status = result.get('error') or ('accepted' if result.get('accepted') else 'inspected')
+            row.update(actor=data['actor'], text=f"{data['action'].capitalize()} {data.get('job_id') or 'assigned jobs'} · {status}")
+        elif event['kind'] == 'intervention':
+            row.update(recipient=data.get('recipient'), text=data['description'])
         elif event['kind'] in ('error', 'finished', 'interrupted'):
             row['text'] = json.dumps(data)
         elif event['kind'] == 'app_event':
@@ -48,10 +54,16 @@ def build_artifact(manifest, summary, events, instructions):
         else:
             continue
         timeline.append(row)
+    for name, passed in summary.get('checks', {}).items():
+        timeline.append({
+            'seconds': timeline[-1]['seconds'] if timeline else 0,
+            'kind': 'scenario_check', 'actor': None, 'recipient': None,
+            'text': f"{'Passed' if passed else 'Not satisfied'} · {name}",
+        })
     return {
         'schema_version': 1, 'run_id': manifest.get('run_id') or hashlib.sha256(identity.encode()).hexdigest(),
         'label': manifest['label'], 'model': manifest['model'], 'scenario': manifest['scenario'],
-        'status': summary['status'], 'tested': summary['simulated_test_completed'],
+        'status': summary['status'], 'tested': summary['simulated_test_completed'] and all(summary.get('checks', {}).values()),
         'released': summary['node_owner'] is None,
         'resource_violations': len(summary['resource_violations']), 'failed_turns': len(summary['failed_turns']),
         'messages': summary['messages'], 'turns': summary['turns'], 'wake_turns': summary.get('wake_turns', 0),
