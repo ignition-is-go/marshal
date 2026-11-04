@@ -90,11 +90,20 @@ pub fn use_focus() -> Focus {
 /// on the daemon's port — keeping the built bundle independent of which host it
 /// lands on. Falls back to the dev default under `trunk serve` (localhost).
 fn daemon_address() -> String {
-    let host = web_sys::window()
-        .and_then(|w| w.location().hostname().ok())
+    let location = web_sys::window().map(|w| w.location());
+    let host = location
+        .as_ref()
+        .and_then(|location| location.hostname().ok())
         .unwrap_or_default();
     if !host.is_empty() && host != "localhost" && host != "127.0.0.1" {
-        format!("{host}:{DAEMON_PORT}")
+        let (scheme, port) = match location
+            .and_then(|location| location.protocol().ok())
+            .as_deref()
+        {
+            Some("https:") => ("wss", 443),
+            _ => ("ws", DAEMON_PORT),
+        };
+        format!("{scheme}://{host}:{port}")
     } else {
         format!("localhost:{DAEMON_PORT}")
     }
