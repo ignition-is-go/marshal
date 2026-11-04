@@ -35,9 +35,9 @@ def replay_oracle(events, scenario):
                 if data['job_id'] in completed:
                     errors.append('Repeated accepted audit')
                 completed.add(data['job_id'])
-    if busy is not None or len(completed) != 4:
+    if busy is not None or len(completed) != (6 if scenario == 'three-way' else 4):
         errors.append('Incomplete work')
-    if scenario == 'contention' and sorted(tested.values()) != [1, 1]:
+    if scenario in ('contention', 'three-way') and sorted(tested.values()) != ([1, 1, 1] if scenario == 'three-way' else [1, 1]):
         errors.append('Expected one resource check per agent')
     return errors
 
@@ -87,7 +87,7 @@ def assess(directory):
             origin = 'TEST INJECTION' if message['messageId'] in injected else 'AGENT'
             transcripts.append(f'+{event["seconds"]:.1f}s {origin} {roles.get(message["fromSessionId"], "unknown")} -> {roles.get(message.get("toSessionId"), "room")} responseRequired={message.get("responseRequired", "absent")}\n{message["body"]}\n')
     groups = []
-    for scenario in ('independent', 'approval-wait', 'contention'):
+    for scenario in ('independent', 'approval-wait', 'contention', 'three-way'):
         for condition in ('baseline', 'candidate'):
             rows = [row for row in trials if row['scenario'] == scenario and row['condition'] == condition]
             if not rows:
@@ -97,7 +97,7 @@ def assess(directory):
                 values = [row[metric] for row in rows]
                 group[metric] = {'median': statistics.median(values), 'min': min(values), 'max': max(values), 'total': sum(values)}
             groups.append(group)
-    report = {'planned_trials': len(manifest['pairs']) * 2, 'completed_trials': len(trials),
+    report = {'planned_trials': len(manifest['pairs']) * len(manifest.get('conditions', ['baseline', 'candidate'])), 'completed_trials': len(trials),
               'reported_tokens': sum(row['total_tokens'] for row in trials), 'trials': trials, 'groups': groups}
     (directory / 'assessment.json').write_text(json.dumps(report, indent=2))
     (directory / 'transcripts.txt').write_text('\n'.join(transcripts))

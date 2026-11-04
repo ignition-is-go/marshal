@@ -18,15 +18,15 @@ async def campaign(args):
     runner.mkdir()
     for source in Path(__file__).parent.glob('*.py'):
         shutil.copy2(source, runner / source.name)
-    pairs = [(scenario, repeat) for scenario in ('independent', 'approval-wait', 'contention') for repeat in range(1, args.repeats + 1)]
+    pairs = [(scenario, repeat) for scenario in args.scenarios for repeat in range(1, args.repeats + 1)]
     random.Random(20261104).shuffle(pairs)
     manifest = {
         'model': args.model, 'baseline_commit': args.baseline_commit, 'candidate_commit': args.candidate_commit,
         'repeats_per_condition_per_scenario': args.repeats, 'pairs': pairs,
-        'concurrent_trials': 2, 'trial_limits': {'seconds': 420, 'turns': 20, 'messages': 24, 'tokens': 650000, 'quiet_seconds': 35},
+        'concurrent_trials': 2, 'scenarios': args.scenarios, 'scenario_token_limits': {'three-way': 900000}, 'trial_limits': {'seconds': 420, 'turns': 20, 'messages': 24, 'tokens': 650000, 'quiet_seconds': 35},
         'campaign_token_budget': args.max_tokens,
         'source_hashes': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in runner.glob('*.py')},
-        'representation': 'Baseline injected requests use body labels; candidate uses response_required. Semantic requests and scenario tools are otherwise identical.',
+        'representation': {'baseline': args.baseline_representation, 'candidate': args.candidate_representation},
     }
     (args.output / 'campaign.json').write_text(json.dumps(manifest, indent=2))
     results = []
@@ -35,10 +35,11 @@ async def campaign(args):
         name = f'{scenario}-{condition}-{repeat:02}'
         output = args.output / name
         binaries = args.baseline_bin if condition == 'baseline' else args.candidate_bin
-        env = dict(os.environ, MARSHAL_EVAL_CONDITION=condition, MARSHAL_EVAL_SCENARIO=scenario)
+        env = dict(os.environ, MARSHAL_EVAL_CONDITION=condition, MARSHAL_EVAL_SCENARIO=scenario,
+                   MARSHAL_EVAL_REPRESENTATION=args.baseline_representation if condition == 'baseline' else args.candidate_representation)
         command = [sys.executable, str(runner / 'behavior.py'), '--output', str(output), '--label', name,
                    '--model', args.model, '--shim', str(binaries / 'marshal-shim'), '--daemon', str(binaries / 'marshal-daemon'),
-                   '--seconds', '420', '--max-turns', '20', '--max-messages', '24', '--max-tokens', '650000']
+                   '--seconds', '420', '--max-turns', '20', '--max-messages', '24', '--max-tokens', '900000' if scenario == 'three-way' else '650000']
         started = time.monotonic()
         with (args.output / f'{name}.log').open('wb') as log:
             process = await asyncio.create_subprocess_exec(*command, env=env, stdout=log, stderr=log)
@@ -80,6 +81,9 @@ if __name__ == '__main__':
     parser.add_argument('--baseline-commit', required=True)
     parser.add_argument('--candidate-commit', required=True)
     parser.add_argument('--model', required=True)
+    parser.add_argument('--scenarios', nargs='+', choices=['independent', 'approval-wait', 'contention', 'three-way'], default=['independent', 'approval-wait', 'contention'])
+    parser.add_argument('--baseline-representation', choices=['body', 'metadata'], default='body')
+    parser.add_argument('--candidate-representation', choices=['body', 'metadata'], default='metadata')
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--max-tokens', type=int, default=8_000_000)
     asyncio.run(campaign(parser.parse_args()))

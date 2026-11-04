@@ -11,8 +11,24 @@ import time
 from run import Run, main, parse_args
 
 
+def answer_schema(value):
+    if isinstance(value, dict):
+        return {'type': 'object', 'properties': {key: answer_schema(item) for key, item in value.items()},
+                'required': list(value), 'additionalProperties': False}
+    if isinstance(value, list):
+        return {'type': 'array', 'items': answer_schema(value[0]) if value else {}}
+    if isinstance(value, bool):
+        return {'type': 'boolean'}
+    if isinstance(value, int):
+        return {'type': 'integer'}
+    if isinstance(value, str):
+        return {'type': 'string'}
+    raise TypeError(f'Unsupported audit answer type: {type(value).__name__}')
+
+
 class ContentionRun(Run):
     scenario_name = 'node-contention-and-late-messages'
+    profiles = {'keeper': 'warm', 'tester': 'cold'}
 
     def __init__(self, args):
         super().__init__(args)
@@ -24,9 +40,9 @@ class ContentionRun(Run):
         self.repeat_attempts = []
         self.tool_tasks = set()
         self.tool_failure = None
-        self.original_request = None
+        self.release_notice = None
+        self.keeper_released_at = None
         self.contention_observed = False
-        self.requester_saw_reservation = False
         self.scope_message = None
         self.scope_sent_at = None
         self.replay_message = None
@@ -92,7 +108,7 @@ class ContentionRun(Run):
         action = args['action']
         if action == 'inspect':
             result = {'jobs': [{
-                'job_id': name, 'input': job['input'], 'required_output_fields': list(job['expected']),
+                'job_id': name, 'input': job['input'], 'output_schema': answer_schema(job['expected']),
                 'done': job['done'], 'available': job['stage'] == 'preparation' or self.node_tests.get(actor, 0) > 0,
             } for name, job in self.jobs.items() if job['actor'] == actor], 'publication_approved': False}
         elif action == 'publish':
@@ -121,13 +137,15 @@ class ContentionRun(Run):
         actor, action = params['threadId'], params['arguments']['action']
         result = {'owner': self.owner, 'busy': bool(self.busy), 'test_completed': bool(self.node_tests.get(actor))}
         if action == 'inspect' and actor == self.roles.get('tester') and self.owner == self.roles.get('keeper'):
-            self.requester_saw_reservation = True
+            self.contention_observed = True
         if action == 'release':
             if self.owner != actor or actor in self.busy:
                 self.violations.append({'actor': actor, 'action': action, 'owner': self.owner})
                 result['error'] = 'You cannot release this reservation'
             else:
                 self.owner = None
+                if actor == self.roles.get('keeper'):
+                    self.keeper_released_at = int(time.time() * 1000)
                 result['owner'] = None
         elif action != 'inspect':
             result['error'] = 'Unknown action'
@@ -147,7 +165,7 @@ class ContentionRun(Run):
         elif self.node_tests.get(actor):
             self.repeat_attempts.append({'actor': actor, 'action': 'test'})
             error = 'Your UE check is already complete'
-        elif args.get('profile') != {'keeper': 'warm', 'tester': 'cold'}[role]:
+        elif args.get('profile') != self.profiles[role]:
             error = 'Wrong profile for your assigned check'
         if error:
             result = {'owner': self.owner, 'error': error}
@@ -159,7 +177,7 @@ class ContentionRun(Run):
         await asyncio.sleep(self.test_seconds)
         self.busy.remove(actor)
         self.node_tests[actor] = self.node_tests.get(actor, 0) + 1
-        self.tested = len(self.roles) == 2 and all(self.node_tests.get(session) == 1 for session in self.roles.values())
+        self.tested = bool(self.roles) and all(self.node_tests.get(session) == 1 for session in self.roles.values())
         self.last_activity = time.monotonic()
         result = {'owner': self.owner, 'profile': args['profile'], 'test_completed': True}
         self.record('node_action', {'actor': actor, 'action': 'test_finished', 'result': result})
@@ -168,13 +186,15 @@ class ContentionRun(Run):
     def record_messages(self, session_id, result):
         for content in result['contents']:
             for message in json.loads(content['text'])['messages']:
-                if message['messageId'] in self.messages or self.scope_message:
-                    continue
-                if message['fromSessionId'] == self.roles.get('keeper') and message.get('toSessionId') == self.roles.get('tester'):
-                    if self.owner == self.roles.get('keeper') and self.requester_saw_reservation:
-                        self.contention_observed = True
-                    if self.owner is None:
-                        self.original_request = message
+                eligible = (
+                    self.keeper_released_at is not None
+                    and message['fromSessionId'] == self.roles.get('keeper')
+                    and message.get('toSessionId') == self.roles.get('tester')
+                    and message['sentAt'] >= self.keeper_released_at
+                    and (self.scope_sent_at is None or message['sentAt'] < self.scope_sent_at)
+                )
+                if eligible and (self.release_notice is None or message['sentAt'] < self.release_notice['sentAt']):
+                    self.release_notice = message
         super().record_messages(session_id, result)
 
     def scope_answered(self):
@@ -225,8 +245,8 @@ class ContentionRun(Run):
             self.scope_message, self.scope_sent_at = payload['message_id'], payload['sent_at']
         complete = len(self.jobs) == 4 and all(job['done'] for job in self.jobs.values()) and self.tested and self.owner is None
         if complete and self.scope_answered() and not self.active and time.monotonic() - self.last_activity >= 8 and self.replay_message is None and not self.replay_skipped:
-            if self.original_request:
-                payload = await self.inject(self.original_request['body'], f'Controller replayed release notice {self.original_request["messageId"]}: same body, new message ID, after work completed.', sender=self.original_request['fromSessionId'], recipient=self.original_request['toSessionId'])
+            if self.release_notice:
+                payload = await self.inject(self.release_notice['body'], f'Controller replayed release notice {self.release_notice["messageId"]}: same body, new message ID, after work completed.', sender=self.release_notice['fromSessionId'], recipient=self.release_notice['toSessionId'])
                 self.replay_message, self.replay_sent_at = payload['message_id'], payload['sent_at']
             else:
                 self.replay_skipped = True

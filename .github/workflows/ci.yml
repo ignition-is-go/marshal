@@ -39,6 +39,8 @@ jobs:
       - run: cargo flux run check
       - run: cargo flux run lint
       - run: cargo flux run test
+      - name: Test simulation fixture and scoring contracts
+        run: python3 -m unittest discover -s scripts/sandbox -v
       - name: Test release dispatch contract
         run: python3 scripts/test_release_dispatch_contract.py
 

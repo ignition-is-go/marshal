@@ -19,10 +19,11 @@ class AssessmentTests(unittest.TestCase):
     def test_early_failure_without_events_remains_in_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'campaign.json').write_text(json.dumps({'pairs': [['independent', 1]]}))
+            (root / 'campaign.json').write_text(json.dumps({'pairs': [['independent', 1]], 'conditions': ['candidate']}))
             (root / 'results.json').write_text(json.dumps([{'name': 'failed', 'scenario': 'independent', 'condition': 'candidate', 'repeat': 1, 'exit_code': 2, 'elapsed_seconds': 1, 'summary': {}}]))
             with contextlib.redirect_stdout(io.StringIO()):
                 report = assess(root)
+            self.assertEqual(report['planned_trials'], 1)
             self.assertEqual(report['completed_trials'], 1)
             self.assertFalse(report['trials'][0]['passed'])
 
