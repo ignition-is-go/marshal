@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "run_id": "sandbox-fixture-1",
+  "label": "candidate",
+  "model": "test-model",
+  "scenario": "render-node-handoff",
+  "status": "quiescent",
+  "tested": true,
+  "released": true,
+  "resource_violations": 0,
+  "failed_turns": 0,
+  "messages": 1,
+  "turns": 2,
+  "wake_turns": 0,
+  "input_tokens": 100,
+  "cached_input_tokens": 50,
+  "output_tokens": 10,
+  "codex_version": "fixture",
+  "binaries": {},
+  "roles": {"keeper": "session-one"},
+  "instructions": "Coordinate shared resources.",
+  "timeline": [{"seconds": 1.0, "kind": "message", "actor": "session-one", "recipient": null, "text": "Node released. No response required."}]
+}

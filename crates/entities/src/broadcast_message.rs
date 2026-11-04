@@ -36,6 +36,9 @@ use crate::{
 #[myko_command(BroadcastMessageResult)]
 pub struct BroadcastMessage {
     pub to_room_id: RoomId,
+    #[serde(default)]
+    pub response_required: bool,
+
     pub body: String,
 
     /// Self-identified sender for connectionless paths (HTTP-MCP agents).
@@ -134,6 +137,7 @@ impl CommandHandler for BroadcastMessage {
         // attempted.
         let now = Utc::now().timestamp_millis();
         let msg = Message {
+            response_required: self.response_required,
             id: MessageId(Arc::from(Uuid::now_v7().to_string())),
             from_session_id: sender.id.clone(),
             to_session_id: None,
@@ -209,6 +213,7 @@ impl CommandHandler for BroadcastMessage {
             // human @mention (`@max@lucid.rocks`) carries `to_operator` so it's
             // surfaced to the person, same as a direct human-addressed send.
             let ping = Message {
+                response_required: self.response_required,
                 id: MessageId(Arc::from(Uuid::now_v7().to_string())),
                 from_session_id: sender.id.clone(),
                 to_session_id: Some(target.id.clone()),
@@ -237,6 +242,7 @@ impl CommandHandler for BroadcastMessage {
                         "to_session": target.id.0.as_ref(),
                         "to_operator": to_operator,
                         "room": room.id.0.as_ref(),
+                        "response_required": self.response_required,
                         "body": context_body,
                         "body_truncated": body_truncated,
                         "sent_at": now,

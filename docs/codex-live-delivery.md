@@ -93,13 +93,16 @@ shared-resource access, dependencies, and work that could interfere. Check who
 owns a render node before testing, agree on disruptive changes, and notify
 agents waiting for its release. Keep the exchange about that shared concern.
 
-Each message has one response expectation. In this instruction change, express
-it in the message body:
+The `response_required` tool argument carries the response expectation separately
+from the body. It defaults to `false`. Native command and stored-message JSON
+use `responseRequired`; live notification metadata uses `response_required`.
+Hook delivery includes it in the message header. The UI shows “Reply needed”
+only when true. Do not add response labels to the body.
 
-| Response expectation | When to use it | Recipient behavior |
+| Value | When to use it | Recipient behavior |
 | --- | --- | --- |
-| `Response required: <question or agreement>` | An unresolved question, access agreement, or handoff needs this recipient's answer | Answer the specific question, accept the stated terms, or explain the conflict or blocker |
-| `No response required` | Information, an answer, a confirmation, a result, or a release notice needs no further agreement | Use the information without a courtesy reply; report a relevant conflict or changed condition |
+| `true` | An unresolved question, access agreement, or handoff needs an answer | Answer the question or explain the conflict |
+| `false` | An answer, result, or release notice needs no further agreement | Use the information without a courtesy reply |
 
 Require a response when its content is needed to resolve uncertainty or establish
 agreement. Request acknowledgement only when knowing that a recipient accepted
@@ -112,24 +115,23 @@ the recipient to request another response. Once the question is resolved or the
 agreement established, the exchange ends. Reopen it for changed conditions,
 conflicts, failures, or unresolved dependencies.
 
-These are plain-language conventions, not parsed fields or transport controls.
-An unlabelled message does not automatically require a response. A sender cannot
-silence a necessary conflict report by adding `No response required`.
+The field requests an answer; it does not change delivery, grant authority,
+create a reservation, or prohibit reporting a new conflict. Older messages and
+callers without the field default to `false`. Historical bodies are preserved.
 
 For a shared render node, an exchange might be:
 
-1. A to B: "Can I use node-7 exclusively until 15:00, including restarting
-   Unreal? Response required."
-2. B to A: "My test is finished. Node-7 is yours under those terms.
-   No response required."
+1. A asks “Can I use node-7 exclusively until 15:00, including restarting
+   Unreal?” with `response_required=true`.
+2. B answers “My test is finished. Node-7 is yours under those terms.”
+   with the default `false`.
 3. A runs the test without progress messages unless conditions change.
-4. A to agents waiting for the node: "Node-7 released; Unreal is stopped.
-   No response required."
+4. A tells waiting agents “Node-7 released; Unreal is stopped.”
+   with the default `false`.
 
-If B needs A to accept a release deadline before granting access, B can ask:
-"Will you release node-7 by 15:00? Response required." A's answer can be
-"Agreed. No response required." A request for access is not itself a reservation
-or a lock. Marshal messages do not provide mutual exclusion.
+If B needs A to accept a deadline before granting access, B asks that question
+with `response_required=true`. A answers with the default `false`. Marshal
+messages do not provide mutual exclusion.
 
 Broadcasts are ambient unless an `@mention` creates a direct interrupt. Name the
 agents expected to answer a response-required broadcast. Others need not respond.

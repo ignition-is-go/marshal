@@ -193,6 +193,7 @@ pub fn MessagesPanel() -> impl IntoView {
                         let sent_at = m.sent_at;
                         let abs = time::abs_time(sent_at);
                         let body = m.body.clone();
+                        let response_required = m.response_required;
                         view! {
                             <li class="msg">
                                 <div class="msg-meta">
@@ -202,6 +203,7 @@ pub fn MessagesPanel() -> impl IntoView {
                                     <span class="nick">{from}</span>
                                     <span class="arrow">"→"</span>
                                     <span class=to_class>{to_label}</span>
+                                    {response_required.then(|| view! { <span class="reply-needed">"Reply needed"</span> })}
                                 </div>
                                 <div class="body">{body}</div>
                             </li>
@@ -238,5 +240,6 @@ const MESSAGES_CSS: &str = r#"
 .msg .to { color: var(--color-success); font-weight: 600; }
 .msg .to.room { color: var(--color-info); }
 .msg .to.dim { color: var(--color-text-secondary); }
+.reply-needed { color:var(--color-warning); border:1px solid currentColor; border-radius:4px; padding:1px 5px; font-size:10px; }
 .msg .body { display: block; margin-top: 2px; color: var(--color-text-primary); white-space: normal; word-break: break-word; line-height: 1.45; }
 "#;
