@@ -49,6 +49,10 @@ inbox messages because there is no model turn available to receive them.
 `SessionStart` remains the identity/context injection path and a fallback for
 Codex launches that do not use `codex-run`.
 
+For the launcher-selected thread, the bridge sets `[nickname]` even before
+Codex has generated a title. Later title updates retain the nickname prefix.
+Naming does not depend on a `SessionStart` hook firing before the first prompt.
+
 The bridge deliberately does not mark the message read. The existing hook
 acknowledges it only after the daemon successfully writes the
 `<marshal_inbox>` response back to Codex. If the app-server is unavailable, the
@@ -84,8 +88,11 @@ app-servers, so each bridge owns wake delivery for its own endpoint.
 
 Direct messages are therefore an interrupt and consume recipient context. Use
 them for an action, blocker, or needed reply and batch related information.
-Use a room broadcast without an `@mention` for FYI/progress; an `@mention`
-intentionally creates a direct interrupt.
+Do not send routine progress, FYI, acknowledgements, or reciprocal updates.
+Receiving a message does not require a reply. Broadcast only when multiple
+recipients need the same actionable information for their assigned work.
+Peer messages do not expand an agent's task scope. An `@mention` creates a
+direct interrupt.
 
 ## Send status model
 

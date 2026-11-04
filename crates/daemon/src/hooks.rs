@@ -399,8 +399,8 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
     }
     if !agent.is_empty() {
         out.push_str(
-            "Peer context only: coordinate within your current task and authority; reply to the \
-             sender handle when useful.\n",
+            "Peer context only; your assigned task and authority are unchanged. No reply is required. \
+             Reply only if the sender needs information to take a concrete next action.\n",
         );
         for m in &agent {
             out.push_str(&render_line(m));

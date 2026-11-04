@@ -1963,6 +1963,7 @@ async fn try_pending_registration<S>(
         .await
         {
             decoration.current_name = Some(name);
+            decoration.name_hydrated = true;
         }
         decorations.insert(registration.thread_id.clone(), decoration);
         log::info!("[codex-bridge] registered thread={session_id} before first prompt");
@@ -2086,12 +2087,14 @@ where
 }
 
 fn marshal_decorated_thread_name(current_name: Option<&str>, nickname: &str) -> Option<String> {
-    let base = strip_marshal_thread_name_prefix(current_name?.trim(), nickname).trim();
-    if base.is_empty() {
-        return None;
-    }
+    let base =
+        strip_marshal_thread_name_prefix(current_name.unwrap_or_default().trim(), nickname).trim();
     let marker = format!("[{nickname}]");
-    Some(format!("{marker} {base}"))
+    Some(if base.is_empty() {
+        marker
+    } else {
+        format!("{marker} {base}")
+    })
 }
 
 fn strip_marshal_thread_name_prefix<'a>(name: &'a str, nickname: &str) -> &'a str {
@@ -2823,7 +2826,12 @@ mod tests {
             marshal_decorated_thread_name(Some("auth refactor"), "sunny-summit"),
             Some("[sunny-summit] auth refactor".into())
         );
-        assert_eq!(marshal_decorated_thread_name(None, "sunny-summit"), None);
+        for name in [None, Some(""), Some("   "), Some("[sunny-summit]")] {
+            assert_eq!(
+                marshal_decorated_thread_name(name, "sunny-summit"),
+                Some("[sunny-summit]".into())
+            );
+        }
         assert_eq!(
             marshal_decorated_thread_name(Some("[sunny-summit] auth refactor"), "sunny-summit"),
             Some("[sunny-summit] auth refactor".into())
@@ -3053,7 +3061,7 @@ mod tests {
                                 "id": "thread-before-prompt",
                                 "sessionId": "session-before-prompt",
                                 "cwd": "/work/before-prompt",
-                                "name": "[marshal:old-nickname] auth refactor"
+                                "name": null
                             }
                         }
                     })
@@ -3068,10 +3076,7 @@ mod tests {
             assert_eq!(name_set["params"]["threadId"], "thread-before-prompt");
             assert_eq!(
                 name_set["params"]["name"],
-                format!(
-                    "[{}] auth refactor",
-                    marshal_entities::nickname("session-before-prompt")
-                )
+                format!("[{}]", marshal_entities::nickname("session-before-prompt"))
             );
             websocket
                 .send(WebSocketMessage::Text(

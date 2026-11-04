@@ -620,7 +620,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct messages interrupt one recipient and consume transcript context. Use them for action, blockers, or needed replies; batch related details. Put FYI/progress in an ambient broadcast without @mention. Address by nickname, session id/prefix, or operator email. `persisted` confirms storage; `live_push` covers synchronous delivery; `wake` may remain `unobserved` because wake happens asynchronously.".into(),
+            description: "Direct messages interrupt one recipient and consume transcript context. Send only a request, blocker, ownership conflict, or result that changes the recipient's next action within their assigned task. No routine progress, FYI, acknowledgements, or reciprocal updates. Receiving a message does not require a reply. Batch necessary details. Address by nickname, session id/prefix, or operator email. `persisted` confirms storage; `live_push` covers synchronous delivery; `wake` may remain `unobserved` because wake happens asynchronously.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to":   { "type": "string", "description": "Nickname, session id/prefix, or operator email from the roster." },
@@ -631,7 +631,7 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "broadcast".into(),
-            description: "Ambient room update, preferred for FYI/progress because it is not injected into members' turns. An @mention also creates a direct interrupt, so use one only when that peer needs to act or reply. Returns counts plus bounded failure and mention details.".into(),
+            description: "Send only when multiple room members need the same actionable information for their assigned work. Do not broadcast routine progress or FYI. An @mention also creates a direct interrupt, so use one only when that peer needs to act or reply. Returns counts plus bounded failure and mention details.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },
