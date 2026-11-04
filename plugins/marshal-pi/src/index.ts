@@ -101,7 +101,7 @@ async function init(pi: ExtensionAPI) {
       sessionCtx.ui.notify(`marshal: new message from ${who}`, "info");
     }
 
-    const text = meta.body ? `new message from ${who}: ${meta.body}` : undefined;
+    const text = meta.body ? `new message from ${who} [response_required=${meta.response_required ?? false}]: ${meta.body}` : undefined;
     void (async () => {
       try {
         if (text) {
@@ -391,16 +391,17 @@ async function init(pi: ExtensionAPI) {
     parameters: Type.Object({
       to: Type.String({ description: "recipient session id or nickname" }),
       body: Type.String({ description: "message text" }),
+      response_required: Type.Optional(Type.Boolean({ description: "Whether this message needs an answer; defaults to false. Keep it out of the body." })),
     }),
     async execute(
       _toolCallId: string,
-      params: { to: string; body: string },
+      params: { to: string; body: string; response_required?: boolean },
     ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId || !daemon.isConnected())
         return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
-        const r = await daemon.sendMessage(sessionId, params.to, params.body);
+        const r = await daemon.sendMessage(sessionId, params.to, params.body, params.response_required);
         const livePush = r.livePush ?? (r.deliveredLive ? "delivered" : "unknown");
         const wake = r.wake ?? (r.deliveredLive ? "not_needed" : "unobserved");
         return {
@@ -421,16 +422,17 @@ async function init(pi: ExtensionAPI) {
     parameters: Type.Object({
       room: Type.String({ description: "room id/name (e.g. everyone, host:myhost, op:user@example.com, project:marshal)" }),
       body: Type.String({ description: "message text" }),
+      response_required: Type.Optional(Type.Boolean({ description: "Whether this message needs an answer; defaults to false. Keep it out of the body." })),
     }),
     async execute(
       _toolCallId: string,
-      params: { room: string; body: string },
+      params: { room: string; body: string; response_required?: boolean },
     ): Promise<MarshalToolResult> {
       if (!daemon || !sessionId || !daemon.isConnected())
         return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
-        const r = await daemon.broadcast(sessionId, params.room, params.body);
+        const r = await daemon.broadcast(sessionId, params.room, params.body, params.response_required);
         return {
           content: [{ type: "text", text: `broadcast to ${r.toRoomName}: delivered ${r.delivered.length}/${r.total}` }],
           details: { toRoom: r.toRoomName, delivered: r.delivered.length, total: r.total },
