@@ -69,9 +69,9 @@ scenario tasks and generated instructions. The private config and process logs
 are also retained. Treat the run directory as private; transcripts can include
 account metadata and experimental prompts.
 
-### View runs in the Marshal UI
+### View runs in Marshal Zoo
 
-Open the **Sandbox** view from a pane's activity bar. Import a run's
+Open the **Zoo** view from a pane's activity bar. Import a run's
 `sandbox-run.json` file to save it to the connected daemon's shared experiment
 history. The run library is searchable by label, model, scenario, or ID.
 

@@ -212,7 +212,7 @@ fn items() -> Vec<ActivityNode<Slot>> {
             )),
             ActivityNode::activity(ActivityDef::new(
                 ActivityId::new("sandbox"),
-                "Sandbox",
+                "Zoo",
                 ActivityIcon::Svg(ICON_FLASK.to_string()),
                 |_| true,
                 |_p, _d| {

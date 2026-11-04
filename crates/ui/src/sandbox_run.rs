@@ -257,7 +257,7 @@ fn Comparison(
     view! {
         <div class="sb-comparison">
             <div class="sb-compare-heading"><div><h4>"Compare outcomes first"</h4><p class="sb-muted">"Fewer messages only help when coordination still succeeds."</p></div>
-                <label>"Baseline"<select aria-label="Sandbox baseline" prop:value=move || reference.get().map(|a| a.run_id).unwrap_or_default()
+                <label>"Baseline"<select aria-label="Zoo baseline" prop:value=move || reference.get().map(|a| a.run_id).unwrap_or_default()
                     on:change=move |ev| baseline.set(event_target_value(&ev))>
                     <option value="">"Select another run"</option>
                     {move || runs.get().iter().filter(|run| run.artifact.run_id != a.with_value(|a| a.run_id.clone())).map(|run| view! {

@@ -87,7 +87,7 @@ pub fn SandboxPanel() -> impl IntoView {
                                 }
                                 selected.set(id.0.to_string());
                                 search.set(String::new());
-                                note.set("Run saved to shared sandbox history.".into());
+                                note.set("Run saved to shared Zoo history.".into());
                             }
                             Err(error) => {
                                 failed_import.set(true);
@@ -109,11 +109,11 @@ pub fn SandboxPanel() -> impl IntoView {
     view! {
         <section class="sandbox-panel">
             <header class="sb-header">
-                <div><div class="sb-eyebrow">"MARSHAL / EXPERIMENTS"</div><h2>"Sandbox"</h2>
+                <div><div class="sb-eyebrow">"AGENT BEHAVIOR / EXPERIMENTS"</div><h2>"Marshal Zoo"</h2>
                     <p>"Review how agents coordinate, use shared resources, and stop."</p></div>
                 <label class="sb-import" class:sb-disabled=move || pending.get() || !connected.get()>
                     <span aria-hidden="true">"+"</span> {move || if pending.get() { "Importing…" } else { "Import run" }}
-                    <input class="sb-file-input" type="file" accept=".json,application/json" aria-label="Import sandbox run"
+                    <input class="sb-file-input" type="file" accept=".json,application/json" aria-label="Import Zoo run"
                         disabled=move || pending.get() || !connected.get() on:change=import />
                 </label>
             </header>
@@ -126,9 +126,9 @@ pub fn SandboxPanel() -> impl IntoView {
             <div class="sb-workspace">
                 <aside class="sb-library" aria-label="Experiment library">
                     <div class="sb-library-heading"><h3>"Runs"</h3><span>{move || all_runs.get().len()}</span></div>
-                    <input class="sb-search" type="search" placeholder="Find a run…" aria-label="Search sandbox runs"
+                    <input class="sb-search" type="search" placeholder="Find a run…" aria-label="Search Zoo runs"
                         prop:value=move || search.get() on:input=move |ev| search.set(event_target_value(&ev)) />
-                    <nav class="sb-run-list" aria-label="Sandbox runs">
+                    <nav class="sb-run-list" aria-label="Zoo runs">
                         {move || visible.get().into_iter().map(|run| {
                             let a = &run.artifact;
                             let id = a.run_id.clone();

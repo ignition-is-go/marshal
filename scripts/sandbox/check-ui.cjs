@@ -22,14 +22,14 @@ const number = value => value.toLocaleString('en-US');
     const page = await browser.newPage({ viewport: { width: 1500, height: 1100 } });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    async function openSandbox(target) {
+    async function openZoo(target) {
       await target.goto(url + '/?reset');
       await target.getByRole('button', { name: 'Roster', exact: true }).first().waitFor();
       if (await target.getByRole('button', { name: 'Roster', exact: true }).count() !== 1) {
         throw Error('Default layout must have one pane');
       }
-      await target.getByRole('button', { name: 'Sandbox', exact: true }).click();
-      await target.getByLabel('Import sandbox run').waitFor({ state: 'attached' });
+      await target.getByRole('button', { name: 'Zoo', exact: true }).click();
+      await target.getByLabel('Import Zoo run').waitFor({ state: 'attached' });
     }
     async function chooseRun(target, id) {
       await target.locator(`.sb-run[data-run-id="${id}"]`).click();
@@ -39,11 +39,11 @@ const number = value => value.toLocaleString('en-US');
       if (value !== number(artifact.messages)) throw Error('Incorrect message count');
     }
     async function importFile(file) {
-      await page.getByLabel('Import sandbox run').setInputFiles(file);
-      await page.getByRole('status').filter({ hasText: 'Run saved to shared sandbox history.' }).waitFor();
+      await page.getByLabel('Import Zoo run').setInputFiles(file);
+      await page.getByRole('status').filter({ hasText: 'Run saved to shared Zoo history.' }).waitFor();
     }
 
-    await openSandbox(page);
+    await openZoo(page);
     await importFile(artifactPath);
     await page.locator('.sb-outcome').filter({ hasText: 'Completed' }).waitFor();
     await checkMessages(page);
@@ -52,9 +52,9 @@ const number = value => value.toLocaleString('en-US');
     await importFile(artifactPath);
     if (await page.locator('.sb-run').count() !== runCount) throw Error('Reimport duplicated run');
 
-    await page.getByLabel('Search sandbox runs').fill('no-such-run');
+    await page.getByLabel('Search Zoo runs').fill('no-such-run');
     await page.getByText('No matching runs.', { exact: true }).waitFor();
-    await page.getByLabel('Search sandbox runs').fill('');
+    await page.getByLabel('Search Zoo runs').fill('');
     await page.getByLabel('Search timeline').fill(lastMessage.text);
     if (await page.locator('.sb-message').count() !== 1) throw Error('Timeline search did not filter');
     await page.getByLabel('Search timeline').fill('');
@@ -68,7 +68,7 @@ const number = value => value.toLocaleString('en-US');
 
     await page.getByRole('tab', { name: 'Conversation', exact: true }).focus();
     await page.getByRole('tab', { name: 'Conversation', exact: true }).press('ArrowRight');
-    await page.getByLabel('Sandbox baseline').waitFor();
+    await page.getByLabel('Zoo baseline').waitFor();
     await page.getByRole('tab', { name: 'Compare', exact: true }).press('ArrowRight');
     await page.getByText('Generated agent instructions', { exact: true }).waitFor();
     await page.locator('.sb-context pre').waitFor();
@@ -78,10 +78,10 @@ const number = value => value.toLocaleString('en-US');
     await importFile(path.resolve(__dirname, '../../crates/daemon/tests/fixtures/sandbox-run.json'));
     await chooseRun(page, artifact.run_id);
     await page.getByRole('tab', { name: 'Compare', exact: true }).click();
-    if (await page.getByLabel('Sandbox baseline').locator(`option[value="${artifact.run_id}"]`).count()) {
+    if (await page.getByLabel('Zoo baseline').locator(`option[value="${artifact.run_id}"]`).count()) {
       throw Error('A run cannot be its own baseline');
     }
-    await page.getByLabel('Sandbox baseline').selectOption('sandbox-fixture-1');
+    await page.getByLabel('Zoo baseline').selectOption('sandbox-fixture-1');
     await page.getByText('These runs use different models or scenarios. Their metrics are not a controlled comparison.', { exact: true }).waitFor();
     const cells = await page.locator('tbody tr').filter({ has: page.locator('th').filter({ hasText: /^Messages$/ }) }).locator('td').allTextContents();
     const difference = artifact.messages - 1;
@@ -105,12 +105,12 @@ const number = value => value.toLocaleString('en-US');
     await page.setViewportSize({ width: 1500, height: 1100 });
 
     const invalid = { ...artifact, schema_version: 2 };
-    await page.getByLabel('Import sandbox run').setInputFiles({
+    await page.getByLabel('Import Zoo run').setInputFiles({
       name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(invalid)),
     });
     await page.getByRole('status').filter({ hasText: 'Unsupported sandbox artifact version' }).waitFor();
     const other = await browser.newPage();
-    await openSandbox(other);
+    await openZoo(other);
     await other.locator('.sb-run').nth(1).waitFor();
     await chooseRun(other, artifact.run_id);
     await checkMessages(other);
