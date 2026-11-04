@@ -96,6 +96,9 @@ fn daemon_address() -> String {
         .and_then(|location| location.hostname().ok())
         .unwrap_or_default();
     if !host.is_empty() && host != "localhost" && host != "127.0.0.1" {
+        // The HTTPS operator domain terminates TLS in Caddy, which proxies
+        // /myko back to the daemon. Keep the browser connection same-origin
+        // to avoid mixed content; plain HTTP and local development use :6155.
         let (scheme, port) = match location
             .and_then(|location| location.protocol().ok())
             .as_deref()
