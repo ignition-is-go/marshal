@@ -97,7 +97,7 @@ def assess(directory):
                 values = [row[metric] for row in rows]
                 group[metric] = {'median': statistics.median(values), 'min': min(values), 'max': max(values), 'total': sum(values)}
             groups.append(group)
-    report = {'planned_trials': len(manifest['pairs']) * 2, 'completed_trials': len(trials),
+    report = {'planned_trials': len(manifest['pairs']) * len(manifest.get('conditions', ['baseline', 'candidate'])), 'completed_trials': len(trials),
               'reported_tokens': sum(row['total_tokens'] for row in trials), 'trials': trials, 'groups': groups}
     (directory / 'assessment.json').write_text(json.dumps(report, indent=2))
     (directory / 'transcripts.txt').write_text('\n'.join(transcripts))
