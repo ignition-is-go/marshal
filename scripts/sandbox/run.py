@@ -18,8 +18,11 @@ import socket
 import subprocess
 import time
 import tomllib
+import uuid
 
 import websockets
+
+from artifact import build_artifact
 
 
 class Rpc:
@@ -116,6 +119,13 @@ class Run:
             'node_owner': self.owner, 'roles': self.roles,
         }
         (self.output / 'summary.json').write_text(json.dumps(summary, indent=2))
+        manifest = self.output / 'manifest.json'
+        if manifest.exists():
+            artifact = build_artifact(
+                json.loads(manifest.read_text()), summary, self.events,
+                (self.output / 'codex-home' / 'AGENTS.md').read_text(),
+            )
+            (self.output / 'sandbox-run.json').write_text(json.dumps(artifact, indent=2))
         rows = []
         for event in self.events:
             if event['kind'] == 'app_event':
@@ -236,6 +246,7 @@ class Run:
             raise RuntimeError(stderr.decode())
         configure_home(home, private_config, env['MARSHAL_BASE_URL'])
         metadata = {
+            'run_id': str(uuid.uuid4()),
             'label': self.args.label, 'model': self.args.model, 'scenario': 'render-node-handoff',
             'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'codex_version': subprocess.check_output([self.args.codex, '--version'], text=True).strip(),

@@ -69,6 +69,28 @@ scenario tasks and generated instructions. The private config and process logs
 are also retained. Treat the run directory as private; transcripts can include
 account metadata and experimental prompts.
 
+### View runs in the Marshal UI
+
+Open the **Sandbox** view from a pane's activity bar. Import a run's
+`sandbox-run.json` file to save it to the connected daemon's shared experiment
+history. Select another imported run as the comparison baseline. The view shows
+scenario outcomes before communication/token counts, plus a timeline of messages
+and resource actions. Enable model turns and tools for deeper inspection, or
+expand instructions and provenance to see the generated context and binary hashes.
+
+Run imports are separate `SandboxRun` records. They do not register experimental
+agents on the live roster, replay messages, or start models. Reimporting a run
+updates its snapshot without duplicating it. Persistence follows the connected
+daemon's configuration. Imports are snapshots; the UI does not subscribe to a
+runner's local output directory.
+
+The runner exports the artifact automatically. For a run produced before UI
+export was added, generate it from the retained observations:
+
+```sh
+python3 scripts/sandbox/artifact.py /tmp/marshal-candidate-01
+```
+
 For a baseline and candidate comparison, build each revision in its own
 checkout and pass its daemon and shim binaries to separate runs. Keep the model,
 scenario, and budgets the same. Repeat each variant; one run demonstrates a
@@ -109,3 +131,21 @@ MARSHAL_TEST_SHIM=/absolute/path/to/target/debug/marshal-shim \
 These checks cover routing and hook-trust compatibility with the actual built
 shim, simulated resource conflict detection, and process/auth-link cleanup.
 They do not evaluate model behavior.
+
+To check the UI import path, serve a built UI against a dedicated loopback
+daemon, with persistence disabled. The browser check imports the supplied run
+and a test fixture, checks reimport/comparison/error handling and a second browser,
+and saves overview/timeline screenshots. It does not start models.
+
+```sh
+npm install --prefix /tmp/marshal-ui-browser playwright@1.64.1
+/tmp/marshal-ui-browser/node_modules/.bin/playwright install chromium
+MARSHAL_PLAYWRIGHT_MODULE=/tmp/marshal-ui-browser/node_modules/playwright \
+  node scripts/sandbox/check-ui.cjs \
+  http://127.0.0.1:6160 /tmp/marshal-candidate-01/sandbox-run.json
+```
+
+Use a completed handoff run for this check. `MARSHAL_CHROMIUM_PATH` can select an
+existing Chromium binary, and `MARSHAL_UI_SCREENSHOT_DIR` selects the screenshot
+directory. The check refuses non-loopback URLs to avoid importing fixture data
+into the deployed dashboard.

@@ -11,8 +11,8 @@
 //! view is a self-contained panel that pulls its own live queries, so panes can
 //! be split, resized, docked, and rearranged freely.
 //!
-//! Read-only for now — like the TUI, the console is a watcher, not a roster
-//! participant (it creates no `Session`).
+//! Watching does not register a session. Operator messaging is opt-in, and
+//! sandbox imports write separate experiment records without joining the roster.
 
 use leptos::prelude::*;
 use leptos_meta::{Title, provide_meta_context};
@@ -31,6 +31,7 @@ mod notify;
 mod palette;
 mod rooms;
 mod roster;
+mod sandbox;
 mod session_detail;
 mod time;
 
@@ -162,7 +163,7 @@ pub fn App() -> impl IntoView {
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 struct Slot;
 
-/// The four console views, registered as activities under one category. Each
+/// Console views, registered as activities under one category. Each
 /// renders inside a `pane-scroll` wrapper because the pane content area clips
 /// overflow — the view scrolls within its pane. `render` is a non-capturing fn
 /// (the panel component pulls its own context), so no closure state is needed.
@@ -206,6 +207,15 @@ fn items() -> Vec<ActivityNode<Slot>> {
                 |_p, _d| {
                     view! { <div class="pane-scroll"><session_detail::SessionDetail /></div> }
                         .into_any()
+                },
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("sandbox"),
+                "Sandbox",
+                ActivityIcon::Svg(ICON_FLASK.to_string()),
+                |_| true,
+                |_p, _d| {
+                    view! { <div class="pane-scroll"><sandbox::SandboxPanel /></div> }.into_any()
                 },
             )),
             ActivityNode::activity(ActivityDef::new(
@@ -365,6 +375,7 @@ const ICON_USERS: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="current
 const ICON_CHAT: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>"#;
 const ICON_HASH: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>"#;
 const ICON_ID: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M15 8h2M15 12h2M7 16h10"/></svg>"#;
+const ICON_FLASK: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6M10 3v7L4 19a1 1 0 0 0 1 2h14a1 1 0 0 0 1-2l-6-9V3M7 15h10"/></svg>"#;
 const ICON_SEND: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>"#;
 
 /// Shell chrome + the shared dense-table / stat-band / nickname grammar every

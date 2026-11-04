@@ -253,7 +253,7 @@ pub fn ConsolePanel() -> impl IntoView {
                 if !console.online.get() {
                     return view! {
                         <div class="con-hint">
-                            <EmptyState message="Go online to send messages, broadcast to rooms, and join rooms. Until then the dashboard is read-only.".to_string() />
+                            <EmptyState message="Go online to send messages, broadcast to rooms, and join rooms. Your console stays off the roster until then.".to_string() />
                         </div>
                     }.into_any();
                 }

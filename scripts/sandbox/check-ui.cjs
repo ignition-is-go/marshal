@@ -1,0 +1,60 @@
+const { chromium } = require(process.env.MARSHAL_PLAYWRIGHT_MODULE || 'playwright');
+const path = require('node:path');
+const os = require('node:os');
+const [url, artifactPath] = process.argv.slice(2);
+if (!url || !artifactPath) throw Error('Usage: node check-ui.cjs <local-ui-url> <sandbox-run.json>');
+const host = new URL(url).hostname;
+if (!(host === 'localhost' || host.startsWith('127.') || host === '[::1]')) throw Error('Run UI checks only against an isolated loopback test stack');
+const screenshots = process.env.MARSHAL_UI_SCREENSHOT_DIR || path.join(os.tmpdir(), 'marshal-ui-check');
+const fs = require('node:fs');
+fs.mkdirSync(screenshots, {recursive:true});
+(async()=>{
+ const browser = await chromium.launch({headless:true, executablePath:process.env.MARSHAL_CHROMIUM_PATH, args:['--no-sandbox']});
+ try {
+ const page = await browser.newPage({viewport:{width:1500,height:1100}});
+ const errors=[];
+ page.on('pageerror', e=>errors.push(e.message));
+ async function openSandbox(target) {
+  await target.goto(url + '/?reset');
+  await target.getByRole('button',{name:'Sandbox',exact:true}).nth(2).click();
+  await target.getByLabel('Import sandbox run').waitFor();
+ }
+ await openSandbox(page);
+ const artifact=JSON.parse(fs.readFileSync(artifactPath,'utf8'));
+ await page.getByLabel('Import sandbox run').setInputFiles(artifactPath);
+ await page.getByRole('status').filter({hasText:'Run saved to shared sandbox history.'}).waitFor();
+ await page.getByText('Test completed and node released without conflicts',{exact:true}).waitFor();
+ await page.getByRole('row',{name:`Messages ${artifact.messages}`,exact:true}).waitFor();
+ await page.getByText(artifact.timeline.filter(event=>event.kind==='message').at(-1).text,{exact:true}).waitFor();
+ const runCount=await page.getByLabel('Sandbox run',{exact:true}).locator('option').count();
+ await page.getByLabel('Import sandbox run').setInputFiles(artifactPath);
+ await page.getByRole('status').filter({hasText:'Run saved to shared sandbox history.'}).waitFor();
+ if(await page.getByLabel('Sandbox run',{exact:true}).locator('option').count()!==runCount) throw Error('Reimport duplicated run');
+ await page.getByLabel('Import sandbox run').setInputFiles(path.resolve(__dirname, '../../crates/daemon/tests/fixtures/sandbox-run.json'));
+ await page.getByRole('status').filter({hasText:'Run saved to shared sandbox history.'}).waitFor();
+ await page.getByLabel('Sandbox run',{exact:true}).selectOption(artifact.run_id);
+ await page.getByLabel('Sandbox baseline').selectOption('sandbox-fixture-1');
+ await page.getByRole('row',{name:`Messages ${artifact.messages} 1`,exact:true}).waitFor();
+ await page.getByText('These runs use different models or scenarios. Their metrics are not a controlled comparison.',{exact:true}).waitFor();
+ await page.getByLabel('Sandbox baseline').selectOption('');
+ await page.getByLabel('Include model turns and tools').check();
+ await page.getByText('Instructions and provenance',{exact:true}).click();
+ await page.getByText('Generated agent instructions',{exact:true}).waitFor();
+ await page.getByText('Instructions and provenance',{exact:true}).click();
+ await page.getByLabel('Include model turns and tools').uncheck();
+ await page.screenshot({path:path.join(screenshots,'overview.png')});
+ await page.getByText(artifact.timeline.filter(event=>event.kind==='message').at(-1).text,{exact:true}).scrollIntoViewIfNeeded();
+ await page.screenshot({path:path.join(screenshots,'timeline.png')});
+ const invalid={...artifact,schema_version:2};
+ await page.getByLabel('Import sandbox run').setInputFiles({name:'invalid.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(invalid))});
+ await page.getByRole('status').filter({hasText:'Unsupported sandbox artifact version'}).waitFor();
+ const other=await browser.newPage();
+ await openSandbox(other);
+ await other.getByLabel('Sandbox run',{exact:true}).locator('option').nth(1).waitFor({state:'attached'});
+ await other.getByLabel('Sandbox run',{exact:true}).selectOption(artifact.run_id);
+ await other.getByRole('row',{name:`Messages ${artifact.messages}`,exact:true}).waitFor();
+ await other.close();
+ if(errors.length)throw Error(errors.join('\n'));
+ console.log(JSON.stringify({import:true,reimport_without_duplicates:true,comparison:true,instructions_and_tools:true,invalid_rejected:true,shared_history_second_browser:true,page_errors:errors,screenshots}));
+ } finally { await browser.close(); }
+})().catch(error=>{console.error(error);process.exit(1)});
