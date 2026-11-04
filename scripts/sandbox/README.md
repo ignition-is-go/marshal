@@ -11,6 +11,15 @@ the node, release it, and finish communicating. The controller supplies each
 agent's task once. Subsequent turns use the actual Marshal delivery and wake
 paths, not scripted agent replies.
 
+## Assess every experimental change
+
+After changing Marshal behavior or agent-facing instructions, build the changed
+version and run a real-agent simulation before reporting the change as assessed.
+Unit tests and a browser fixture do not replace that run. Use the same scenario,
+model, and budgets as the prior run when comparing behavior. Preserve incomplete
+and failed runs, inspect the actual messages and actions, and import the result
+into Zoo. Report what changed, what held, and what the run did not exercise.
+
 ## Run an experiment
 
 Build the version you want to evaluate:
