@@ -199,10 +199,11 @@ fn TimelineRow(
         .to_string();
     if matches!(event.kind.as_str(), "message" | "injected_message") {
         let injected = event.kind == "injected_message";
+        let response_required = event.response_required;
         return view! {
             <li class=format!("sb-message sb-actor-{actor_index}")>
                 <div class="sb-avatar" aria-hidden="true">{initial}</div>
-                <div class="sb-message-body"><div class="sb-message-heading"><strong>{actor}</strong><span>{recipient}</span>{injected.then(|| view! { <span class="sb-injected">"Test injection"</span> })}<time>{time}</time></div>
+                <div class="sb-message-body"><div class="sb-message-heading"><strong>{actor}</strong><span>{recipient}</span>{injected.then(|| view! { <span class="sb-injected">"Test injection"</span> })}{response_required.then(|| view! { <span class="sb-injected">"Reply needed"</span> })}<time>{time}</time></div>
                     <p>{event.text}</p></div>
             </li>
         }.into_any();

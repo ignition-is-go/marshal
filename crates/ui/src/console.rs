@@ -346,6 +346,7 @@ fn Compose(
         err.set(None);
         sink_dm.dispatch::<SendMessage, SendMessageResult>(
             SendMessage {
+                response_required: false,
                 to_session_id: SessionId(Arc::from(to.as_str())),
                 body,
                 as_session: Some(as_dm.clone()),
@@ -374,6 +375,7 @@ fn Compose(
         err.set(None);
         sink_bc.dispatch::<BroadcastMessage, BroadcastMessageResult>(
             BroadcastMessage {
+                response_required: false,
                 to_room_id: RoomId(Arc::from(room.as_str())),
                 body,
                 as_session: Some(as_bc.clone()),
@@ -518,6 +520,7 @@ pub fn ReplyBox(target: String) -> impl IntoView {
         err.set(None);
         sink.dispatch::<SendMessage, SendMessageResult>(
             SendMessage {
+                response_required: false,
                 to_session_id: SessionId(Arc::from(target.as_str())),
                 body: b,
                 as_session: Some(as_session.clone()),

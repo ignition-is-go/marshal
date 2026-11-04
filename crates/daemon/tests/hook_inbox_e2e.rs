@@ -190,6 +190,7 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     // Session row. Register it again after the message is stored to prove a
     // refresh cannot surface or acknowledge that unread message.
     SendMessage {
+        response_required: true,
         to_session_id: SessionId(Arc::from("recipient")),
         body: "HOOK-E2E-PROBE-marker".into(),
         as_session: None,
@@ -218,6 +219,11 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         "expected a <marshal_inbox> block; got: {body:?}"
     );
 
+    assert!(
+        body.contains("response_required=true"),
+        "missing envelope metadata: {body}"
+    );
+
     // At-least-once contract: the listener acks the surfaced message only
     // AFTER successfully writing the response (not inside dispatch). Since the
     // first POST above completed its write, the message is now read — a second
@@ -234,6 +240,7 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     // durable Message remains queryable even after the preview is acknowledged.
     let long_body = format!("LONG-{}-TAIL", "é".repeat(3_000));
     SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("recipient")),
         body: long_body.clone(),
         as_session: None,

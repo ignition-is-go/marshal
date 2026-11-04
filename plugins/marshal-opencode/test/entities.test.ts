@@ -49,6 +49,7 @@ describe("command payloads are camelCase and carry asSession", () => {
     expect(sendMessage(SID, "ses_to", "hello").command).toEqual({
       toSessionId: "ses_to",
       body: "hello",
+      responseRequired: false,
       asSession: SID,
     });
   });
@@ -57,8 +58,16 @@ describe("command payloads are camelCase and carry asSession", () => {
     expect(broadcastMessage(SID, "host:nyc", "hello").command).toEqual({
       toRoomId: "host:nyc",
       body: "hello",
+      responseRequired: false,
       asSession: SID,
     });
+  });
+
+  test("response requirement is metadata without altering the body", () => {
+    expect(sendMessage(SID, "ses_to", "Node released.", true).command).toEqual({
+      toSessionId: "ses_to", body: "Node released.", responseRequired: true, asSession: SID,
+    });
+    expect(broadcastMessage(SID, "everyone", "Ready?", true).command.responseRequired).toBe(true);
   });
 
   test("JoinRoom omits an undefined description", () => {

@@ -2608,6 +2608,7 @@ mod tests {
 
     fn message(id: &str, recipient: Option<&str>) -> Arc<Message> {
         Arc::new(Message {
+            response_required: false,
             id: MessageId(Arc::from(id)),
             from_session_id: SessionId(Arc::from("sender")),
             to_session_id: recipient.map(|id| SessionId(Arc::from(id))),

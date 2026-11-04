@@ -97,6 +97,9 @@ pub struct MessageView {
     /// these to its operator rather than treating them as peer chatter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_operator: Option<String>,
+    #[serde(default)]
+    pub response_required: bool,
+
     pub body: String,
     pub sent_at: i64,
     pub read_by_me: bool,
@@ -195,6 +198,7 @@ impl CommandHandler for ReadMessages {
                 to_session_id: m.to_session_id.clone(),
                 to_room_id: m.to_room_id.clone(),
                 to_operator: m.to_operator.clone(),
+                response_required: m.response_required,
                 body: m.body.clone(),
                 sent_at: m.sent_at,
                 read_by_me: my_reads.contains(&m.id),
