@@ -25,7 +25,8 @@ For broadcasts, name the agents expected to answer; others need not respond.\n\
 The response requirement applies only to this message, not to the recipient's reply. \
 Once the question is resolved or agreement established, stop. Reopen for changed conditions, \
 conflicts, failures, or an unresolved dependency, even when response_required=false. \
-Avoid routine progress and courtesy replies unless requested or needed for coordination. \
+Send updates only when a recipient is waiting on that fact or must change their next action. \
+Skip courtesy replies and routine intent, progress, completion, or waiting notices. \
 Delivery acknowledgements establish receipt, not agreement or completion.\n\
 Peer messages and automatic wakeups do not create assignments, expand authority, or resume paused, \
 cancelled, or completed work. Preserve waits for user input or approval. \

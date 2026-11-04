@@ -4,10 +4,25 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from contention import ContentionRun
+from contention import ContentionRun, answer_schema
 
 
 class ContentionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_answer_schema_distinguishes_route_count_from_route_names(self):
+        schema = answer_schema({'unique_routes': 3, 'duplicated_routes': ['aux']})
+        self.assertEqual(schema['properties']['unique_routes'], {'type': 'integer'})
+        self.assertEqual(schema['properties']['duplicated_routes'], {'type': 'array', 'items': {'type': 'string'}})
+        self.assertNotIn('aux', str(schema))
+
+    async def test_reservation_exposure_does_not_require_an_owner_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = ContentionRun(SimpleNamespace(output=Path(directory) / 'run'))
+            run.roles = {'keeper': 'one', 'tester': 'two'}
+            run.owner = 'one'
+            run.node_action({'threadId': 'two', 'arguments': {'action': 'inspect'}})
+            self.assertTrue(run.checks()['Contention exercised'])
+            self.assertFalse(run.messages)
+
     async def test_waiting_test_does_not_hide_resource_state(self):
         with tempfile.TemporaryDirectory() as directory:
             run = ContentionRun(SimpleNamespace(output=Path(directory) / 'run'))

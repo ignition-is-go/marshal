@@ -234,3 +234,19 @@ scenario summary. Report
 incomplete or failed coverage separately from successful coordination. These
 small samples measure the specified simulated transitions, not production
 failure rates, real Unreal behavior, or performance across model families.
+
+## Notification policy follow-up
+
+The contention audit inspector now supplies a JSON Schema for each answer,
+derived from the oracle's value types without exposing its values. In particular,
+`unique_routes` is an integer and `duplicated_routes` is an array of strings.
+Contention exposure follows the requester's observation of an existing reservation;
+it does not require the owner to send a progress update.
+
+For policy comparisons in which both builds support structured requirements, pass
+`--baseline-representation metadata --candidate-representation metadata`. This keeps
+fault semantics and representation the same in both conditions. Add
+`--scenarios independent approval-wait contention three-way` for three engineers
+negotiating one node. The three-way scenario has six audits, three checks, and a
+900,000-token trial cap. It does not prescribe a queue order or require progress
+messages. All participants use real Codex threads and the actual Marshal wake path.

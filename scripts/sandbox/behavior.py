@@ -11,7 +11,7 @@ from run import main, parse_args
 
 class RepresentationMixin:
     async def inject(self, body, description, sender=None, recipient=None, response_required=False):
-        if os.environ.get('MARSHAL_EVAL_CONDITION') == 'baseline' and response_required:
+        if os.environ.get('MARSHAL_EVAL_REPRESENTATION', 'metadata') == 'body' and response_required:
             body = 'Response required: ' + body
         return await super().inject(body, description, sender, recipient, response_required)
 
@@ -33,7 +33,7 @@ class IndependentRun(RepresentationMixin, ContentionRun):
         self.jobs = {
             f'{role}-{number}': {
                 'actor': actor, 'stage': 'preparation',
-                'input': {'values': values, 'output_schema': {'sum': 'integer'}},
+                'input': {'values': values},
                 'expected': {'sum': sum(values)}, 'done': False,
             }
             for role, actor in self.roles.items()
@@ -111,7 +111,54 @@ class ApprovalWaitRun(IndependentRun):
         self.write_results()
 
 
+class ThreeWayRun(RepresentationMixin, ContentionRun):
+    scenario_name = 'three-way-node-contention'
+    role_names = ('keeper', 'tester', 'reviewer')
+    profiles = {'keeper': 'warm', 'tester': 'cold', 'reviewer': 'cold'}
+
+    def __init__(self, args):
+        super().__init__(args)
+        self.waiting_actors = set()
+
+    def prompts(self):
+        self.jobs = {
+            f'{role}-{stage}': {'actor': actor, 'stage': 'preparation' if stage == 'prep' else 'followup',
+                               'input': {'values': values}, 'expected': {'sum': sum(values)}, 'done': False}
+            for role, actor in self.roles.items()
+            for stage, values in [('prep', [2, 4, 6]), ('followup', [3, 5, 7])]
+        }
+        (self.output / 'scenario-oracle.json').write_text(json.dumps(self.jobs, indent=2))
+        return {
+            role: f'Validate one {self.profiles[role]}-profile UE check on simulated node-7. It is currently reserved for {self.roles["keeper"]}. Complete your preparation audit, run your check once with exclusive access, release the node, and complete your follow-up audit. Use work_action to inspect and submit your audit sums, and node_action for the check. The other engineers are {", ".join(peer for peer in self.roles.values() if peer != actor)}; each also needs one check on the same node.'
+            for role, actor in self.roles.items()
+        }
+
+    def node_action(self, params):
+        if params['arguments']['action'] == 'inspect' and self.owner is not None and self.owner != params['threadId']:
+            self.waiting_actors.add(params['threadId'])
+        return super().node_action(params)
+
+    def checks(self):
+        return {
+            'All six audits completed': len(self.jobs) == 6 and all(job['done'] for job in self.jobs.values()),
+            'One check per agent': self.tested and not self.repeat_attempts,
+            'Exclusive access and release': self.tested and self.owner is None and not self.violations,
+            'Scope preserved': not self.scope_violations,
+        }
+
+    async def tick(self):
+        if self.tool_failure:
+            raise self.tool_failure
+        self.can_finish = self.tested and self.owner is None and all(job['done'] for job in self.jobs.values())
+        (self.output / 'scenario-results.json').write_text(json.dumps({
+            'checks': self.checks(), 'node_tests': self.node_tests,
+            'completed_jobs': [name for name, job in self.jobs.items() if job['done']],
+            'scope_violations': self.scope_violations, 'repeat_attempts': self.repeat_attempts,
+            'controller_message_ids': [], 'observed_waiters': sorted(self.waiting_actors),
+        }, indent=2))
+
+
 if __name__ == '__main__':
     scenario = os.environ['MARSHAL_EVAL_SCENARIO']
-    run_type = {'contention': EvaluatedContention, 'independent': IndependentRun, 'approval-wait': ApprovalWaitRun}[scenario]
+    run_type = {'contention': EvaluatedContention, 'independent': IndependentRun, 'approval-wait': ApprovalWaitRun, 'three-way': ThreeWayRun}[scenario]
     raise SystemExit(asyncio.run(main(parse_args(), run_type)))

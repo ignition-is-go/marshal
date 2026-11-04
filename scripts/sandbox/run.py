@@ -77,6 +77,7 @@ class Rpc:
 
 class Run:
     scenario_name = 'render-node-handoff'
+    role_names = ('keeper', 'tester')
 
     def __init__(self, args):
         self.args = args
@@ -304,7 +305,7 @@ class Run:
         self.observer = Rpc(send, receive, observer_event)
         await self.observer.request('initialize', {'protocolVersion': '2024-11-05', 'capabilities': {}, 'clientInfo': {'name': 'sandbox-observer', 'version': '0.1'}})
         await self.observer.notify('notifications/initialized', {})
-        for role in ('keeper', 'tester'):
+        for role in self.role_names:
             cwd = self.output / role
             cwd.mkdir()
             response = await self.rpc.request('thread/start', {'model': self.args.model, 'cwd': str(cwd), 'approvalPolicy': 'never', 'sandbox': 'read-only', 'dynamicTools': self.tools(),
