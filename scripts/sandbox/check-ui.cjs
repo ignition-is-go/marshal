@@ -40,7 +40,7 @@ const number = value => value.toLocaleString('en-US');
     }
     async function importFile(file) {
       await page.getByLabel('Import Zoo run').setInputFiles(file);
-      await page.getByRole('status').filter({ hasText: 'Run saved to shared Zoo history.' }).waitFor();
+      await page.getByRole('status').filter({ hasText: 'Imported' }).waitFor({ state: 'attached' });
     }
 
     await openZoo(page);
@@ -59,7 +59,7 @@ const number = value => value.toLocaleString('en-US');
     if (await page.locator('.sb-message').count() !== 1) throw Error('Timeline search did not filter');
     await page.getByLabel('Search timeline').fill('');
     await page.getByLabel('Filter by agent').selectOption(artifact.roles.keeper);
-    const rows = await page.locator('.sb-resource-heading strong').allTextContents();
+    const rows = await page.locator('.sb-resource-row strong').allTextContents();
     if (rows.some(role => role !== 'keeper')) throw Error('Agent filter included unrelated resource actions');
     await page.getByLabel('Filter by agent').selectOption('');
     await page.getByLabel('Include model turns and tools').check();
@@ -70,7 +70,7 @@ const number = value => value.toLocaleString('en-US');
     await page.getByRole('tab', { name: 'Conversation', exact: true }).press('ArrowRight');
     await page.getByLabel('Zoo baseline').waitFor();
     await page.getByRole('tab', { name: 'Compare', exact: true }).press('ArrowRight');
-    await page.getByText('Generated agent instructions', { exact: true }).waitFor();
+    await page.getByText('Marshal instructions', { exact: true }).waitFor();
     await page.locator('.sb-context pre').waitFor();
     await page.getByRole('tab', { name: 'Context', exact: true }).press('Home');
     await page.getByLabel('Search timeline').waitFor();
@@ -82,7 +82,7 @@ const number = value => value.toLocaleString('en-US');
       throw Error('A run cannot be its own baseline');
     }
     await page.getByLabel('Zoo baseline').selectOption('sandbox-fixture-1');
-    await page.getByText('These runs use different models or scenarios. Their metrics are not a controlled comparison.', { exact: true }).waitFor();
+    await page.getByText('Model differs', { exact: true }).waitFor();
     const cells = await page.locator('tbody tr').filter({ has: page.locator('th').filter({ hasText: /^Messages$/ }) }).locator('td').allTextContents();
     const difference = artifact.messages - 1;
     const expectedDelta = difference === 0 ? '—' : `${difference > 0 ? '+' : '-'}${number(Math.abs(difference))}`;

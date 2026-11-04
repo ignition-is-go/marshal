@@ -87,7 +87,7 @@ pub fn SandboxPanel() -> impl IntoView {
                                 }
                                 selected.set(id.0.to_string());
                                 search.set(String::new());
-                                note.set("Run saved to shared Zoo history.".into());
+                                note.set("Imported".into());
                             }
                             Err(error) => {
                                 failed_import.set(true);
@@ -109,8 +109,7 @@ pub fn SandboxPanel() -> impl IntoView {
     view! {
         <section class="sandbox-panel">
             <header class="sb-header">
-                <div><div class="sb-eyebrow">"AGENT BEHAVIOR / EXPERIMENTS"</div><h2>"Marshal Zoo"</h2>
-                    <p>"Review how agents coordinate, use shared resources, and stop."</p></div>
+                <h2>"Marshal Zoo"</h2>
                 <label class="sb-import" class:sb-disabled=move || pending.get() || !connected.get()>
                     <span aria-hidden="true">"+"</span> {move || if pending.get() { "Importing…" } else { "Import run" }}
                     <input class="sb-file-input" type="file" accept=".json,application/json" aria-label="Import Zoo run"
@@ -118,10 +117,7 @@ pub fn SandboxPanel() -> impl IntoView {
                 </label>
             </header>
             <Show when=move || !note.get().is_empty()>
-                <p class="sb-notice" class:sb-error=move || failed_import.get() role="status">{move || note.get()}</p>
-            </Show>
-            <Show when=move || !connected.get()>
-                <p class="sb-notice sb-error">"Disconnected. Reconnect to load or import shared runs."</p>
+                <p class="sb-notice" class:sb-error=move || failed_import.get() class:sb-sr-only=move || !failed_import.get() role="status">{move || note.get()}</p>
             </Show>
             <div class="sb-workspace">
                 <aside class="sb-library" aria-label="Experiment library">
@@ -151,16 +147,14 @@ pub fn SandboxPanel() -> impl IntoView {
                     <Show when=move || visible.get().is_empty() && !all_runs.get().is_empty()>
                         <p class="sb-muted">"No matching runs."</p>
                     </Show>
-                    <p class="sb-library-note">"Imported snapshots. Experiments run independently of live agents."</p>
                 </aside>
                 <main class="sb-stage">
                     {move || match current.get() {
                         Some(run) => view! { <RunReview artifact=run.artifact.clone() runs=all_runs baseline=baseline tab=tab /> }.into_any(),
                         None => view! {
                             <div class="sb-empty"><div class="sb-empty-mark" aria-hidden="true">"↔"</div>
-                                <h3>{move || if loaded.get() { "Your first experiment starts here" } else { "Loading experiments…" }}</h3>
-                                <p>"Import a sandbox-run.json file to review its conversation, resource actions, and outcome."</p>
-                                <p class="sb-muted">"The run stays separate from the live roster and message feed."</p>
+                                <h3>{move || if loaded.get() { "No runs" } else { "Loading experiments…" }}</h3>
+                                <p>"Import a run to begin."</p>
                             </div>
                         }.into_any(),
                     }}
@@ -173,18 +167,17 @@ pub fn SandboxPanel() -> impl IntoView {
 
 const SANDBOX_CSS: &str = r#"
 .sandbox-panel { container-type:inline-size; container-name:sandbox; --sb-muted:var(--color-text-secondary); max-width:1440px; margin:0 auto; padding:12px 10px 36px; color:var(--color-text-primary); }
-.sb-header { display:flex; justify-content:space-between; align-items:center; gap:24px; padding:8px 0 24px; border-bottom:1px solid var(--color-border); }
-.sb-eyebrow { color:var(--sb-muted); font:10px var(--font-mono); letter-spacing:.12em; margin-bottom:8px; }
+.sb-header { display:flex; justify-content:space-between; align-items:center; gap:24px; padding:0 0 16px; border-bottom:1px solid var(--color-border); }
+.sb-scenario { font-size:12px; color:var(--color-text-primary); margin-bottom:6px; }
 .sb-header h2 { font-size:25px; font-weight:600; letter-spacing:-.03em; margin:0; }
-.sb-header p { color:var(--sb-muted); font-size:13px; margin:8px 0 0; }
 .sb-import { display:inline-flex; align-items:center; gap:8px; padding:9px 14px; border:1px solid var(--color-border-hover); background:var(--color-base-200); border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
 .sb-import:hover { border-color:var(--color-primary); }
 .sb-import:focus-within { outline:2px solid var(--color-primary); outline-offset:3px; }
-.sb-file-input { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); }
+.sb-file-input,.sb-sr-only { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); }
 .sb-disabled { opacity:.45; cursor:not-allowed; }
 .sb-notice { margin:12px 0 0; font-size:12px; color:var(--color-primary); padding:8px 12px; background:var(--color-base-200); border-radius:5px; }
 .sb-error { color:var(--color-error); }
-.sb-workspace { display:grid; grid-template-columns:210px minmax(0,1fr); gap:32px; padding-top:24px; }
+.sb-workspace { display:grid; grid-template-columns:210px minmax(0,1fr); gap:32px; padding-top:20px; }
 .sb-library { position:sticky; top:0; align-self:start; min-width:0; max-height:calc(100vh - 200px); overflow-y:auto; }
 .sb-library-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
 .sb-library-heading h3 { font-size:12px; font-weight:600; margin:0; }
@@ -200,7 +193,6 @@ const SANDBOX_CSS: &str = r#"
 .sb-run-state i { width:5px; height:5px; border-radius:50%; background:currentColor; }
 .sb-run-model,.sb-run-id { font:10px var(--font-mono); color:var(--sb-muted); overflow-wrap:anywhere; }
 .sb-run-id { text-align:right; }
-.sb-library-note { color:var(--sb-muted); font-size:11px; line-height:1.6; margin-top:24px; padding-top:14px; border-top:1px solid var(--color-border); }
 .sb-stage { min-width:0; max-width:1080px; }
 .sb-muted { color:var(--sb-muted); font-size:12px; line-height:1.6; }
 .sb-empty { padding:80px 24px; text-align:center; border:1px dashed var(--color-border); border-radius:8px; }
@@ -209,5 +201,5 @@ const SANDBOX_CSS: &str = r#"
 .sb-empty p { max-width:440px; margin:10px auto; font-size:13px; line-height:1.7; }
 .sb-good { color:var(--color-success); } .sb-bad { color:var(--color-error); } .sb-neutral { color:var(--sb-muted); }
 @container sandbox (max-width:900px) { .sb-workspace { grid-template-columns:170px minmax(0,1fr); gap:20px; } .sb-run { grid-template-columns:1fr; } .sb-run-id { display:none; } }
-@container sandbox (max-width:650px) { .sandbox-panel { padding:0 0 24px; } .sb-header { align-items:flex-start; flex-wrap:wrap; gap:12px; } .sb-header h2 { font-size:22px; } .sb-header p { max-width:240px; } .sb-workspace { display:block; padding-top:16px; } .sb-library { position:static; max-height:none; margin-bottom:24px; } .sb-run-list { flex-direction:row; overflow-x:auto; } .sb-run { min-width:170px; max-width:210px; } .sb-library-note { display:none; } }
+@container sandbox (max-width:650px) { .sandbox-panel { padding:0 0 24px; } .sb-header { align-items:flex-start; flex-wrap:wrap; gap:12px; } .sb-header h2 { font-size:22px; } .sb-workspace { display:block; padding-top:16px; } .sb-library { position:static; max-height:none; margin-bottom:24px; } .sb-run-list { flex-direction:row; overflow-x:auto; } .sb-run { min-width:170px; max-width:210px; } }
 "#;

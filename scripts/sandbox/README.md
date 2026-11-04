@@ -80,7 +80,7 @@ counts, followed by the peer conversation and resource transitions. Search the
 trace or filter it by agent; Full trace adds model output, task/wake prompts,
 and expandable tool calls. The Compare tab selects another run as a baseline
 and shows neutral count differences alongside task outcomes. The Context tab
-contains captured instructions, runtime/build identity, and agent identities.
+contains captured instructions, token counts, runtime/build identity, and agent identities.
 Tab navigation supports arrow keys, Home, and End. The library and review adapt
 to narrow panes as well as small browser windows.
 
