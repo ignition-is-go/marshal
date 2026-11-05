@@ -7,6 +7,9 @@ description = "Stdio MCP shim that bridges Claude Code sessions to the marshal c
 repository = "https://github.com/ignition-is-go/marshal"
 keywords = ["marshal", "agent", "mcp", "claude", "myko"]
 categories = ["network-programming", "command-line-utilities"]
+# claude_hook.rs reads the plugin's hooks.json from outside the crate, so it
+# runs in the workspace only and stays out of the published package.
+exclude = ["tests/claude_hook.rs"]
 
 [[bin]]
 name = "marshal-shim"
@@ -51,4 +54,5 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 myko-server = { workspace = true }
+socket2 = "0.6"
 tempfile = "3"

@@ -13,7 +13,8 @@
 //! per connection, `Connection: close`. Hook bodies are a few hundred
 //! bytes; anything fancier would be a dependency we don't need.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::watch;
 
 use myko::server::MykoServerContext;
 use tokio::{
@@ -28,8 +29,28 @@ use crate::hooks;
 /// allocate unboundedly.
 const MAX_BODY: usize = 256 * 1024;
 
+/// `/hook/wait` bounds: how long one long-poll is held when the caller names
+/// no `timeout`, the most it may ask for, and how often the inbox is checked.
+const WAIT_DEFAULT_SECS: u64 = 240;
+const WAIT_MAX_SECS: u64 = 600;
+const WAIT_POLL: Duration = Duration::from_millis(500);
+
+/// Header on a wait the daemon ended because it's stopping, so the waiter can
+/// back off quietly rather than report the daemon unreachable.
+pub const RESTARTING_HEADER: &str = "X-Marshal-Restarting";
+
 /// Run the hook listener forever. Spawn on a tokio task.
 pub async fn run(bind: SocketAddr, ctx: Arc<MykoServerContext>) -> std::io::Result<()> {
+    run_until(bind, ctx, watch::channel(false).1).await
+}
+
+/// [`run`], ending every held wait once `stopping` turns true, with an empty
+/// reply marked by [`RESTARTING_HEADER`].
+pub async fn run_until(
+    bind: SocketAddr,
+    ctx: Arc<MykoServerContext>,
+    stopping: watch::Receiver<bool>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     log::info!("marshal hook listener on http://{bind} (/hook/*)");
     loop {
@@ -41,15 +62,20 @@ pub async fn run(bind: SocketAddr, ctx: Arc<MykoServerContext>) -> std::io::Resu
             }
         };
         let ctx = ctx.clone();
+        let stopping = stopping.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, ctx).await {
+            if let Err(e) = handle_conn(stream, ctx, stopping).await {
                 log::debug!("[hook] connection error: {e}");
             }
         });
     }
 }
 
-async fn handle_conn(mut stream: TcpStream, ctx: Arc<MykoServerContext>) -> std::io::Result<()> {
+async fn handle_conn(
+    mut stream: TcpStream,
+    ctx: Arc<MykoServerContext>,
+    stopping: watch::Receiver<bool>,
+) -> std::io::Result<()> {
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
     let mut tmp = [0u8; 2048];
 
@@ -108,6 +134,10 @@ async fn handle_conn(mut stream: TcpStream, ctx: Arc<MykoServerContext>) -> std:
         return write_response(&mut stream, 405, "method not allowed").await;
     }
 
+    if path == "/hook/wait" {
+        return handle_wait(stream, query, &body, &ctx, stopping).await;
+    }
+
     match hooks::dispatch(path, query, &body, &ctx) {
         Some(outcome) => {
             write_response(&mut stream, 200, &outcome.body).await?;
@@ -125,7 +155,78 @@ async fn handle_conn(mut stream: TcpStream, ctx: Arc<MykoServerContext>) -> std:
     }
 }
 
+/// `/hook/wait`: hold the request until the session has an unread direct
+/// message (respond with it, then ack) or `timeout` seconds pass (respond
+/// empty). The caller sends nothing after its request, so the socket turning
+/// readable means it went away — stop then, before a message is written into
+/// a dead connection and acked as delivered.
+async fn handle_wait(
+    mut stream: TcpStream,
+    query: &str,
+    body: &[u8],
+    ctx: &Arc<MykoServerContext>,
+    mut stopping: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    let Some((sid, cmd_ctx)) = hooks::begin_wait(query, body, ctx) else {
+        return write_response(&mut stream, 200, "").await;
+    };
+    let secs = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("timeout="))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(WAIT_DEFAULT_SECS)
+        .min(WAIT_MAX_SECS);
+    let client_acks = query.split('&').any(|kv| kv == "ack=client");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    let mut probe = [0u8; 64];
+    let restarting = format!("{RESTARTING_HEADER}: 1\r\n");
+    loop {
+        if *stopping.borrow() {
+            // No end_wait here: the daemon is about to exit, and WakeWatcher
+            // records aren't persisted (#43), so the record goes with it.
+            return write_response_with(&mut stream, 200, &restarting, "").await;
+        }
+        hooks::mark_waiting_now(&cmd_ctx, &sid);
+        if let Some(outcome) = hooks::poll_wait(&cmd_ctx, &sid) {
+            hooks::end_wait(&cmd_ctx, &sid);
+            // A client that says it will ack does so once it has handed the
+            // mail on, which a written response alone can't tell us.
+            if client_acks {
+                let ids = outcome.deferred_ack.map(|(_, ids)| ids).unwrap_or_default();
+                let ids: Vec<&str> = ids.iter().map(|id| id.0.as_ref()).collect();
+                let header = format!("X-Marshal-Ack: {}\r\n", ids.join(","));
+                return write_response_with(&mut stream, 200, &header, &outcome.body).await;
+            }
+            write_response(&mut stream, 200, &outcome.body).await?;
+            if let Some((session, ids)) = outcome.deferred_ack {
+                hooks::ack_surfaced(ctx, &session, ids);
+            }
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return write_response(&mut stream, 200, "").await;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(WAIT_POLL) => {}
+            _ = stopping.changed() => {}
+            _ = stream.read(&mut probe) => {
+                hooks::end_wait(&cmd_ctx, &sid);
+                return Ok(());
+            }
+        }
+    }
+}
+
 async fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
+    write_response_with(stream, status, "", body).await
+}
+
+async fn write_response_with(
+    stream: &mut TcpStream,
+    status: u16,
+    extra_headers: &str,
+    body: &str,
+) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         404 => "Not Found",
@@ -137,7 +238,7 @@ async fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> std:
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: text/plain; charset=utf-8\r\n\
          Content-Length: {}\r\n\
-         Connection: close\r\n\r\n",
+         Connection: close\r\n{extra_headers}\r\n",
         body.len(),
     );
     stream.write_all(head.as_bytes()).await?;

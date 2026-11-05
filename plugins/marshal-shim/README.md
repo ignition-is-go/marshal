@@ -37,7 +37,15 @@ Tools (`tools/call`):
 - `set_status(text)` — set the free-form `current_task` text shown on the roster
 - `ack_messages(message_ids)` — mark messages read for this session
 
-Peer messages arrive as `notifications/claude/channel` events that surface in your transcript as `<channel>` blocks.
+Peer messages reach the session these ways:
+
+- **Hook inbox (no flag needed).** The plugin's `hooks/hooks.json` runs `marshal-shim claude-hook …` at session start, before each prompt, and after each tool call. Each run pulls this session's unread direct messages from the daemon's hook listener (port **6156**) into the turn as a `<marshal_inbox>` block.
+- **Idle wake (no flag needed).** `marshal-shim claude-hook wait` runs as an `asyncRewake` hook at session start and after every turn. It holds a `/hook/wait` request open and exits with code 2 when a message arrives, which starts a turn even in a session nobody has typed to. It uses no model turns while waiting, and acks the mail only after printing it.
+- **Live channel (optional).** `notifications/claude/channel` events that surface in your transcript as `<channel>` blocks. This needs Claude Code launched with `--dangerously-load-development-channels plugin:marshal-shim@marshal`. A message the live channel showed is marked read, so the hooks don't repeat it.
+
+The plugin turns the hooks on. To run without them, wire the MCP server directly instead of installing the plugin (below): that loads no hooks unless you add them.
+
+If the daemon can't be reached, the inbox hooks print nothing and give up within about two seconds, so they never block a turn. The hook listener has no authentication, as before: keep `MARSHAL_HOOK_BIND` on loopback or a trusted network.
 
 ## Optional: show the session in your status line
 
@@ -84,6 +92,30 @@ Drop this at `<project>/.claude/settings.json`:
   "statusLine": {
     "type": "command",
     "command": "marshal-shim statusline"
+  }
+}
+```
+
+For the hook inbox and idle wake without the plugin, add its hooks to the same file:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [
+        { "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 10 },
+        { "type": "command", "command": "marshal-shim claude-hook wait", "asyncRewake": true, "timeout": 2592000 }
+      ] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook wait", "asyncRewake": true, "timeout": 2592000 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 10 }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook post-tool-use", "timeout": 10 }] }
+    ]
   }
 }
 ```

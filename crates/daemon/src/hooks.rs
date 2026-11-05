@@ -23,7 +23,9 @@
 //! `asSession` field (self-identify), since this internal context has no
 //! WS `client_id`.
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use myko::prelude::EventPublishing as _;
 use myko::{
@@ -34,8 +36,9 @@ use myko::{
 use serde_json::Value;
 
 use marshal_entities::{
-    AckMessages, CONTEXT_BODY_MAX_CHARS, GetAllSessions, HostInfo, MessageId, MessageView,
-    ReadMessages, Session, SessionId, context_preview, nickname_for,
+    AckMessages, CONTEXT_BODY_MAX_CHARS, GetAllSessions, GetAllWakeWatchers, HostInfo, MessageId,
+    MessageView, ReadMessages, Session, SessionId, WakeWatcher, WakeWatcherId, context_preview,
+    nickname_for,
 };
 
 const AUTO_INBOX_BODY_BUDGET_CHARS: usize = 8_000;
@@ -65,6 +68,54 @@ impl HookOutcome {
     }
 }
 
+/// How long surfaced mail stays out of other readers' way while its reader
+/// delivers it. If no ack arrives by then, the path was lost and it's offered
+/// again, so a slow reader can see a duplicate but mail isn't lost.
+const DEFAULT_LEASE: Duration = Duration::from_secs(60);
+
+/// Mail handed to a reader and not yet acked, as session and message to expiry.
+#[derive(Default)]
+struct Leases(HashMap<(SessionId, MessageId), Instant>);
+
+impl Leases {
+    /// Lease whichever of `ids` nobody holds, returning those.
+    fn take(
+        &mut self,
+        session: &SessionId,
+        ids: &[MessageId],
+        now: Instant,
+        lease: Duration,
+    ) -> HashSet<MessageId> {
+        self.0.retain(|_, expires| *expires > now);
+        ids.iter()
+            .filter(|id| {
+                let key = (session.clone(), (*id).clone());
+                if self.0.contains_key(&key) {
+                    return false;
+                }
+                self.0.insert(key, now + lease);
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn release(&mut self, session: &SessionId, ids: &[MessageId]) {
+        for id in ids {
+            self.0.remove(&(session.clone(), id.clone()));
+        }
+    }
+}
+
+static LEASES: LazyLock<Mutex<Leases>> = LazyLock::new(Mutex::default);
+
+fn lease_duration() -> Duration {
+    std::env::var("MARSHAL_ACK_LEASE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(DEFAULT_LEASE, Duration::from_secs)
+}
+
 /// Dispatch a POST to a `/hook/*` path. Returns `Some(outcome)` for a known
 /// hook route — the listener writes `outcome.body` as the `text/plain` body,
 /// then runs `outcome.deferred_ack` — or `None` for an unknown path (→ 404).
@@ -79,6 +130,7 @@ pub fn dispatch(
         "/hook/session-start" => Some(handle_session_start(query, body, ctx)),
         "/hook/prompt-submit" => Some(handle_prompt_submit(query, body, ctx)),
         "/hook/session-end" => Some(handle_session_end(body, ctx)),
+        "/hook/ack" => Some(handle_ack(body, ctx)),
         _ => None,
     }
 }
@@ -92,17 +144,42 @@ pub fn ack_surfaced(ctx: &Arc<MykoServerContext>, session: &SessionId, ids: Vec<
         return;
     }
     let cmd_ctx = internal_cmd_ctx(ctx);
-    if let Err(e) = (AckMessages {
-        message_ids: ids,
+    let acked = (AckMessages {
+        message_ids: ids.clone(),
         as_session: Some(session.clone()),
     })
-    .execute(cmd_ctx)
-    {
+    .execute(cmd_ctx);
+    // Only now, so the row is read before anyone else can be offered it.
+    if let Ok(mut leases) = LEASES.lock() {
+        leases.release(session, &ids);
+    }
+    if let Err(e) = acked {
         log::warn!(
             "[hook] deferred inbox ack failed for {}: {e:?}",
             session.0.as_ref()
         );
     }
+}
+
+/// A client acknowledging mail it has actually handed on (`/hook/wait?ack=client`).
+fn handle_ack(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
+    let parsed = parse_body(body);
+    let session = parsed
+        .as_ref()
+        .and_then(|b| b.get("session_id")?.as_str())
+        .map(|sid| SessionId(Arc::from(sid)));
+    let ids: Vec<MessageId> = parsed
+        .as_ref()
+        .and_then(|b| b.get("message_ids")?.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str())
+        .map(|id| MessageId(Arc::from(id)))
+        .collect();
+    if let Some(session) = session {
+        ack_surfaced(ctx, &session, ids);
+    }
+    HookOutcome::text(String::new())
 }
 
 /// Register or refresh a hook-owned session without surfacing its inbox.
@@ -150,6 +227,8 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) 
              ?asSession= on caller-relative reads.</marshal_session>\n"
         )
     } else {
+        // The `asyncRewake` hook `marshal-shim claude-hook wait` handles live
+        // delivery, so the agent has nothing to keep armed.
         format!(
             "<marshal_session nickname=\"{nick}\" id=\"{sid}\">Marshal tools attach this \
              identity.</marshal_session>\n"
@@ -279,6 +358,93 @@ fn handle_prompt_submit(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) 
     }
 }
 
+/// Start a `/hook/wait` long-poll: register (or refresh) the waiting session
+/// once, returning the context the listener re-checks the inbox against.
+///
+/// `/hook/wait` is how an idle Claude Code session hears a direct message
+/// without the live-channel flag: the `asyncRewake` hook `marshal-shim
+/// claude-hook wait` (or `marshal-shim watch` under Claude's Monitor tool)
+/// holds this request open, and what it returns wakes the session the way a
+/// channel push would.
+pub fn begin_wait(
+    query: &str,
+    body: &[u8],
+    ctx: &Arc<MykoServerContext>,
+) -> Option<(String, CommandContext)> {
+    register_hook_session(query, body, ctx)
+}
+
+/// How long a `WakeWatcher` counts without being refreshed, which is how long a
+/// wait that timed out and wasn't followed by another still shows as waiting.
+const WAKE_WATCHER_TTL_MS: i64 = 2 * 60 * 1000;
+/// Refresh a held wait once this old, so its inbox checks don't each write an event.
+const WAKE_WATCHER_REFRESH_MS: i64 = 60 * 1000;
+
+/// Whether a watcher lasting until `until` is due a refresh at `now`.
+fn wake_watcher_due(until: Option<i64>, now: i64) -> bool {
+    until.is_none_or(|until| until - now <= WAKE_WATCHER_TTL_MS - WAKE_WATCHER_REFRESH_MS)
+}
+
+/// Record that this session is holding a wait. Called on every inbox check, so a
+/// record removed when a resumed session's old waiter drops comes back within one
+/// check, and a refresh is written only when due.
+pub fn mark_waiting_now(cmd_ctx: &CommandContext, sid: &str) {
+    mark_waiting(cmd_ctx, sid, chrono::Utc::now().timestamp_millis());
+}
+
+fn mark_waiting(cmd_ctx: &CommandContext, sid: &str, now: i64) {
+    let watchers: Vec<Arc<WakeWatcher>> = cmd_ctx
+        .exec_query(GetAllWakeWatchers {})
+        .unwrap_or_default();
+    let until = watchers
+        .iter()
+        .find(|w| w.id.0.as_ref() == sid)
+        .map(|w| w.until);
+    if !wake_watcher_due(until, now) {
+        return;
+    }
+    let watcher = WakeWatcher {
+        id: WakeWatcherId(Arc::from(sid)),
+        until: now + WAKE_WATCHER_TTL_MS,
+    };
+    if let Err(e) = cmd_ctx.emit_set(&watcher) {
+        log::warn!("[hook] wake watcher SET failed for {sid}: {e:?}");
+    }
+}
+
+/// Tells the reader how to fetch the rest. The URI has to be one the resource
+/// actually serves: a message id isn't a path under `marshal://messages`.
+fn truncation_notice(message_id: &str, sent_at: i64) -> String {
+    format!(
+        "  [truncated; read message {message_id} in full at marshal://messages?inbox=true&since={sent_at}]\n"
+    )
+}
+
+/// A wait ended with its connection dropped or its mail handed out, so stop
+/// reporting it. Any other waiter for the session puts the record back at its next
+/// inbox check. A wait that merely timed out keeps its record, because the waiter
+/// normally asks again at once.
+pub fn end_wait(cmd_ctx: &CommandContext, sid: &str) {
+    let watcher = WakeWatcher {
+        id: WakeWatcherId(Arc::from(sid)),
+        until: 0,
+    };
+    if let Err(e) = cmd_ctx.emit_del(&watcher) {
+        log::warn!("[hook] wake watcher DEL failed for {sid}: {e:?}");
+    }
+}
+
+/// One inbox check for a `/hook/wait` long-poll. `None` while nothing is
+/// unread; otherwise the same `<marshal_inbox>` block the prompt hook would
+/// surface, with its ack deferred until the response is written.
+pub fn poll_wait(cmd_ctx: &CommandContext, sid: &str) -> Option<HookOutcome> {
+    let (inbox, ids) = surface_unread(cmd_ctx, sid);
+    (!ids.is_empty()).then(|| HookOutcome {
+        body: inbox,
+        deferred_ack: Some((SessionId(Arc::from(sid)), ids)),
+    })
+}
+
 fn handle_session_end(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
     let Some(body) = parse_body(body) else {
         return HookOutcome::text(String::new());
@@ -309,6 +475,7 @@ fn handle_session_end(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome 
     if let Err(e) = cmd_ctx.emit_del(&stub) {
         log::warn!("[hook] session-end DEL failed for {sid}: {e:?}");
     }
+    end_wait(&cmd_ctx, sid);
     HookOutcome::text(String::new())
 }
 
@@ -333,10 +500,22 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
         limit: Some(20),
         as_session: Some(sid_typed.clone()),
     };
-    let result = match read.execute(cmd_ctx.clone()) {
+    let mut result = match read.execute(cmd_ctx.clone()) {
         Ok(r) => r,
         Err(_) => return (String::new(), Vec::new()),
     };
+    // Mail another reader is delivering isn't offered twice.
+    let unread: Vec<MessageId> = result
+        .messages
+        .iter()
+        .map(|m| m.message_id.clone())
+        .collect();
+    let Ok(mut leases) = LEASES.lock() else {
+        return (String::new(), Vec::new());
+    };
+    let taken = leases.take(&sid_typed, &unread, Instant::now(), lease_duration());
+    drop(leases);
+    result.messages.retain(|m| taken.contains(&m.message_id));
     if result.messages.is_empty() {
         return (String::new(), Vec::new());
     }
@@ -356,10 +535,7 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
             m.response_required
         );
         if truncated {
-            line.push_str(&format!(
-                "  [truncated; full message {} remains in marshal://messages]\n",
-                m.message_id.0
-            ));
+            line.push_str(&truncation_notice(m.message_id.0.as_ref(), m.sent_at));
         }
         line
     };
@@ -472,4 +648,66 @@ fn url_decode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    fn id(s: &str) -> MessageId {
+        MessageId(Arc::from(s))
+    }
+
+    #[test]
+    fn a_second_reader_gets_nothing_until_the_lease_lapses() {
+        let session = SessionId(Arc::from("s"));
+        let ids = [id("m")];
+        let lease = Duration::from_secs(60);
+        let now = Instant::now();
+        let mut leases = Leases::default();
+        assert_eq!(leases.take(&session, &ids, now, lease).len(), 1);
+        assert!(leases.take(&session, &ids, now, lease).is_empty());
+        // No ack ever came: the path was lost, so offer it again.
+        assert_eq!(leases.take(&session, &ids, now + lease, lease).len(), 1);
+    }
+
+    #[test]
+    fn release_ends_a_lease_and_readers_of_other_sessions_are_unaffected() {
+        let (a, b) = (SessionId(Arc::from("a")), SessionId(Arc::from("b")));
+        let ids = [id("m")];
+        let lease = Duration::from_secs(60);
+        let now = Instant::now();
+        let mut leases = Leases::default();
+        leases.take(&a, &ids, now, lease);
+        assert_eq!(leases.take(&b, &ids, now, lease).len(), 1);
+        leases.release(&a, &ids);
+        assert_eq!(leases.take(&a, &ids, now, lease).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_truncation_notice_names_a_uri_the_resource_serves() {
+        let notice = truncation_notice("abc", 123);
+        assert!(notice.contains("message abc"));
+        assert!(notice.contains("marshal://messages?inbox=true&since=123"));
+    }
+
+    #[test]
+    fn a_wake_watcher_is_refreshed_only_when_due() {
+        assert!(wake_watcher_due(None, 1000));
+        let fresh = 1000 + WAKE_WATCHER_TTL_MS;
+        assert!(!wake_watcher_due(Some(fresh), 1000));
+        assert!(!wake_watcher_due(
+            Some(fresh),
+            1000 + WAKE_WATCHER_REFRESH_MS - 1
+        ));
+        assert!(wake_watcher_due(
+            Some(fresh),
+            1000 + WAKE_WATCHER_REFRESH_MS
+        ));
+    }
 }

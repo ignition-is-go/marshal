@@ -34,6 +34,7 @@ use crate::{
     message_read::{MessageRead, MessageReadId},
     notify::NotifyChannel,
     session::{GetAllSessions, Session, SessionId, resolve_caller},
+    wake_watcher::{GetAllWakeWatchers, WakeWatcher},
 };
 
 #[myko_command(SendMessageResult)]
@@ -241,9 +242,23 @@ impl CommandHandler for SendMessage {
         // stale (the connection is gone), which is no wake path at all —
         // claiming one there would repeat the "delivered_live lied" mistake in a
         // new field.
+        //
+        // A pull row with a waiter holding `/hook/wait` also has a wake path:
+        // a Claude Code session without the channels flag, whose asyncRewake
+        // waiter starts a turn when mail arrives.
+        let waiting = || {
+            ctx.exec_query(GetAllWakeWatchers {})
+                .unwrap_or_default()
+                .iter()
+                .any(|w: &Arc<WakeWatcher>| {
+                    w.id.0.as_ref() == recipient.id.0.as_ref() && w.until > now
+                })
+        };
         let wake = match live_push {
             LivePushStatus::Delivered => WakeStatus::NotNeeded,
-            LivePushStatus::Unavailable if recipient.client_id.is_some() => WakeStatus::Expected,
+            LivePushStatus::Unavailable if recipient.client_id.is_some() || waiting() => {
+                WakeStatus::Expected
+            }
             _ => WakeStatus::Unobserved,
         };
 

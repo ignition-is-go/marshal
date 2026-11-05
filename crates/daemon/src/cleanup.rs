@@ -25,7 +25,7 @@ use std::{
 
 use chrono::Utc;
 use hyphae::{Gettable, Materialize};
-use marshal_entities::{AutoSource, Message, Room, RoomKind, RoomMember, Session};
+use marshal_entities::{AutoSource, Message, Room, RoomKind, RoomMember, Session, WakeWatcher};
 use myko::{core::item::Eventable, server::MykoServerContext, utils::downcast_item};
 
 /// How long a WS-shim session must be without a live client before DEL. Sized
@@ -82,6 +82,7 @@ pub async fn run_sweeper(ctx: MykoServerContext) {
         interval.tick().await;
         sweep_once(&ctx, &mut disconnected_since);
         sweep_rooms(&ctx);
+        sweep_wake_watchers(&ctx);
         // Prune old messages on the first tick (boot cleanup) and every
         // MESSAGE_SWEEP_EVERY ticks thereafter — not every tick (the scan is
         // O(all messages)).
@@ -89,6 +90,31 @@ pub async fn run_sweeper(ctx: MykoServerContext) {
             sweep_messages(&ctx);
         }
         tick = tick.wrapping_add(1);
+    }
+}
+
+/// Remove wake watchers whose session has gone. They've already stopped counting,
+/// or soon will, so this only keeps the store from growing.
+fn sweep_wake_watchers(ctx: &MykoServerContext) {
+    let (Some(watchers), Some(sessions)) = (
+        ctx.registry.get(WakeWatcher::ENTITY_NAME_STATIC),
+        ctx.registry.get(Session::ENTITY_NAME_STATIC),
+    ) else {
+        return;
+    };
+    let live: HashSet<Arc<str>> = sessions
+        .entries()
+        .materialize()
+        .get()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    for (id, _) in watchers.entries().materialize().get() {
+        if !live.contains(&id)
+            && let Err(e) = ctx.del_by_id(WakeWatcher::ENTITY_NAME_STATIC, &id)
+        {
+            log::warn!("[cleanup] removing wake watcher {id} failed: {e}");
+        }
     }
 }
 

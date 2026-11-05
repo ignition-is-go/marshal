@@ -259,7 +259,8 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     assert!(bounded.contains("LONG-"));
     assert!(!bounded.contains("-TAIL"), "hook leaked the complete body");
     assert!(
-        bounded.contains("[truncated; full message"),
+        bounded.contains("[truncated; read message")
+            && bounded.contains("marshal://messages?inbox=true&since="),
         "hook did not identify the bounded preview: {bounded:?}"
     );
     assert!(
