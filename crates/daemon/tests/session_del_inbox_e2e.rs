@@ -120,6 +120,7 @@ fn make_session(id: &str) -> Session {
         host: None,
         project: None,
         channels_enabled: None,
+        acks_pushes: None,
     }
 }
 
