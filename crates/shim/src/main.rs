@@ -80,6 +80,14 @@ fn main() -> Result<()> {
     // Code's status prefix from stdin.
     let mut argv = std::env::args().skip(1);
     match argv.next().as_deref() {
+        Some("-h" | "--help") => {
+            print!("{}", usage());
+            return Ok(());
+        }
+        Some("-V" | "--version") => {
+            println!("marshal-shim {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Some("--check") if argv.next().is_none() => {
             println!("ok");
             return Ok(());
@@ -127,7 +135,7 @@ fn main() -> Result<()> {
                 .block_on(codex_bridge::run(&rest));
         }
         Some(other) => {
-            anyhow::bail!("unknown argument: {other}");
+            anyhow::bail!("unknown argument: {other} (try 'marshal-shim --help')");
         }
         None => {}
     }
@@ -140,6 +148,38 @@ fn main() -> Result<()> {
         .build()
         .context("building tokio runtime")?
         .block_on(serve())
+}
+
+/// The `--help` text: the subcommands dispatched in `main`, and how the
+/// default MCP-server mode finds the daemon.
+fn usage() -> String {
+    format!(
+        "marshal-shim {version}
+Connects an agent session to the Marshal daemon.
+
+Usage: marshal-shim [COMMAND]
+
+With no command, serves MCP on stdio for the agent session that started it.
+
+Commands:
+  statusline    Render the Claude Code status line prefix from stdin
+  codex-hook    Forward a Codex hook to the daemon:
+                codex-hook <session-start|session-end|prompt-submit|pre-tool-use|post-tool-use> [base-url]
+  codex-setup   Wire Marshal into a Codex install (codex-setup --help for options)
+  codex-run     Start Codex with Marshal live delivery
+  codex-bridge  Run the Codex live-delivery bridge on its own (codex-run starts it)
+
+Options:
+  --check        Print \"ok\" and exit (install smoke test)
+  -h, --help     Print this help and exit
+  -V, --version  Print the version and exit
+
+Daemon address, first match wins: the marshal/{ADDRESS_FILE} file in the
+per-user config directory, then {ADDRESS_ENV}, then {ADDRESS_ENV_LEGACY},
+then {DEFAULT_DAEMON_ADDRESS}.
+",
+        version = env!("CARGO_PKG_VERSION"),
+    )
 }
 
 async fn serve() -> Result<()> {
