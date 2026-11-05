@@ -449,6 +449,14 @@ fn check_mention_acknowledgment(acks_pushes: bool) {
         .unwrap_or_default()
         .iter()
         .any(|s| s.id.0.as_ref() == "live" && s.client_id.is_some())
+        || !daemon
+            .context()
+            .exec_query(marshal_entities::GetAllRoomMembers {})
+            .unwrap_or_default()
+            .iter()
+            .any(|member| {
+                member.session_id.0.as_ref() == "live" && member.room_id.0.as_ref() == "everyone"
+            })
     {
         assert!(Instant::now() < deadline, "live session never registered");
         thread::sleep(Duration::from_millis(25));

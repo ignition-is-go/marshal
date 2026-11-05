@@ -257,7 +257,7 @@ impl CommandHandler for BroadcastMessage {
                 // Same dedup as SendMessage: a pushed ping is marked read, so
                 // the per-turn inbox (which reads unread direct messages, and
                 // the ping is one) doesn't show it a second time.
-                if pushed {
+                if pushed && target.acks_pushes != Some(true) {
                     let read_id = MessageRead::make_id(ping.id.0.as_ref(), target.id.0.as_ref());
                     if let Err(e) = ctx.emit_set(&MessageRead {
                         id: MessageReadId(Arc::from(read_id.as_str())),
