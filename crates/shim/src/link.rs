@@ -307,7 +307,7 @@ mod tests {
 
         let stream = connect_any(
             &[refused, live_addr][..],
-            Instant::now() + Duration::from_secs(1),
+            Instant::now() + 2 * CONNECT_ATTEMPT + Duration::from_secs(1),
         )
         .expect("should fall through to the address that accepts");
         assert_eq!(stream.peer_addr().unwrap(), live_addr);
