@@ -36,6 +36,7 @@ fn sender() -> Session {
     Session {
         id: SessionId(Arc::from("sender")),
         client_id: Some(ClientId(Arc::from("c-sender"))),
+        agent_id: None,
         pid: 0,
         cwd: "/repo".into(),
         git_branch: None,

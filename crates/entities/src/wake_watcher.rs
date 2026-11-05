@@ -72,6 +72,7 @@ mod tests {
         Session {
             id: SessionId(Arc::from(id)),
             client_id: None,
+            agent_id: None,
             pid: 0,
             cwd: String::new(),
             git_branch: None,

@@ -258,6 +258,7 @@ export const MarshalPlugin: Plugin = async (input) => {
             "",
             `nickname:  ${nick}`,
             `operator:  ${identity.operator}`,
+            `agent_id:  ${JSON.stringify(identity.agentId ?? null)}`,
             `host:      ${host}`,
             `project:   ${identity.project ?? "(none)"}`,
             `branch:    ${identity.gitBranch ?? "(none)"}`,
@@ -282,7 +283,7 @@ export const MarshalPlugin: Plugin = async (input) => {
             const branch = s.gitBranch ? ` @${s.gitBranch}` : "";
             const op = s.operator ? ` (${s.operator})` : "";
             const task = s.currentTask ? ` — ${s.currentTask}` : "";
-            return `- ${host}:${dir}${branch}${op} [${s.id}]${task}`;
+            return `- ${host}:${dir}${branch}${op} [${s.id}]${s.agentId ? ` agent_id=${JSON.stringify(s.agentId)}` : ""}${task}`;
           });
           return rows.join("\n");
         },

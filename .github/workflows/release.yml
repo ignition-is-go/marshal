@@ -47,12 +47,19 @@ jobs:
       version: ${{ steps.check.outputs.version }}
       release_sha: ${{ steps.stamp.outputs.release_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           fetch-tags: true
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           # Public runners are disposable and intentionally have no ambient
           # Rust components. The release script formats the stamped manifests.
           components: rustfmt
@@ -67,10 +74,10 @@ jobs:
             build-essential gh jq libssl-dev pkg-config
           gh --version
           jq --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # Prebuilt trunk (fast) — builds the marshal-ui WASM bundle shipped as a
       # release asset below.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2
         with:
           tool: trunk
 
@@ -219,6 +226,12 @@ jobs:
             marshal-shim-x86_64-pc-windows-gnu.exe \
             marshal-ui-dist.tar.gz
 
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
   # Registry publication is deliberately downstream of the deploy artifacts.
   # It remains a required job (so missing credentials are visible), but cannot
   # strand a GitHub Release without the binaries used by pulse-deploy.
@@ -234,9 +247,15 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: v${{ needs.release.outputs.version }}
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
       # A recovery checks out the immutable release tag for package contents,
       # but the tag necessarily predates any repair to the publishing tools.
       # Overlay only those tools from the workflow revision being dispatched.
@@ -260,7 +279,7 @@ jobs:
       # and npm >=11.5.1. The runner's ambient npm has repeatedly fallen back
       # to legacy token auth (ENEEDAUTH), even though id-token permission is
       # present, so pin a supported toolchain rather than relying on the image.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
       - name: Install an OIDC-capable npm
@@ -269,13 +288,21 @@ jobs:
         run: |
           node --version
           npm --version
-          test "$(node -p 'Number(process.versions.node.split(`.`)[0]) >= 22')" = true
+          node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'
           test "$(npm --version | awk -F. '{ print ($1 > 11 || ($1 == 11 && $2 >= 5)) ? "true" : "false" }')" = true
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo install cargo-flux
       - name: Publish crates and plugins
         run: cargo flux run publish
+
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
 
   # marshal-shim for macOS — the ONLY marshal binary a Mac needs (the daemon +
   # UI run on the Linux marshal LXC; a Mac is purely a Codex/Claude CLIENT).
@@ -292,12 +319,20 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Build the exact commit the release job stamped + tagged.
           ref: v${{ needs.release.outputs.version }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Build + upload macOS marshal-shim
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -308,6 +343,12 @@ jobs:
           cp target/aarch64-apple-darwin/release/marshal-shim marshal-shim-aarch64-apple-darwin
           gh release upload "v$VERSION" --clobber \
             marshal-shim-aarch64-apple-darwin
+
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
 
   notify-pulse-deploy:
     needs: [release, publish-packages, build-macos]

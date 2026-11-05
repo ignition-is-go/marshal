@@ -96,11 +96,7 @@ pub fn run_for(harness: Harness, ep: &str, base_override: Option<&str>) {
         "post-tool-use" => ("prompt-submit", "PostToolUse"),
         _ => ("prompt-submit", "UserPromptSubmit"),
     };
-    let body = format!(
-        "{{\"session_id\":{},\"cwd\":{}}}",
-        json_str(sid),
-        json_str(cwd)
-    );
+    let body = registration_body(sid, cwd, agent_id_from_env().as_deref());
     // `ack=client`: the daemon marks the mail read only when this hook says it
     // has printed it, so a reply lost on the way (a hook killed at its timeout,
     // a dropped proxy hop) leaves the mail unread.
@@ -247,11 +243,7 @@ fn wait_for_mail(
     // A one-shot waiter only notices its parent is gone between polls, and until
     // then it could take mail for a closed session, so it polls more often.
     let wait = if once { ONCE_WAIT } else { WATCH_WAIT };
-    let body = format!(
-        "{{\"session_id\":{},\"cwd\":{}}}",
-        json_str(session_id),
-        json_str(cwd)
-    );
+    let body = registration_body(session_id, cwd, agent_id_from_env().as_deref());
     let path = format!(
         "/hook/wait?host={}&operator={}&harness=claude&ack=client&timeout={}",
         url_q(&short_host()),
@@ -477,11 +469,7 @@ fn wrap_long_lines(text: &str, max: usize) -> String {
 /// first prompt; normal lifecycle hooks remain responsible for context
 /// injection and inbox acknowledgement.
 pub(crate) fn register_session(base: &str, session_id: &str, cwd: &str) -> Option<String> {
-    let body = format!(
-        "{{\"session_id\":{},\"cwd\":{}}}",
-        json_str(session_id),
-        json_str(cwd)
-    );
+    let body = registration_body(session_id, cwd, agent_id_from_env().as_deref());
     let path = format!(
         "/hook/session-register?host={}&operator={}&harness=codex",
         url_q(&short_host()),
@@ -646,11 +634,6 @@ fn operator() -> String {
         .unwrap_or_else(|| "codex".to_string())
 }
 
-/// JSON-encode a string (quoted, escaped) for the request body.
-fn json_str(s: &str) -> String {
-    serde_json::Value::String(s.to_string()).to_string()
-}
-
 /// Minimal percent-encoding for a query-parameter value (host / operator).
 /// Emails (`@`) and hostnames are safe; we only need to neutralise the few
 /// characters that would break the query string.
@@ -665,6 +648,21 @@ fn url_q(s: &str) -> String {
         }
     }
     out
+}
+
+pub(crate) fn agent_id_from_env() -> Option<String> {
+    std::env::var("MARSHAL_AGENT_ID").ok().and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
+fn registration_body(session_id: &str, cwd: &str, agent_id: Option<&str>) -> String {
+    let mut body = serde_json::json!({ "session_id": session_id, "cwd": cwd });
+    if let Some(agent_id) = agent_id {
+        body["agent_id"] = agent_id.into();
+    }
+    body.to_string()
 }
 
 #[cfg(test)]

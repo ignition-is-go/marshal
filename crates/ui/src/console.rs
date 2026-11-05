@@ -59,6 +59,7 @@ impl Console {
         Session {
             id: SessionId(self.session_id.clone()),
             client_id: None,
+            agent_id: None,
             pid: 0,
             cwd: "—".to_string(),
             git_branch: None,

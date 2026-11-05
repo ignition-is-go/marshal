@@ -353,6 +353,7 @@ async fn serve() -> Result<()> {
     let session = Session {
         id: session_id.clone(),
         client_id: None,
+        agent_id: codex_hook::agent_id_from_env(),
         pid,
         cwd: cwd.clone(),
         git_branch: git_branch.clone(),
@@ -452,9 +453,7 @@ async fn serve() -> Result<()> {
                     } else {
                         log::info!("[marshal-shim] connected to {addr} — (re)sending session");
                         let snapshot = session_for_resend.lock().unwrap().clone();
-                        if let Err(e) = emit_session_set(&client_for_resend, &snapshot) {
-                            log::warn!("[marshal-shim] re-SET on connect failed: {e}");
-                        }
+                        emit_session_set(&client_for_resend, &snapshot, &session_for_resend);
                     }
                 }
                 ConnectionStatus::Disconnected => {
@@ -736,18 +735,13 @@ async fn serve() -> Result<()> {
                         registered.0,
                         current_canonical.0
                     );
-                    let stale = session_for_publish.lock().unwrap().clone();
-                    if let Err(e) = emit_session_del(&client_for_publish, &stale) {
-                        log::warn!("[marshal-shim] DEL of stale session failed: {e}");
-                    }
                     let refreshed = {
                         let mut sess = session_for_publish.lock().unwrap();
+                        emit_session_del(&client_for_publish, &sess);
                         sess.id = current_canonical.clone();
                         sess.clone()
                     };
-                    if let Err(e) = emit_session_set(&client_for_publish, &refreshed) {
-                        log::warn!("[marshal-shim] re-SET under new id failed: {e}");
-                    }
+                    emit_session_set(&client_for_publish, &refreshed, &session_for_publish);
                 }
             }
 
@@ -795,9 +789,7 @@ async fn serve() -> Result<()> {
                         me.0
                     );
                     let snapshot = session_for_publish.lock().unwrap().clone();
-                    if let Err(e) = emit_session_set(&client_for_publish, &snapshot) {
-                        log::warn!("[marshal-shim] roster self-heal re-SET failed: {e}");
-                    }
+                    emit_session_set(&client_for_publish, &snapshot, &session_for_publish);
                 }
             }
 
@@ -981,12 +973,10 @@ fn deregister_and_exit(client: &MykoClient, session: &Arc<Mutex<Session>>, is_co
     // the authoritative one) — nothing to deregister.
     if !is_codex && let Ok(guard) = session.lock() {
         let snapshot = guard.clone();
-        drop(guard);
-        if let Err(e) = emit_session_del(client, &snapshot) {
-            log::warn!("[marshal-shim] roster DEL on shutdown failed: {e}");
-        }
+        emit_session_del(client, &snapshot);
         // One beat for the client's write thread to flush the DEL frame.
         std::thread::sleep(std::time::Duration::from_millis(300));
+        std::process::exit(0);
     }
     std::process::exit(0);
 }
@@ -1024,24 +1014,47 @@ fn registered_on_roster(sessions: &[Arc<Session>], me: &SessionId) -> bool {
         .any(|s| &s.id == me && s.client_id.is_some())
 }
 
-fn emit_session_set(client: &MykoClient, session: &Session) -> Result<()> {
-    let event = MEvent::from_item(session, MEventType::SET, &Uuid::new_v4().to_string());
-    client
-        .send_event(event)
-        .map_err(|e| anyhow::anyhow!("send_event failed: {e}"))?;
-    Ok(())
+fn emit_session_set(client: &MykoClient, session: &Session, current: &Arc<Mutex<Session>>) {
+    let current = Arc::clone(current);
+    let result = client.send_command::<marshal_entities::RegisterSession, ()>(
+        &marshal_entities::RegisterSession {
+            session: session.clone(),
+        },
+    );
+    let client = client.clone();
+    let session = session.clone();
+    tokio::spawn(async move {
+        match tools::await_command(result, std::time::Duration::from_secs(10)).await {
+            Ok(()) => {}
+            Err(error) if error == "Command handler not found: RegisterSession" => {
+                let current = current.lock().unwrap();
+                if current.id != session.id {
+                    return;
+                }
+                let event =
+                    MEvent::from_item(&session, MEventType::SET, &Uuid::new_v4().to_string());
+                if let Err(error) = client.send_event(event) {
+                    log::warn!("[marshal-shim] legacy registration failed: {error}");
+                }
+            }
+            Err(error) => log::warn!("[marshal-shim] registration failed: {error}"),
+        }
+    });
 }
 
 /// DEL a Session entity. Used by the canonical-id-drift reconcile to remove the
 /// stale roster row after the session id changes under us (compact/clear), so
 /// peers don't see a ghost under the old id. The daemon's cleanup sweep is a
 /// backstop if this DEL is lost.
-fn emit_session_del(client: &MykoClient, session: &Session) -> Result<()> {
-    let event = MEvent::from_item(session, MEventType::DEL, &Uuid::new_v4().to_string());
-    client
-        .send_event(event)
-        .map_err(|e| anyhow::anyhow!("send_event(DEL) failed: {e}"))?;
-    Ok(())
+fn emit_session_del(client: &MykoClient, session: &Session) {
+    // Commands execute in FIFO order on each connection; a raw DEL could
+    // overtake the preceding RegisterSession command and resurrect the row.
+    let _ = client
+        .send_command::<marshal_entities::DeleteSession, marshal_entities::DeleteSessionResult>(
+            &marshal_entities::DeleteSession {
+                id: session.id.clone(),
+            },
+        );
 }
 
 /// Try each well-known per-user config path in order; return the first
@@ -1530,6 +1543,7 @@ mod tests {
             Arc::new(Session {
                 id: SessionId(Arc::from(id)),
                 client_id: client.map(|c| myko::entities::client::ClientId(Arc::from(c))),
+                agent_id: None,
                 pid: 0,
                 cwd: String::new(),
                 git_branch: None,
@@ -1634,5 +1648,80 @@ mod tests {
         assert_eq!(resolve_git_head_dir(bare.to_str().unwrap()), None);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use myko::wire::{CommandError, MykoMessage};
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[tokio::test]
+    async fn legacy_fallback_requires_exact_unknown_command_and_current_identity() {
+        for (error, drift, fallback) in [
+            ("Command handler not found: RegisterSession", false, true),
+            ("Command handler not found: RegisterSession", true, false),
+            ("registration denied", false, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = MykoClient::new();
+            client.set_address(Some(format!("ws://{}", listener.local_addr().unwrap())));
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let current: Arc<Mutex<Session>> = Arc::new(Mutex::new(
+                serde_json::from_value(
+                    serde_json::json!({"id":"old", "pid":1, "cwd":"/repo", "connectedAt":1}),
+                )
+                .unwrap(),
+            ));
+            emit_session_set(&client, &current.lock().unwrap(), &current);
+            let request = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let frame = socket.next().await.unwrap().unwrap();
+                    if let Message::Text(text) = frame
+                        && let MykoMessage::Command(command) = serde_json::from_str(&text).unwrap()
+                    {
+                        break command;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(request.command_id, "RegisterSession");
+            if drift {
+                let mut session = current.lock().unwrap();
+                emit_session_del(&client, &session);
+                session.id = SessionId(Arc::from("new"));
+            }
+            let response = MykoMessage::CommandError(CommandError::new(
+                request.command["tx"].as_str().unwrap(),
+                "RegisterSession",
+                error,
+            ));
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&response).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let event = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    let frame = socket.next().await.unwrap().unwrap();
+                    if let Message::Text(text) = frame
+                        && let MykoMessage::Event(event) = serde_json::from_str(&text).unwrap()
+                    {
+                        break event;
+                    }
+                }
+            })
+            .await;
+            assert_eq!(event.is_ok(), fallback, "error={error}, drift={drift}");
+            if let Ok(event) = event {
+                assert_eq!(event.item["id"], "old");
+            }
+            client.set_address(None);
+        }
     }
 }

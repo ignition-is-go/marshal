@@ -105,6 +105,7 @@ fn make_session(id: &str) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
         client_id: None,
+        agent_id: None,
         pid: 0,
         cwd: "/repo".into(),
         git_branch: None,

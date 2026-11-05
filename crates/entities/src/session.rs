@@ -49,6 +49,8 @@ mod tests {
         assert_eq!(s.last_tool_at, None);
         assert_eq!(s.operator, None);
         assert_eq!(s.host, None);
+        assert_eq!(s.agent_id, None);
+        assert!(serde_json::to_value(s).unwrap().get("agentId").is_none());
     }
 
     #[test]
@@ -56,6 +58,7 @@ mod tests {
         let s = Session {
             id: SessionId(Arc::from("sess-002")),
             client_id: None,
+            agent_id: None,
             pid: 4321,
             cwd: "/home/x".into(),
             git_branch: None,
@@ -88,6 +91,7 @@ mod tests {
         let s = Session {
             id: SessionId(Arc::from("sess-003")),
             client_id: None,
+            agent_id: Some("agent/\"x\nopaque".into()),
             pid: 1,
             cwd: "/repo".into(),
             git_branch: None,
@@ -111,6 +115,7 @@ mod tests {
         };
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["operator"], "trevor");
+        assert_eq!(json["agentId"], "agent/\"x\nopaque");
         assert_eq!(json["host"]["name"], "laptop");
         assert_eq!(json["host"]["os"], "linux");
         assert_eq!(json["host"]["arch"], "x86_64");
@@ -139,6 +144,10 @@ pub struct Session {
     #[myko_client_id]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<ClientId>,
+
+    /// Self-reported embedding-agent correlation metadata, never an address or credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 
     /// OS process id of the connecting client.
     pub pid: u32,
@@ -341,4 +350,47 @@ fn caller_err(ctx: &CommandContext, message: &str) -> CommandError {
         command_id: ctx.command_id.to_string(),
         message: message.to_string(),
     }
+}
+
+#[myko::myko_command]
+pub struct RegisterSession {
+    pub session: Session,
+}
+
+impl myko::command::CommandHandler for RegisterSession {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _ctx: CommandContext) -> Result<(), CommandError> {
+        unreachable!("RegisterSession is server-only")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(mut self, ctx: CommandContext) -> Result<(), CommandError> {
+        self.session.client_id = ctx.client_id().map(|id| ClientId(Arc::from(id)));
+        let id = self.session.id.clone();
+        update_registered_session(&ctx, &id, |_| self.session)
+    }
+}
+
+/// Serialize hook and shim registration because both replace the same Session row.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn update_registered_session(
+    ctx: &CommandContext,
+    id: &SessionId,
+    update: impl FnOnce(Option<&Session>) -> Session,
+) -> Result<(), CommandError> {
+    static REGISTRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = REGISTRATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
+    let prior = sessions.iter().find(|s| &s.id == id).map(Arc::as_ref);
+    let mut session = update(prior);
+    session.agent_id = session
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| prior.and_then(|s| s.agent_id.clone()));
+    ctx.emit_set(&session)
 }
