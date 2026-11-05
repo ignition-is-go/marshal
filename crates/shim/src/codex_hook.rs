@@ -400,16 +400,17 @@ const RESTART_QUIET: Duration = Duration::from_secs(30);
 const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY: Duration = Duration::from_secs(1);
 const POLL_RESPONSE_GRACE: Duration = Duration::from_secs(30);
+const TAKEOVER_SLACK: Duration = Duration::from_secs(5);
 
 fn poll_timeout(wait: Duration) -> Duration {
     wait + POLL_RESPONSE_GRACE
 }
 
 fn default_lock_wait() -> Duration {
-    poll_timeout(ONCE_WAIT) + WATCH_RETRY + LOCK_RETRY
+    poll_timeout(ONCE_WAIT) + WATCH_RETRY + TAKEOVER_SLACK
 }
 
-/// Cover an orphaned waiter's full request deadline, error backoff and next lock attempt.
+/// Cover the full request, backoff and coarse OS socket-timeout scheduling.
 fn lock_wait() -> Duration {
     std::env::var("MARSHAL_WAITER_LOCK_WAIT_SECS")
         .ok()
@@ -673,7 +674,7 @@ mod tests {
     #[test]
     fn takeover_budget_outlasts_the_full_old_poll_and_error_backoff() {
         assert!(default_lock_wait() > poll_timeout(ONCE_WAIT) + WATCH_RETRY);
-        assert_eq!(default_lock_wait(), Duration::from_secs(66));
+        assert_eq!(default_lock_wait(), Duration::from_secs(70));
     }
 
     #[cfg(unix)]
