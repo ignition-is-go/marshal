@@ -47,6 +47,8 @@ The plugin turns the hooks on. To run without them, wire the MCP server directly
 
 If the daemon can't be reached, the inbox hooks print nothing and give up within about two seconds, so they never block a turn. The hook listener has no authentication, as before: keep `MARSHAL_HOOK_BIND` on loopback or a trusted network.
 
+The hooks need a `marshal-shim` that has the `claude-hook` subcommand. With an older one on your `PATH`, every hook fails with `unknown argument: claude-hook` and no mail arrives through them. Update `marshal-shim` to the plugin's version.
+
 ## Optional: show the session in your status line
 
 The `marshal-shim statusline` subcommand reads Claude Code's status payload from stdin (plus the local host and user) and renders `[user@host dir sid8]` in your footer — where `sid8` is your `session_id[:8]` — so you can tell sessions apart at a glance.
