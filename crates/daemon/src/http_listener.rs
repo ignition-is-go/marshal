@@ -140,6 +140,18 @@ async fn handle_conn(
 
     match hooks::dispatch(path, query, &body, &ctx) {
         Some(outcome) => {
+            // A caller that says it will ack (`ack=client`) gets the ids in
+            // `X-Marshal-Ack` and acks once it has printed the mail; until then a
+            // lease keeps the mail from being offered twice, and it's offered
+            // again if the ack never comes. Flushing the reply here doesn't prove
+            // it arrived: the hook may be killed at its timeout, or a proxy hop
+            // may drop it.
+            let client_acks = query.split('&').any(|kv| kv == "ack=client");
+            if client_acks && let Some((_, ids)) = &outcome.deferred_ack {
+                let ids: Vec<&str> = ids.iter().map(|id| id.0.as_ref()).collect();
+                let header = format!("X-Marshal-Ack: {}\r\n", ids.join(","));
+                return write_response_with(&mut stream, 200, &header, &outcome.body).await;
+            }
             write_response(&mut stream, 200, &outcome.body).await?;
             // At-least-once inbox: ack the surfaced messages ONLY after the
             // response was successfully written + flushed above. If that write

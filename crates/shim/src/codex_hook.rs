@@ -100,24 +100,39 @@ pub fn run_for(harness: Harness, ep: &str, base_override: Option<&str>) {
         json_str(sid),
         json_str(cwd)
     );
+    // `ack=client`: the daemon marks the mail read only when this hook says it
+    // has printed it, so a reply lost on the way (a hook killed at its timeout,
+    // a dropped proxy hop) leaves the mail unread.
     let path = format!(
-        "/hook/{endpoint}?host={}&operator={}&harness={}",
+        "/hook/{endpoint}?host={}&operator={}&harness={}&ack=client",
         url_q(&host),
         url_q(&op),
         harness.name()
     );
 
-    let Some(resp) = http_post(&base, &path, &body, harness.timeout()) else {
+    let Ok(reply) = http_post_why(&base, &path, &body, harness.timeout()) else {
         return;
     };
-    let resp = resp.trim_end_matches(['\n', '\r', ' ']);
-    if resp.is_empty() {
-        return; // empty inbox / no session block → inject nothing
+    let resp = reply.body.trim_end_matches(['\n', '\r', ' ']);
+    if !resp.is_empty() {
+        let out = serde_json::json!({
+            "hookSpecificOutput": { "hookEventName": event, "additionalContext": resp }
+        });
+        let mut stdout = std::io::stdout().lock();
+        if writeln!(stdout, "{out}")
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            return; // not handed on: leave it unacked, to be offered again
+        }
     }
-    let out = serde_json::json!({
-        "hookSpecificOutput": { "hookEventName": event, "additionalContext": resp }
-    });
-    println!("{out}");
+    // Only now has the mail been handed on. A lost ack means it comes again
+    // once the lease lapses, which beats losing it.
+    if !reply.ack_ids.is_empty() {
+        let ack =
+            serde_json::json!({ "session_id": sid, "message_ids": reply.ack_ids }).to_string();
+        let _ = http_post_why(&base, "/hook/ack", &ack, ACK_TIMEOUT);
+    }
 }
 
 /// `marshal-shim watch <session_id> [base-url]` — the live inbox for Claude
