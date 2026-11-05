@@ -198,6 +198,7 @@ fn connect_pair(
 
 fn send_and_wait(client: &MykoClient, to: &str, body: &str) -> SendMessageResult {
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from(to)),
         body: body.into(),
         as_session: None,

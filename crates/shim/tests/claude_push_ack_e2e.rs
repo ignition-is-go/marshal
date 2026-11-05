@@ -167,6 +167,7 @@ impl Cell {
                 .expect("join room");
         }
         let result = BroadcastMessage {
+            response_required: false,
             to_room_id: RoomId(Arc::from("everyone")),
             body: format!("@{} have a look", marshal_entities::nickname(to)),
             as_session: Some(SessionId(Arc::from(SENDER))),
@@ -178,6 +179,7 @@ impl Cell {
 
     fn send(&self, to: &str, body: &str) -> MessageId {
         let result = SendMessage {
+            response_required: false,
             to_session_id: SessionId(Arc::from(to)),
             body: body.into(),
             as_session: Some(SessionId(Arc::from(SENDER))),
