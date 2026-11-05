@@ -12,6 +12,7 @@ describe("live push text", () => {
   const cases: [string, NotifyChannelMeta, string | undefined][] = [
     ["a complete body is injected as is", { body: "hello" }, "new message from alice [response_required=false]: hello"],
     ["a body that requires a response says so", { body: "hello", response_required: true }, "new message from alice [response_required=true]: hello"],
+    ["an explicit false reply requirement is preserved", { body: "hello", response_required: false }, "new message from alice [response_required=false]: hello"],
     ["body_truncated false changes nothing", { body: "hello", body_truncated: false }, "new message from alice [response_required=false]: hello"],
     [
       "a truncated body says so and names the message",
