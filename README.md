@@ -398,3 +398,8 @@ Releases are driven by [`cargo-flux`](https://github.com/ignition-is-go/cargo-fl
 ## License
 
 MIT OR Apache-2.0
+
+That covers Marshal's own source code. Marshal depends on myko, myko-macros and autosocket
+(and myko-server for `marshal-daemon`), which declare the AGPL-3.0-or-later licence. Anyone
+who distributes or runs binaries built from Marshal should assess the licence of the combined
+work. This isn't legal advice.
