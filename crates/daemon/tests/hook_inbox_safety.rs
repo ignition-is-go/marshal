@@ -406,6 +406,15 @@ fn a_single_message_that_escaping_grows_still_fits_claudes_context_cap() {
 
 #[test]
 fn a_mention_the_live_channel_delivered_is_not_surfaced_again() {
+    check_mention_acknowledgment(false);
+}
+
+#[test]
+fn a_mention_waits_for_a_client_acknowledgment() {
+    check_mention_acknowledgment(true);
+}
+
+fn check_mention_acknowledgment(acks_pushes: bool) {
     let daemon = daemon();
     daemon.apply(&session("sender"));
     daemon.apply(&Room {
@@ -429,11 +438,9 @@ fn a_mention_the_live_channel_delivered_is_not_surfaced_again() {
         assert!(Instant::now() < deadline, "client never connected");
         thread::sleep(Duration::from_millis(25));
     }
-    let event = MEvent::from_item(
-        &session("live"),
-        MEventType::SET,
-        &Uuid::new_v4().to_string(),
-    );
+    let mut recipient = session("live");
+    recipient.acks_pushes = Some(acks_pushes);
+    let event = MEvent::from_item(&recipient, MEventType::SET, &Uuid::new_v4().to_string());
     client.send_event(event).expect("register live session");
     let deadline = Instant::now() + WAIT;
     while !daemon
@@ -456,6 +463,35 @@ fn a_mention_the_live_channel_delivered_is_not_surfaced_again() {
     }
     .execute(daemon.context())
     .expect("broadcast with a mention");
+
+    if acks_pushes {
+        let messages = daemon
+            .context()
+            .exec_query(marshal_entities::GetAllMessages {})
+            .expect("query messages");
+        let ping = messages
+            .iter()
+            .find(|m| {
+                m.to_session_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == "live")
+            })
+            .expect("stored mention ping");
+        let reads = daemon
+            .context()
+            .exec_query(marshal_entities::GetAllMessageReads {})
+            .expect("query read receipts");
+        assert!(
+            reads.iter().all(|read| read.message_id != ping.id),
+            "mention must stay unread until the client acknowledges it"
+        );
+        marshal_entities::AckMessages {
+            message_ids: vec![ping.id.clone()],
+            as_session: Some(SessionId(Arc::from("live"))),
+        }
+        .execute(daemon.context())
+        .expect("acknowledge written mention");
+    }
 
     let inbox = daemon.prompt_submit("live");
     assert!(
