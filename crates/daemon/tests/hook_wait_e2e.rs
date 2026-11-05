@@ -313,3 +313,46 @@ fn idle_wait_ends_empty_at_its_timeout() {
         "wait ended early"
     );
 }
+
+fn recipient_last_activity(ctx: &MykoServerContext) -> Option<i64> {
+    let sessions: Vec<Arc<Session>> = cmd_ctx(ctx)
+        .exec_query(marshal_entities::GetAllSessions {})
+        .unwrap_or_default();
+    sessions
+        .iter()
+        .find(|s| s.id.0.as_ref() == "recipient")
+        .expect("recipient registered")
+        .last_activity_at
+}
+
+#[test]
+fn an_idle_waiter_does_not_look_active() {
+    let (ctx, addr) = start();
+    let registered = recipient_last_activity(&ctx);
+    assert!(registered.is_some(), "registering is activity");
+    thread::sleep(Duration::from_millis(20));
+    // Two waits back to back, as a waiter asks again each time one ends.
+    for _ in 0..2 {
+        http_post(addr, "/hook/wait?harness=claude&timeout=1", RECIPIENT);
+    }
+    assert_eq!(
+        recipient_last_activity(&ctx),
+        registered,
+        "a wait must not move last_activity_at"
+    );
+}
+
+#[test]
+fn a_wait_that_registers_a_session_does_not_mark_it_active() {
+    let (ctx, addr) = start();
+    let newcomer = r#"{"session_id":"newcomer","cwd":"/work/repo"}"#;
+    http_post(addr, "/hook/wait?harness=claude&timeout=1", newcomer);
+    let sessions: Vec<Arc<Session>> = cmd_ctx(&ctx)
+        .exec_query(marshal_entities::GetAllSessions {})
+        .unwrap_or_default();
+    let row = sessions
+        .iter()
+        .find(|s| s.id.0.as_ref() == "newcomer")
+        .expect("a wait still registers a missing session");
+    assert_eq!(row.last_activity_at, None);
+}

@@ -214,7 +214,7 @@ fn handle_ack(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
 /// request has no model turn to receive context, so surfacing (and later
 /// acknowledging) unread messages here would lose them.
 fn handle_session_register(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
-    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx) else {
+    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx, Activity::Active) else {
         return HookOutcome::text(String::new());
     };
     let nickname = crate::nickname_assign::ensure_assigned(&cmd_ctx, &sid)
@@ -229,7 +229,7 @@ fn handle_session_register(query: &str, body: &[u8], ctx: &Arc<MykoServerContext
 }
 
 fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
-    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx) else {
+    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx, Activity::Active) else {
         return HookOutcome::text(String::new());
     };
 
@@ -266,6 +266,14 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) 
     }
 }
 
+/// Whether a hook request is the agent doing something, which moves
+/// `last_activity_at`, or only waiting for mail, which doesn't.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Activity {
+    Active,
+    Waiting,
+}
+
 /// Parse hook metadata and SET the corresponding pull-owned Session.
 ///
 /// Returns the canonical session id plus the command context used for the SET
@@ -275,6 +283,7 @@ fn register_hook_session(
     query: &str,
     body: &[u8],
     ctx: &Arc<MykoServerContext>,
+    activity: Activity,
 ) -> Option<(String, CommandContext)> {
     let body = parse_body(body)?;
     let sid = body.get("session_id").and_then(|v| v.as_str())?;
@@ -315,18 +324,22 @@ fn register_hook_session(
     let sid_typed = SessionId(Arc::from(sid.as_str()));
     let prior = existing.iter().find(|s| s.id == sid_typed);
     let now = chrono::Utc::now().timestamp_millis();
+    let active_at = (activity == Activity::Active).then_some(now);
     // Preserve shim-owned fields (client_id, pid, git_branch, last_tool*)
     // when a prior row already exists. The hook can fire after the shim
     // has registered, and clobbering client_id back to None breaks live
     // notification routing — the failure mode we're explicitly avoiding
     // by sharing one session_id between hook and shim. The hook only
     // writes fields it uniquely sources (operator, host, project from
-    // query string; cwd from payload; last_activity_at from "now").
+    // query string; cwd from payload; last_activity_at from "now", unless
+    // the request is a wait).
     let session = match prior {
         Some(p) => {
             let mut updated = (**p).clone();
             updated.cwd = cwd;
-            updated.last_activity_at = Some(now);
+            if active_at.is_some() {
+                updated.last_activity_at = active_at;
+            }
             if updated.operator.is_none() {
                 updated.operator = operator;
             }
@@ -350,7 +363,7 @@ fn register_hook_session(
             activity: None,
             kind: None,
             connected_at: now,
-            last_activity_at: Some(now),
+            last_activity_at: active_at,
             last_tool: None,
             last_tool_at: None,
             operator,
@@ -371,7 +384,7 @@ fn handle_prompt_submit(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) 
     // used by SessionStart so this prompt repairs a missing row in place before
     // inbox lookup. Codex supplies the authoritative session_id + cwd in every
     // hook body; host/operator remain on the hook query string.
-    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx) else {
+    let Some((sid, cmd_ctx)) = register_hook_session(query, body, ctx, Activity::Active) else {
         return HookOutcome::text(String::new());
     };
 
@@ -385,6 +398,11 @@ fn handle_prompt_submit(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) 
 /// Start a `/hook/wait` long-poll: register (or refresh) the waiting session
 /// once, returning the context the listener re-checks the inbox against.
 ///
+/// A wait isn't activity. The waiter asks again each time one ends, so if it
+/// moved `last_activity_at`, an idle session would look active: operator mail
+/// would go to whichever session polled last, and the stale-session sweep
+/// would never reap it.
+///
 /// `/hook/wait` is how an idle Claude Code session hears a direct message
 /// without the live-channel flag: the `asyncRewake` hook `marshal-shim
 /// claude-hook wait` (or `marshal-shim watch` under Claude's Monitor tool)
@@ -395,7 +413,7 @@ pub fn begin_wait(
     body: &[u8],
     ctx: &Arc<MykoServerContext>,
 ) -> Option<(String, CommandContext)> {
-    register_hook_session(query, body, ctx)
+    register_hook_session(query, body, ctx, Activity::Waiting)
 }
 
 /// How long a `WakeWatcher` counts without being refreshed, which is how long a
