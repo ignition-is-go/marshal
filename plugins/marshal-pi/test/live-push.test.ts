@@ -25,7 +25,13 @@ describe("deliverLivePush", () => {
   test("injects the pushed body", async () => {
     const session = fakeSession([]);
     await deliverLivePush({ body: "hello" }, "alice", session.target);
-    expect(session.injected).toEqual(["new message from alice: hello"]);
+    expect(session.injected).toEqual(["new message from alice [response_required=false]: hello"]);
+  });
+
+  test("preserves a pushed reply requirement", async () => {
+    const session = fakeSession([]);
+    await deliverLivePush({ body: "please answer", response_required: true }, "alice", session.target);
+    expect(session.injected).toEqual(["new message from alice [response_required=true]: please answer"]);
   });
 
   // The daemon marks a delivered push read, so the drain after it can only
@@ -33,7 +39,7 @@ describe("deliverLivePush", () => {
   test("leaves another unread message for the inbox", async () => {
     const session = fakeSession(["new message from bob: sent while you were reconnecting"]);
     await deliverLivePush({ body: "hello" }, "alice", session.target);
-    expect(session.injected).toEqual(["new message from alice: hello"]);
+    expect(session.injected).toEqual(["new message from alice [response_required=false]: hello"]);
     expect(session.unread).toEqual(["new message from bob: sent while you were reconnecting"]);
   });
 
@@ -56,7 +62,7 @@ describe("deliverLivePush", () => {
     const session = fakeSession(["new message from bob: still unread"]);
     await deliverLivePush({ body: "the first part", body_truncated: true, message_id: "msg_1" }, "alice", session.target);
     expect(session.injected).toEqual([
-      "new message from alice: the first part\n[preview truncated; read the full message with marshal_messages (message msg_1)]",
+      "new message from alice [response_required=false]: the first part\n[preview truncated; read the full message with marshal_messages (message msg_1)]",
     ]);
     expect(session.unread).toEqual(["new message from bob: still unread"]);
   });
