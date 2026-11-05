@@ -199,6 +199,9 @@ With no command, serves MCP on stdio for the agent session that started it.
 
 Commands:
   statusline    Render the Claude Code status line prefix from stdin
+  claude-hook   Forward a Claude hook, or wait for mail:
+                claude-hook <session-start|prompt-submit|post-tool-use|wait> [base-url]
+  watch         Print live mail: watch <session_id> [base-url] [--once]
   codex-hook    Forward a Codex hook to the daemon:
                 codex-hook <session-start|session-end|prompt-submit|pre-tool-use|post-tool-use> [base-url]
   codex-setup   Wire Marshal into a Codex install (codex-setup --help for options)
@@ -1542,6 +1545,7 @@ mod tests {
                 host: None,
                 project: None,
                 channels_enabled: None,
+                acks_pushes: None,
             })
         };
         assert!(registered_on_roster(&[row("me", Some("c"))], &me));

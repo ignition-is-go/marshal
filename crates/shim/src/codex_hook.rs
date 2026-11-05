@@ -25,13 +25,13 @@
 //! can never block or break a Codex or Claude turn.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use crate::link::{PostFailure, Reply};
 
 const HOOK_PORT: u16 = 6156;
-const TIMEOUT: Duration = Duration::from_secs(5);
+const TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Which agent harness invoked the hook. Both send the same hook JSON and read
 /// the same `hookSpecificOutput.additionalContext`; they differ in the
@@ -554,12 +554,8 @@ fn http_post_why(
     };
     let addrs =
         resolve_within(format!("{host}:{port}"), left()?).ok_or(PostFailure::Unreachable)?;
-    let mut stream = addrs
-        .into_iter()
-        .find_map(|addr| {
-            TcpStream::connect_timeout(&addr, Duration::from_secs(1).min(left().ok()?)).ok()
-        })
-        .ok_or(PostFailure::Unreachable)?;
+    let mut stream =
+        crate::link::connect_any(addrs.as_slice(), deadline).ok_or(PostFailure::Unreachable)?;
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -646,6 +642,48 @@ fn url_q(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingWriter {
+        writes_left: usize,
+        fail_flush: bool,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.writes_left == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.writes_left -= 1;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail_flush {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn watch_output_propagates_first_write_later_write_and_flush_failures() {
+        for mut out in [
+            FailingWriter {
+                writes_left: 0,
+                fail_flush: false,
+            },
+            FailingWriter {
+                writes_left: 1,
+                fail_flush: false,
+            },
+            FailingWriter {
+                writes_left: usize::MAX,
+                fail_flush: true,
+            },
+        ] {
+            assert!(write_watch_events(&mut out, &"word ".repeat(1000)).is_err());
+        }
+    }
 
     #[test]
     fn event_chunks_keep_lines_whole_and_under_the_limit() {

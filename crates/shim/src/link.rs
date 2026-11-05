@@ -10,15 +10,19 @@ use std::time::{Duration, Instant};
 /// `localhost` can resolve to `::1` ahead of the `127.0.0.1` the daemon binds,
 /// so stopping at the first address would be refused forever. Each attempt is
 /// capped at [`CONNECT_ATTEMPT`], however long the caller's request may run.
-pub fn connect_any(target: impl ToSocketAddrs, timeout: Duration) -> Option<TcpStream> {
-    let attempt = timeout.min(CONNECT_ATTEMPT);
-    target
-        .to_socket_addrs()
-        .ok()?
-        .find_map(|addr| TcpStream::connect_timeout(&addr, attempt).ok())
+pub fn connect_any(target: impl ToSocketAddrs, deadline: Instant) -> Option<TcpStream> {
+    target.to_socket_addrs().ok()?.find_map(|addr| {
+        let attempt = deadline
+            .checked_duration_since(Instant::now())?
+            .min(CONNECT_ATTEMPT);
+        if attempt.is_zero() {
+            return None;
+        }
+        TcpStream::connect_timeout(&addr, attempt).ok()
+    })
 }
 
-const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
+const CONNECT_ATTEMPT: Duration = Duration::from_secs(1);
 
 /// Why a POST to the daemon got no usable answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,10 +101,10 @@ pub fn read_reply(stream: &mut TcpStream, deadline: Instant) -> Result<Reply, Po
     let mut buf = Vec::new();
     let mut chunk = [0; 8192];
     loop {
-        if let Some(total) = response_length(&buf)? {
-            if buf.len() >= total {
-                return parse_response(&buf);
-            }
+        if let Some(total) = response_length(&buf)?
+            && buf.len() >= total
+        {
+            return parse_response(&buf);
         }
         let left = deadline
             .checked_duration_since(Instant::now())
@@ -218,20 +222,100 @@ mod tests {
         assert_eq!(parse_response(b""), Err(PostFailure::Unreachable));
     }
 
+    fn frame(headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{headers}\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(body);
+        raw
+    }
+
+    #[test]
+    fn malformed_or_incomplete_frames_cannot_expose_acknowledgments() {
+        for raw in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nX-Marshal-Ack-V1: [\"m\"]\r\n\r\npartial"
+                .to_vec(),
+            b"HTTP/1.1 200 OK\r\n\r\nbody".to_vec(),
+            frame("Content-Length: 4\r\n", b"body"),
+            frame("Transfer-Encoding: chunked\r\n", b"body"),
+            frame(
+                "X-Marshal-Ack-V1: [\"m\"]\r\nX-Marshal-Ack-V1: []\r\n",
+                b"body",
+            ),
+            frame("X-Marshal-Ack-V1: nope\r\n", b"body"),
+            frame("X-Marshal-Ack-V1: [1]\r\n", b"body"),
+            frame("X-Marshal-Ack-V1: [\"m\"]\r\n", b""),
+            frame("", &[0xff]),
+        ] {
+            assert!(parse_response(&raw).is_err(), "accepted {raw:?}");
+        }
+        let mut extra = frame("", b"body");
+        extra.push(b'x');
+        assert!(parse_response(&extra).is_err());
+    }
+
+    #[test]
+    fn acknowledgment_ids_round_trip_without_identity_normalization() {
+        let ids = vec![
+            "",
+            "comma,id",
+            "cr\r\nX-Injected: yes",
+            "quote\"slash\\",
+            "\u{7f}",
+            "café",
+        ];
+        let encoded = serde_json::to_string(&ids)
+            .unwrap()
+            .replace('\u{7f}', "\\u007f");
+        let raw = frame(&format!("X-Marshal-Ack-V1: {encoded}\r\n"), "é".as_bytes());
+        let reply = parse_response(&raw).unwrap();
+        assert_eq!(reply.ack_ids, ids);
+        assert_eq!(reply.body, "é");
+        assert!(
+            parse_response(&frame("X-Marshal-Ack: [\"old-id\"]\r\n", b"body"))
+                .unwrap()
+                .ack_ids
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn read_reply_finishes_at_the_frame_boundary_without_waiting_for_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            use std::io::Write;
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.write_all(&frame("", b"body")).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let reply = read_reply(&mut stream, Instant::now() + Duration::from_secs(1)).unwrap();
+        assert_eq!(reply.body, "body");
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+    }
+
     #[test]
     fn connect_any_skips_an_address_that_refuses() {
         let (_held, refused) = refusing_address();
         let live = TcpListener::bind("127.0.0.1:0").unwrap();
         let live_addr = live.local_addr().unwrap();
 
-        let stream = connect_any(&[refused, live_addr][..], Duration::from_secs(1))
-            .expect("should fall through to the address that accepts");
+        let stream = connect_any(
+            &[refused, live_addr][..],
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("should fall through to the address that accepts");
         assert_eq!(stream.peer_addr().unwrap(), live_addr);
     }
 
     #[test]
     fn connect_any_is_none_when_every_address_refuses() {
         let (_held, refused) = refusing_address();
-        assert!(connect_any(&[refused][..], Duration::from_secs(1)).is_none());
+        assert!(connect_any(&[refused][..], Instant::now() + Duration::from_secs(1)).is_none());
     }
 }

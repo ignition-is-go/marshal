@@ -320,3 +320,76 @@ fn second_waiter_for_a_session_exits_quietly() {
     assert_eq!(second.status.code(), Some(0));
     assert!(second.stderr.is_empty());
 }
+
+fn boundary_listener(response: Vec<u8>, delay: Duration) -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let _ = stream.read(&mut request);
+        for byte in response {
+            if stream.write_all(&[byte]).is_err() {
+                break;
+            }
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+        }
+        drop(stream);
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let n = stream.read(&mut request).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&request[..n]).into_owned());
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    (base, rx)
+}
+
+#[test]
+fn an_incomplete_reply_never_surfaces_or_acknowledges_mail() {
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nX-Marshal-Ack-V1: [\"m1\",\"m2\"]\r\n\r\npartial";
+    let (base, requests) = boundary_listener(raw.to_vec(), Duration::ZERO);
+    assert_eq!(run_hook(&["claude-hook", "prompt-submit"], &base), "");
+    assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn a_trickled_reply_cannot_extend_the_whole_hook_deadline() {
+    let raw =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nX-Marshal-Ack-V1: [\"m1\"]\r\n\r\npartial";
+    let (base, requests) = boundary_listener(raw.to_vec(), Duration::from_millis(80));
+    let started = Instant::now();
+    assert_eq!(run_hook(&["claude-hook", "prompt-submit"], &base), "");
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn a_closed_monitor_pipe_leaves_delivered_mail_unacknowledged() {
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Marshal-Ack-V1: [\"m1\"]\r\n\r\nhello";
+    let (base, requests) = boundary_listener(raw.to_vec(), Duration::ZERO);
+    let mut child = Command::new(SHIM)
+        .args(["watch", "boundary-test", &base, "--once"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    assert!(child.wait().unwrap().success());
+    assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn an_oversized_response_is_rejected_before_reading_its_body() {
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 262145\r\nX-Marshal-Ack-V1: [\"m1\"]\r\n\r\n";
+    let (base, requests) = boundary_listener(raw.to_vec(), Duration::ZERO);
+    assert_eq!(run_hook(&["claude-hook", "prompt-submit"], &base), "");
+    assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
+}

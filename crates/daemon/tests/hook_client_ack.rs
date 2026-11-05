@@ -1,5 +1,5 @@
 //! A prompt hook that asks to ack its own mail (`ack=client`) gets
-//! the ids in `X-Marshal-Ack` and the mail stays unread until it acks: a reply
+//! the ids in `X-Marshal-Ack-V1` and the mail stays unread until it acks: a reply
 //! lost after the daemon flushed it doesn't lose the mail. A caller that
 //! doesn't ask keeps the daemon's own ack.
 
@@ -219,4 +219,114 @@ fn a_prompt_hook_that_acks_itself_keeps_unacked_mail_unread() {
     thread::sleep(Duration::from_millis(1500));
     let again = http_post(addr, "/hook/prompt-submit?harness=claude", RECIPIENT);
     assert!(!again.contains("SERVER-ACK-old-caller"), "{again}");
+}
+
+fn store_message(ctx: &MykoServerContext, id: &str, body: &str, sent_at: i64) {
+    let message = marshal_entities::Message {
+        id: marshal_entities::MessageId(Arc::from(id)),
+        from_session_id: SessionId(Arc::from("sender")),
+        to_session_id: Some(SessionId(Arc::from("recipient"))),
+        to_room_id: None,
+        to_operator: None,
+        response_required: true,
+        body: body.into(),
+        sent_at,
+    };
+    let event = MEvent::from_item(&message, MEventType::SET, &Uuid::new_v4().to_string());
+    ctx.apply_event_batch(vec![event]).unwrap();
+}
+
+#[test]
+fn arbitrary_stored_ids_round_trip_through_both_ack_headers() {
+    let (ctx, addr) = start();
+    for path in [
+        "/hook/prompt-submit?ack=client",
+        "/hook/wait?ack=client&timeout=0",
+    ] {
+        let id = format!("{},\r\nX-Injected: true\u{7f}é\"\\\u{0}", Uuid::new_v4());
+        store_message(
+            &ctx,
+            &id,
+            "safe body",
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let raw = http_post_raw(addr, path, RECIPIENT);
+        let (headers, _) = raw.split_once("\r\n\r\n").unwrap();
+        assert!(!headers.contains("\r\nX-Injected:"));
+        assert!(!headers.contains('\u{7f}'));
+        assert_eq!(ack_ids(&raw), vec![id]);
+        let ack = serde_json::json!({"session_id": "recipient", "message_ids": ack_ids(&raw)});
+        http_post(addr, "/hook/ack", &ack.to_string());
+    }
+}
+
+#[test]
+fn undisplayed_backlog_is_immediately_available_to_another_reader() {
+    let (ctx, addr) = start();
+    for i in 0..20 {
+        store_message(
+            &ctx,
+            &Uuid::new_v4().to_string(),
+            &format!("{i}:{}", "&".repeat(2000)),
+            100 + i,
+        );
+    }
+    let first = http_post_raw(addr, "/hook/prompt-submit?ack=client", RECIPIENT);
+    let first_ids = ack_ids(&first);
+    assert!(!first_ids.is_empty() && first_ids.len() < 20);
+    let next = http_post_raw(addr, "/hook/wait?ack=client&timeout=0", RECIPIENT);
+    let next_ids = ack_ids(&next);
+    assert!(
+        !next_ids.is_empty(),
+        "omitted messages must not be leased: {next}"
+    );
+    assert!(first_ids.iter().all(|id| !next_ids.contains(id)));
+    for raw in [&first, &next] {
+        let body = raw.split_once("\r\n\r\n").unwrap().1;
+        assert!(body.encode_utf16().count() < 10_000);
+    }
+}
+
+#[test]
+fn an_oversized_ack_id_does_not_lease_or_block_other_messages() {
+    let (ctx, addr) = start();
+    let huge = "x".repeat(200 * 1024);
+    store_message(&ctx, &huge, "oversized identity", 100);
+    let good = Uuid::new_v4().to_string();
+    store_message(&ctx, &good, "deliverable", 101);
+    let raw = http_post_raw(addr, "/hook/prompt-submit?ack=client", RECIPIENT);
+    assert_eq!(ack_ids(&raw), vec![good]);
+    assert!(raw.len() < 256 * 1024);
+}
+
+#[test]
+fn concurrent_hook_and_wait_readers_lease_disjoint_displayed_messages() {
+    let (ctx, addr) = start();
+    for i in 0..20 {
+        store_message(
+            &ctx,
+            &Uuid::new_v4().to_string(),
+            &"&".repeat(2000),
+            100 + i,
+        );
+    }
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let readers: Vec<_> = [
+        "/hook/prompt-submit?ack=client",
+        "/hook/wait?ack=client&timeout=0",
+    ]
+    .into_iter()
+    .map(|path| {
+        let barrier = barrier.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            ack_ids(&http_post_raw(addr, path, RECIPIENT))
+        })
+    })
+    .collect();
+    let mut results = readers.into_iter().map(|reader| reader.join().unwrap());
+    let a = results.next().unwrap();
+    let b = results.next().unwrap();
+    assert!(!a.is_empty() && !b.is_empty());
+    assert!(a.iter().all(|id| !b.contains(id)));
 }
