@@ -13,9 +13,8 @@ use std::{
 
 use hyphae::{Gettable, Materialize};
 use marshal_entities::{
-    AckMessages, AckMessagesResult, GetAllSessions, Message, MessageId, MessageRead,
-    ReadMessages, ReadMessagesResult, RoomMember, SendMessage, SendMessageResult, Session,
-    SessionId,
+    AckMessages, AckMessagesResult, GetAllSessions, Message, MessageId, MessageRead, ReadMessages,
+    ReadMessagesResult, RoomMember, SendMessage, SendMessageResult, Session, SessionId,
 };
 use myko::{
     client::{ConnectionStatus, MykoClient, MykoProtocol},
@@ -145,7 +144,13 @@ fn store_count(ctx: &MykoServerContext, entity: &str) -> usize {
 /// The single Message's id, or None.
 fn first_message_id(ctx: &MykoServerContext) -> Option<Arc<str>> {
     let store = ctx.registry.get(Message::ENTITY_NAME_STATIC)?;
-    store.entries().materialize().get().into_iter().next().map(|(k, _)| k)
+    store
+        .entries()
+        .materialize()
+        .get()
+        .into_iter()
+        .next()
+        .map(|(k, _)| k)
 }
 
 /// Authoritative server-side: is S present in the Session store?
@@ -211,6 +216,7 @@ fn del_session_then_reregister_does_not_reinject_acked_direct_dm() {
 
     // 1. A sends a DIRECT DM to B.
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("sess-bravo")),
         body: "the one and only direct DM".into(),
         as_session: None,
@@ -218,14 +224,20 @@ fn del_session_then_reregister_does_not_reinject_acked_direct_dm() {
     let response_cell = client_a.send_command::<SendMessage, SendMessageResult>(&cmd);
     {
         let cell = response_cell.clone();
-        wait_for("A's send response", move || matches!(cell.get(), Some(Ok(_))));
+        wait_for("A's send response", move || {
+            matches!(cell.get(), Some(Ok(_)))
+        });
     }
-    wait_for("DM persisted", || store_count(&server.ctx, Message::ENTITY_NAME_STATIC) == 1);
+    wait_for("DM persisted", || {
+        store_count(&server.ctx, Message::ENTITY_NAME_STATIC) == 1
+    });
     let dm_id = first_message_id(&server.ctx).expect("DM id");
-    eprintln!("[t1] after DM:       messages={}  reads={}  members={}",
+    eprintln!(
+        "[t1] after DM:       messages={}  reads={}  members={}",
         store_count(&server.ctx, Message::ENTITY_NAME_STATIC),
         store_count(&server.ctx, MessageRead::ENTITY_NAME_STATIC),
-        store_count(&server.ctx, RoomMember::ENTITY_NAME_STATIC));
+        store_count(&server.ctx, RoomMember::ENTITY_NAME_STATIC)
+    );
 
     // 2. B acks the DM (WS path → resolves to B via client_id).
     let ack = client_b.send_command::<AckMessages, AckMessagesResult>(&AckMessages {
@@ -234,26 +246,32 @@ fn del_session_then_reregister_does_not_reinject_acked_direct_dm() {
     });
     {
         let cell = ack.clone();
-        wait_for("B's ack response", move || matches!(cell.get(), Some(Ok(_))));
+        wait_for("B's ack response", move || {
+            matches!(cell.get(), Some(Ok(_)))
+        });
     }
     let ack_res = ack.get().expect("ack resp").expect("ok");
     wait_for("ack persisted", || {
         store_count(&server.ctx, MessageRead::ENTITY_NAME_STATIC) >= 1
     });
-    eprintln!("[t2] after ack:      messages={}  reads={}  newly_acked={}",
+    eprintln!(
+        "[t2] after ack:      messages={}  reads={}  newly_acked={}",
         store_count(&server.ctx, Message::ENTITY_NAME_STATIC),
         store_count(&server.ctx, MessageRead::ENTITY_NAME_STATIC),
-        ack_res.newly_acked);
+        ack_res.newly_acked
+    );
 
     // 3. B DELs its session (shim deregister on exit). Local-origin → cascade.
     send_session_del(&client_b, &s);
     wait_for("B session gone (server)", || {
         !session_in_server(&server.ctx, "sess-bravo")
     });
-    eprintln!("[t3] after DEL S:    messages={}  reads={}  members={}",
+    eprintln!(
+        "[t3] after DEL S:    messages={}  reads={}  members={}",
         store_count(&server.ctx, Message::ENTITY_NAME_STATIC),
         store_count(&server.ctx, MessageRead::ENTITY_NAME_STATIC),
-        store_count(&server.ctx, RoomMember::ENTITY_NAME_STATIC));
+        store_count(&server.ctx, RoomMember::ENTITY_NAME_STATIC)
+    );
     // The DM outlives its recipient's DEL: the session comes back under the
     // same id. Without this, a cascade that deleted the DM would also pass
     // the read check below, since a deleted message is never re-injected.
@@ -268,10 +286,12 @@ fn del_session_then_reregister_does_not_reinject_acked_direct_dm() {
     wait_for("B session re-registered (server)", || {
         session_in_server(&server.ctx, "sess-bravo")
     });
-    eprintln!("[t4] after re-SET S: messages={}  reads={}  members={}",
+    eprintln!(
+        "[t4] after re-SET S: messages={}  reads={}  members={}",
         store_count(&server.ctx, Message::ENTITY_NAME_STATIC),
         store_count(&server.ctx, MessageRead::ENTITY_NAME_STATIC),
-        store_count(&server.ctx, RoomMember::ENTITY_NAME_STATIC));
+        store_count(&server.ctx, RoomMember::ENTITY_NAME_STATIC)
+    );
 
     // 5. B reads its unread inbox (what marshal-pi injects per prompt).
     let read = client_b.send_command::<ReadMessages, ReadMessagesResult>(&ReadMessages {
@@ -287,15 +307,24 @@ fn del_session_then_reregister_does_not_reinject_acked_direct_dm() {
     });
     {
         let cell = read.clone();
-        wait_for("B's read response", move || matches!(cell.get(), Some(Ok(_))));
+        wait_for("B's read response", move || {
+            matches!(cell.get(), Some(Ok(_)))
+        });
     }
     let res = read.get().expect("read resp").expect("ok");
-    eprintln!("[t5] read unread:    matched={}  returned={}",
-        res.total_matched, res.messages.len());
+    eprintln!(
+        "[t5] read unread:    matched={}  returned={}",
+        res.total_matched,
+        res.messages.len()
+    );
     for m in &res.messages {
-        eprintln!("    → {} from {} read_by_me={} body={:?}",
-            m.message_id.0.as_ref(), m.from_session_id.0.as_ref(),
-            m.read_by_me, m.body);
+        eprintln!(
+            "    → {} from {} read_by_me={} body={:?}",
+            m.message_id.0.as_ref(),
+            m.from_session_id.0.as_ref(),
+            m.read_by_me,
+            m.body
+        );
     }
 
     // Regression guard for the "re-acked inbox" report: a session's id is stable
