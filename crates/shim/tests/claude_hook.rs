@@ -1,72 +1,74 @@
-//! `marshal-shim claude-hook` forwards Claude Code's hook JSON to the daemon's
-//! `/hook/*` endpoint and hands the daemon's answer back as the context Claude
-//! adds to the turn. A fake daemon records each request and answers with a
-//! fixed body, so these run the real binary without a real daemon.
+//! Integration test: `marshal-shim claude-hook` — the Claude Code side of the
+//! hook inbox. Drives the REAL binary against a fake `/hook/*` listener and
+//! checks the request it sends and the `hookSpecificOutput` it prints, plus
+//! that every hook the plugin ships answers for the event it is registered
+//! under.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
-
-use serde_json::Value;
+use std::time::{Duration, Instant};
 
 const SHIM: &str = env!("CARGO_BIN_EXE_marshal-shim");
-const HOOK_INPUT: &str = r#"{"session_id":"claude-hook-test","cwd":"/work/demo","hook_event_name":"UserPromptSubmit","prompt":"hi"}"#;
+const HOOK_INPUT: &str = r#"{"session_id":"itest-claude","cwd":"/tmp/proj"}"#;
+const HOOKS_JSON: &str = include_str!("../../../plugins/marshal-shim/hooks/hooks.json");
 
-struct Request {
-    line: String,
+/// What the fake listener saw: the request line and the body.
+struct Seen {
+    request_line: String,
     body: String,
 }
 
-/// A one-request fake daemon hook listener. Returns its base URL and a
-/// receiver for the request it saw.
-fn fake_daemon(answer: &'static str) -> (String, mpsc::Receiver<Request>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
+/// Serve exactly one hook request, replying 200 with `reply`. Returns the base
+/// URL to pass the shim and a receiver for what the request carried.
+fn fake_hook_listener(reply: &'static str) -> (String, mpsc::Receiver<Seen>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let (seen_tx, seen_rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept hook request");
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("request line");
-        let mut length = 0;
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut content_length = 0;
         loop {
-            let mut header = String::new();
-            reader.read_line(&mut header).expect("header");
-            if header.trim().is_empty() {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
                 break;
             }
-            if let Some((name, value)) = header.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
+            if let Some((k, v)) = line.split_once(':')
+                && k.eq_ignore_ascii_case("content-length")
             {
-                length = value.trim().parse().expect("content length");
+                content_length = v.trim().parse().unwrap();
             }
         }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).expect("request body");
-        let mut stream = reader.into_inner();
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).unwrap();
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-            answer.len()
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            reply.len()
         )
-        .expect("write answer");
-        let _ = seen_tx.send(Request {
-            line: line.trim_end().to_string(),
-            body: String::from_utf8(body).expect("utf-8 body"),
+        .unwrap();
+        let _ = tx.send(Seen {
+            request_line: request_line.trim_end().to_string(),
+            body: String::from_utf8(body).unwrap(),
         });
     });
-    (base, seen_rx)
+    (base, rx)
 }
 
-fn claude_hook(event: &str, base: &str) -> String {
+/// Run `marshal-shim <args>` with the hook JSON on stdin; return stdout.
+fn run_hook(args: &[&str], base: &str) -> String {
     let mut child = Command::new(SHIM)
-        .args(["claude-hook", event])
+        .args(args)
         .env("MARSHAL_BASE_URL", base)
-        .env("MARSHAL_HOST", "demo-host")
-        .env("MARSHAL_OPERATOR", "demo-operator")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -75,140 +77,376 @@ fn claude_hook(event: &str, base: &str) -> String {
     child
         .stdin
         .take()
-        .expect("hook stdin")
+        .unwrap()
         .write_all(HOOK_INPUT.as_bytes())
-        .expect("write hook input");
-    let out = child.wait_with_output().expect("wait for claude-hook");
-    assert!(out.status.success(), "claude-hook exited {:?}", out.status);
-    String::from_utf8(out.stdout).expect("utf-8 stdout")
+        .unwrap();
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "claude-hook must exit 0");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn additional_context(stdout: &str, event: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("hook stdout is not JSON ({e}): {stdout:?}"));
+    let out = &v["hookSpecificOutput"];
+    assert_eq!(out["hookEventName"], event, "wrong hookEventName: {v}");
+    out["additionalContext"].as_str().unwrap().to_string()
 }
 
 #[test]
-fn a_prompt_hook_surfaces_the_inbox_as_prompt_context() {
-    let (base, seen) = fake_daemon("<marshal_inbox>\n- from peer: hello\n</marshal_inbox>\n");
+fn prompt_submit_pulls_the_inbox_as_claude() {
+    let inbox = "<marshal_inbox count=\"1\">\n- from peer: hi\n</marshal_inbox>\n";
+    let (base, seen) = fake_hook_listener(inbox);
+    let stdout = run_hook(&["claude-hook", "prompt-submit"], &base);
+    let seen = seen.recv_timeout(Duration::from_secs(5)).unwrap();
 
-    let out = claude_hook("prompt-submit", &base);
-
-    let request = seen
-        .recv_timeout(Duration::from_secs(5))
-        .expect("no request");
     assert!(
-        request
-            .line
-            .starts_with("POST /hook/prompt-submit?host=demo-host&operator=demo-operator"),
+        seen.request_line.starts_with("POST /hook/prompt-submit?"),
         "{}",
-        request.line
+        seen.request_line
     );
     assert!(
-        request.line.contains("&harness=claude"),
-        "Claude must not get Codex's asSession guidance: {}",
-        request.line
-    );
-    let body: Value = serde_json::from_str(&request.body).expect("JSON request body");
-    assert_eq!(body["session_id"], "claude-hook-test");
-    assert_eq!(body["cwd"], "/work/demo");
-
-    let output: Value = serde_json::from_str(out.trim()).expect("JSON hook output");
-    assert_eq!(
-        output["hookSpecificOutput"]["hookEventName"],
-        "UserPromptSubmit"
-    );
-    assert_eq!(
-        output["hookSpecificOutput"]["additionalContext"],
-        "<marshal_inbox>\n- from peer: hello\n</marshal_inbox>"
-    );
-}
-
-#[test]
-fn a_session_start_hook_surfaces_identity_as_session_context() {
-    let (base, seen) = fake_daemon("<marshal_session nickname=\"x\" id=\"y\"/>\n");
-
-    let out = claude_hook("session-start", &base);
-
-    let request = seen
-        .recv_timeout(Duration::from_secs(5))
-        .expect("no request");
-    assert!(
-        request.line.starts_with("POST /hook/session-start?"),
+        seen.request_line.contains("harness=claude"),
         "{}",
-        request.line
+        seen.request_line
     );
-    let output: Value = serde_json::from_str(out.trim()).expect("JSON hook output");
+    let body: serde_json::Value = serde_json::from_str(&seen.body).unwrap();
+    assert_eq!(body["session_id"], "itest-claude");
+    assert_eq!(body["cwd"], "/tmp/proj");
     assert_eq!(
-        output["hookSpecificOutput"]["hookEventName"],
-        "SessionStart"
+        additional_context(&stdout, "UserPromptSubmit"),
+        inbox.trim_end()
     );
 }
 
 #[test]
-fn an_empty_inbox_adds_nothing() {
-    let (base, seen) = fake_daemon("");
-    assert_eq!(claude_hook("prompt-submit", &base), "");
-    seen.recv_timeout(Duration::from_secs(5))
-        .expect("the hook must still have asked the daemon");
+fn post_tool_use_reads_the_inbox_endpoint() {
+    let (base, seen) = fake_hook_listener("<marshal_inbox count=\"1\">\n</marshal_inbox>");
+    let stdout = run_hook(&["claude-hook", "post-tool-use"], &base);
+    let seen = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(seen.request_line.starts_with("POST /hook/prompt-submit?"));
+    additional_context(&stdout, "PostToolUse");
 }
 
 #[test]
-fn an_unreachable_daemon_adds_nothing_and_does_not_fail_the_turn() {
-    // Port 1: nothing listens, so the connect fails at once.
-    assert_eq!(claude_hook("prompt-submit", "http://127.0.0.1:1"), "");
-}
-
-/// Every hook the Claude plugin ships runs this binary and answers for the
-/// event it is registered under.
-#[test]
-fn the_plugin_hooks_run_the_shim_for_their_own_event() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/marshal-shim/hooks/hooks.json"
+fn empty_inbox_prints_nothing() {
+    let (base, _seen) = fake_hook_listener("");
+    let stdout = run_hook(&["claude-hook", "prompt-submit"], &base);
+    assert!(
+        stdout.is_empty(),
+        "empty inbox must add no context: {stdout:?}"
     );
-    let config: Value =
-        serde_json::from_str(&std::fs::read_to_string(path).expect("read plugin hooks.json"))
-            .expect("plugin hooks.json is JSON");
-    let events = config["hooks"].as_object().expect("a hooks map");
-    for expected in ["SessionStart", "UserPromptSubmit"] {
-        assert!(events.contains_key(expected), "no {expected} hook");
+}
+
+#[test]
+fn unreachable_daemon_prints_nothing_and_returns_promptly() {
+    let started = Instant::now();
+    // Port 1 on loopback: nothing listens, connect is refused.
+    let stdout = run_hook(&["claude-hook", "prompt-submit"], "http://127.0.0.1:1");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn silent_daemon_cannot_stall_a_claude_turn() {
+    // Accepts the connection and never answers: the Claude timeout must bound it.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _hold = thread::spawn(move || {
+        let conn = listener.accept();
+        thread::sleep(Duration::from_secs(10));
+        drop(conn);
+    });
+    let started = Instant::now();
+    let stdout = run_hook(&["claude-hook", "prompt-submit"], &base);
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn shipped_hooks_answer_for_the_event_they_are_registered_under() {
+    let hooks: serde_json::Value = serde_json::from_str(HOOKS_JSON).unwrap();
+    let events = hooks["hooks"].as_object().unwrap();
+    for event in ["SessionStart", "UserPromptSubmit", "PostToolUse"] {
+        assert!(events.contains_key(event), "hooks.json is missing {event}");
     }
+    let mut waiter_events = Vec::new();
     for (event, groups) in events {
-        for hook in groups
-            .as_array()
-            .expect("matcher groups")
-            .iter()
-            .flat_map(|group| group["hooks"].as_array().expect("hooks").iter())
-        {
-            let command = hook["command"].as_str().expect("a command hook");
-            let argv: Vec<&str> = command.split_whitespace().collect();
-            assert_eq!(argv.first(), Some(&"marshal-shim"), "{command}");
-            assert_eq!(argv.get(1), Some(&"claude-hook"), "{command}");
-            let (base, _seen) = fake_daemon("context\n");
-            let out = claude_hook(argv[2], &base);
-            let output: Value = serde_json::from_str(out.trim()).expect("JSON hook output");
-            assert_eq!(
-                output["hookSpecificOutput"]["hookEventName"],
-                event.as_str(),
-                "{command}"
-            );
+        for group in groups.as_array().unwrap() {
+            for hook in group["hooks"].as_array().unwrap() {
+                let command = hook["command"].as_str().unwrap();
+                let mut words = command.split_whitespace();
+                assert_eq!(words.next(), Some("marshal-shim"), "{command}");
+                let args: Vec<&str> = words.collect();
+                assert_eq!(args.first(), Some(&"claude-hook"), "{command}");
+
+                // The waiter answers by exiting 2, not with JSON; it has its
+                // own tests below.
+                if args.get(1) == Some(&"wait") {
+                    assert_eq!(hook["asyncRewake"], true, "{event}: {command}");
+                    waiter_events.push(event.as_str());
+                    continue;
+                }
+
+                let (base, _seen) = fake_hook_listener("<marshal_session/>");
+                let stdout = run_hook(&args, &base);
+                additional_context(&stdout, event);
+            }
         }
     }
+    waiter_events.sort_unstable();
+    assert_eq!(waiter_events, ["SessionStart", "Stop"]);
+}
+
+/// A config dir of its own, so a test's waiter lock stays out of the real one.
+fn temp_config(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("marshal-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn spawn_waiter(base: &str, config: &std::path::Path) -> std::process::Child {
+    let mut child = Command::new(SHIM)
+        .args(["claude-hook", "wait"])
+        .env("MARSHAL_BASE_URL", base)
+        .env("XDG_CONFIG_HOME", config)
+        .env("APPDATA", config)
+        .env("MARSHAL_WAITER_LOCK_WAIT_SECS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn marshal-shim claude-hook wait");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(HOOK_INPUT.as_bytes())
+        .unwrap();
+    child
 }
 
 #[test]
-fn a_daemon_that_never_answers_holds_the_prompt_only_briefly() {
-    // Accepts the connection, then says nothing.
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent daemon");
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let silent = thread::spawn(move || {
-        let held = listener.accept();
-        thread::sleep(Duration::from_secs(6));
-        drop(held);
-    });
+fn waiter_prints_mail_to_stderr_and_exits_2() {
+    let inbox = "<marshal_inbox count=\"1\">\n- from peer: hi\n</marshal_inbox>\n";
+    let (base, seen) = fake_hook_listener(inbox);
+    let config = temp_config("waiter-mail");
+    let out = spawn_waiter(&base, &config).wait_with_output().unwrap();
+    let seen = seen.recv_timeout(Duration::from_secs(5)).unwrap();
 
-    let started = std::time::Instant::now();
-    assert_eq!(claude_hook("prompt-submit", &base), "");
-    let waited = started.elapsed();
     assert!(
-        waited < Duration::from_secs(4),
-        "held the prompt for {waited:?}"
+        seen.request_line.starts_with("POST /hook/wait?"),
+        "{}",
+        seen.request_line
     );
-    drop(silent);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap().trim_end(),
+        inbox.trim_end()
+    );
+}
+
+/// Answers each of `count` connections with 403.
+fn refusing_listener(count: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for _ in 0..count {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            stream
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        }
+    });
+    base
+}
+
+#[test]
+fn a_refused_waiter_tells_the_session_once_per_cause() {
+    let base = refusing_listener(2);
+    let config = temp_config("waiter-refused");
+
+    let first = spawn_waiter(&base, &config).wait_with_output().unwrap();
+    assert_eq!(first.status.code(), Some(2));
+    let stderr = String::from_utf8(first.stderr).unwrap();
+    assert!(stderr.contains("403"), "{stderr}");
+
+    // Stop runs the hook again: no second wake, or it would loop.
+    let second = spawn_waiter(&base, &config).wait_with_output().unwrap();
+    assert_eq!(second.status.code(), Some(0));
+    assert!(second.stderr.is_empty());
+}
+
+#[test]
+fn a_refused_watch_says_so_on_stdout_where_monitor_sees_it() {
+    let base = refusing_listener(1);
+    let config = temp_config("watch-refused");
+    let mut child = Command::new(SHIM)
+        .args(["watch", "11111111-1111-4111-8111-111111111111", &base])
+        .env("XDG_CONFIG_HOME", &config)
+        .env("APPDATA", &config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn marshal-shim watch");
+    let mut line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+        &mut line,
+    )
+    .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(line.contains("403"), "{line}");
+}
+
+#[test]
+fn second_waiter_for_a_session_exits_quietly() {
+    // Accepts the first waiter's connection and never answers, so it stays.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let config = temp_config("waiter-lock");
+    let mut first = spawn_waiter(&base, &config);
+    let _held = listener.accept().unwrap();
+
+    let second = spawn_waiter(&base, &config).wait_with_output().unwrap();
+    let _ = first.kill();
+    let _ = first.wait();
+    assert_eq!(second.status.code(), Some(0));
+    assert!(second.stderr.is_empty());
+}
+
+fn boundary_listener(response: Vec<u8>, delay: Duration) -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let _ = stream.read(&mut request);
+        for byte in response {
+            if stream.write_all(&[byte]).is_err() {
+                break;
+            }
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+        }
+        drop(stream);
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let n = stream.read(&mut request).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&request[..n]).into_owned());
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    (base, rx)
+}
+
+#[test]
+fn an_incomplete_reply_never_surfaces_or_acknowledges_mail() {
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nX-Marshal-Ack-V1: [\"m1\",\"m2\"]\r\n\r\npartial";
+    let (base, requests) = boundary_listener(raw.to_vec(), Duration::ZERO);
+    assert_eq!(run_hook(&["claude-hook", "prompt-submit"], &base), "");
+    assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn a_trickled_reply_cannot_extend_the_whole_hook_deadline() {
+    let raw =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nX-Marshal-Ack-V1: [\"m1\"]\r\n\r\npartial";
+    let (base, requests) = boundary_listener(raw.to_vec(), Duration::from_millis(80));
+    let started = Instant::now();
+    assert_eq!(run_hook(&["claude-hook", "prompt-submit"], &base), "");
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn a_closed_monitor_pipe_leaves_delivered_mail_unacknowledged() {
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Marshal-Ack-V1: [\"m1\"]\r\n\r\nhello";
+    let (base, requests) = boundary_listener(raw.to_vec(), Duration::ZERO);
+    let mut child = Command::new(SHIM)
+        .args(["watch", "boundary-test", &base, "--once"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    assert!(child.wait().unwrap().success());
+    assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn an_oversized_response_is_rejected_before_reading_its_body() {
+    let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 262145\r\nX-Marshal-Ack-V1: [\"m1\"]\r\n\r\n";
+    let (base, requests) = boundary_listener(raw.to_vec(), Duration::ZERO);
+    assert_eq!(run_hook(&["claude-hook", "prompt-submit"], &base), "");
+    assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn a_replacement_waiter_takes_over_after_the_old_process_releases_its_lock() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let config = temp_config("waiter-takeover");
+    let mut old = spawn_waiter(&base, &config);
+    let (held, _) = listener.accept().unwrap();
+    let mut replacement = Command::new(SHIM)
+        .args(["claude-hook", "wait"])
+        .env("MARSHAL_BASE_URL", &base)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("APPDATA", &config)
+        .env("MARSHAL_WAITER_LOCK_WAIT_SECS", "3")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    replacement
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(HOOK_INPUT.as_bytes())
+        .unwrap();
+    thread::sleep(Duration::from_millis(200));
+    assert!(replacement.try_wait().unwrap().is_none());
+    old.kill().unwrap();
+    old.wait().unwrap();
+    drop(held);
+    listener.set_nonblocking(true).unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    let (mut stream, _) = loop {
+        if let Ok(pair) = listener.accept() {
+            break pair;
+        }
+        assert!(
+            Instant::now() < until,
+            "replacement never acquired the released waiter lock"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let mut request = [0; 4096];
+    assert!(stream.read(&mut request).unwrap() > 0);
+    let reply = "<marshal_inbox/>";
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{reply}",
+        reply.len()
+    )
+    .unwrap();
+    let out = replacement.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(String::from_utf8(out.stderr).unwrap().trim(), reply);
 }

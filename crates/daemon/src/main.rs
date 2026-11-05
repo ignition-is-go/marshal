@@ -88,6 +88,9 @@ async fn main() -> Result<()> {
         .with_bind_addr(bind_addr)
         .with_persister_override("Client", blackhole.clone())
         .with_persister_override("Server", blackhole.clone())
+        // A wait dies with the daemon, so there's nothing to replay, and a held
+        // wait's refreshes shouldn't grow the event table.
+        .with_persister_override("WakeWatcher", blackhole.clone())
         .with_persister_override("Session", session_filter.clone())
         .with_server_info(marshal_server_info());
 
@@ -131,18 +134,58 @@ async fn main() -> Result<()> {
     // Spawn marshal's own plain-HTTP listener for the Claude Code `/hook/*`
     // endpoints. Shares the server ctx (same registry + event log); stock
     // myko's MCP listener is left untouched on its own port.
+    //
+    // Set on SIGTERM or Ctrl-C, so held waits end cleanly before the daemon exits.
+    // A listener that can't bind or stops is logged, and the daemon keeps
+    // running, as it always has: the hooks fail quietly within their timeout
+    // when nothing answers.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     {
         let hook_ctx = Arc::new(server.ctx());
         tokio::spawn(async move {
-            if let Err(e) = daemon::http_listener::run(hook_bind, hook_ctx).await {
+            if let Err(e) = daemon::http_listener::run_until(hook_bind, hook_ctx, stop_rx).await {
                 log::error!("[hook] listener exited: {e}");
             }
         });
     }
 
     log::info!("marshal-daemon listening on ws://{bind_addr}, hooks on http://{hook_bind}");
-    server.run().await.map_err(|e| anyhow::anyhow!(e))?;
+    tokio::select! {
+        r = server.run() => r.map_err(|e| anyhow::anyhow!(e))?,
+        signal = stop_signal() => {
+            log::info!("marshal-daemon: {signal}; ending held waits, then stopping");
+            let _ = stop_tx.send(true);
+            // Long enough for each held wait to write its reply.
+            tokio::time::sleep(STOP_DRAIN).await;
+        }
+    }
     Ok(())
+}
+/// How long a stopping daemon gives held waits to write their replies.
+const STOP_DRAIN: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Waits for SIGTERM, which systemd sends on stop and restart, or Ctrl-C.
+async fn stop_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => tokio::select! {
+                _ = term.recv() => "SIGTERM",
+                _ = tokio::signal::ctrl_c() => "Ctrl-C",
+            },
+            Err(e) => {
+                log::warn!("marshal-daemon: can't watch for SIGTERM: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                "Ctrl-C"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
 }
 
 /// The `--help` text. The daemon takes no other arguments; it reads its

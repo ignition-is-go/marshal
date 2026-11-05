@@ -1,17 +1,32 @@
 {
-  "description": "Pull this session's unread Marshal messages into the turn, for messages the live channel didn't show.",
+  "description": "Deliver unread Marshal direct messages into the session at start, before each prompt, and after each tool call. Wake idle sessions when a message arrives. Works without the live-channel launch flag.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 15 }
+          { "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 10 },
+          { "type": "command", "command": "marshal-shim claude-hook wait", "asyncRewake": true, "timeout": 2592000 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "marshal-shim claude-hook wait", "asyncRewake": true, "timeout": 2592000 }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 15 }
+          { "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "marshal-shim claude-hook post-tool-use", "timeout": 10 }
         ]
       }
     ]

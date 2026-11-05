@@ -49,6 +49,8 @@ pub struct ToolHost {
     /// Daemon-assigned handles, keyed by session id. Read instead of
     /// recomputing so a wordlist change never desyncs the shim from the roster.
     pub nicknames_cell: Cell<Vec<Arc<marshal_entities::SessionNickname>>, CellImmutable>,
+    /// Which sessions the daemon sees holding a wait, for the roster's `wake`.
+    pub wake_watchers_cell: Cell<Vec<Arc<marshal_entities::WakeWatcher>>, CellImmutable>,
 }
 
 /// The daemon-assigned handle for `session_id`, read from the SessionNickname
@@ -225,6 +227,7 @@ fn read_whoami(
 fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
     let sessions: Vec<Arc<Session>> = host.sessions_cell.get();
     let members: Vec<Arc<RoomMember>> = host.members_cell.get();
+    let watchers = host.wake_watchers_cell.get();
     let me = host.session.lock().unwrap().id.0.to_string();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let view: Vec<Value> = sessions
@@ -258,6 +261,9 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 "last_tool": s.last_tool,
                 "last_tool_at": s.last_tool_at,
                 "last_seen_ms_ago": now_ms - s.last_activity_at.unwrap_or(s.connected_at),
+                // Would a message wake it? `waiting` is observed by the daemon; `channel`
+                // and `busy` are declared by the session, which can claim anything.
+                "wake": marshal_entities::wake_state(s, &watchers, now_ms).as_str(),
                 "rooms": rooms,
             })
         })
