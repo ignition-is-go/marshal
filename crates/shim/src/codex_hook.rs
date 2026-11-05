@@ -156,9 +156,14 @@ pub fn watch(session_id: &str, base_override: Option<&str>, once: bool) {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    wait_for_mail(session_id, &cwd, base_override, once, |resp| {
-        write_watch_events(&mut std::io::stdout().lock(), resp)
-    });
+    wait_for_mail(
+        session_id,
+        &cwd,
+        base_override,
+        once,
+        parent_pid(),
+        |resp| write_watch_events(&mut std::io::stdout().lock(), resp),
+    );
 }
 
 /// `marshal-shim claude-hook wait` — the flag-free wake for Claude Code, run as
@@ -177,23 +182,37 @@ pub fn wait_hook(base_override: Option<&str>) {
         return;
     }
     let cwd = v.get("cwd").and_then(|s| s.as_str()).unwrap_or("");
-    // A resumed session's old waiter holds the lock until its next poll notices
-    // the parent is gone, so wait that out rather than leave the session without
-    // a waiter. If that waiter's parent is alive, this just exits a bit later.
-    let deadline = std::time::Instant::now() + lock_wait();
-    let _lock = loop {
-        match waiter_lock(sid) {
-            Some(lock) => break lock,
-            None if std::time::Instant::now() >= deadline => return,
-            None => std::thread::sleep(LOCK_RETRY),
-        }
+    let parent = parent_pid();
+    let deadline = Instant::now() + lock_wait();
+    let Some(_lock) = acquire_waiter_lock(sid, deadline, parent) else {
+        return;
     };
-    let delivered = wait_for_mail(sid, cwd, base_override, true, |resp| {
+    let delivered = wait_for_mail(sid, cwd, base_override, true, parent, |resp| {
         let mut out = std::io::stderr().lock();
         writeln!(out, "{resp}").and_then(|()| out.flush())
     });
     if delivered {
         std::process::exit(2);
+    }
+}
+
+fn acquire_waiter_lock(
+    session_id: &str,
+    deadline: Instant,
+    parent: Option<u32>,
+) -> Option<std::fs::File> {
+    loop {
+        if parent_pid() != parent {
+            return None;
+        }
+        if let Some(lock) = waiter_lock(session_id) {
+            return Some(lock);
+        }
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        if remaining.is_zero() {
+            return None;
+        }
+        std::thread::sleep(LOCK_RETRY.min(remaining));
     }
 }
 
@@ -222,6 +241,7 @@ fn wait_for_mail(
     cwd: &str,
     base_override: Option<&str>,
     once: bool,
+    parent: Option<u32>,
     mut deliver: impl FnMut(&str) -> std::io::Result<()>,
 ) -> bool {
     // A one-shot waiter only notices its parent is gone between polls, and until
@@ -241,14 +261,13 @@ fn wait_for_mail(
     let base = resolve_base(base_override);
     // The daemon answers within `WATCH_WAIT`; the read timeout only has to
     // outlast it, so a daemon that vanished mid-wait is noticed.
-    let timeout = wait + Duration::from_secs(30);
+    let timeout = poll_timeout(wait);
     // Report only a change of cause: stdout would wake the session, and
     // repeating it every retry would just bury the Monitor's output file.
     let mut failing = None;
     // After the daemon says it's stopping, stay quiet about it being unreachable
     // until this deadline, since that's expected while it restarts.
     let mut restart_quiet_until: Option<std::time::Instant> = None;
-    let parent = parent_pid();
     loop {
         if parent_pid() != parent {
             return false;
@@ -380,13 +399,22 @@ const RESTART_BACKOFF: Duration = Duration::from_secs(2);
 const RESTART_QUIET: Duration = Duration::from_secs(30);
 const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY: Duration = Duration::from_secs(1);
+const POLL_RESPONSE_GRACE: Duration = Duration::from_secs(30);
 
-/// How long a waiter waits for another to let go: past one poll of `ONCE_WAIT`.
+fn poll_timeout(wait: Duration) -> Duration {
+    wait + POLL_RESPONSE_GRACE
+}
+
+fn default_lock_wait() -> Duration {
+    poll_timeout(ONCE_WAIT) + WATCH_RETRY + LOCK_RETRY
+}
+
+/// Cover an orphaned waiter's full request deadline, error backoff and next lock attempt.
 fn lock_wait() -> Duration {
     std::env::var("MARSHAL_WAITER_LOCK_WAIT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .map_or(ONCE_WAIT + Duration::from_secs(5), Duration::from_secs)
+        .map_or_else(default_lock_wait, Duration::from_secs)
 }
 /// Longest line `watch` prints. Monitor cuts an event's line at about 500
 /// characters, so a longer one would reach the session with its end missing.
@@ -522,9 +550,8 @@ fn base_from_daemon(daemon: &str) -> String {
     format!("http://{host}:{HOOK_PORT}")
 }
 
-/// Minimal blocking HTTP/1.1 POST. The daemon replies `Content-Length` +
-/// `Connection: close`, so we read to EOF and return the body. `None` on any
-/// transport failure. `timeout` bounds the connect and each read/write.
+/// Blocking HTTP/1.1 POST with a complete Content-Length response.
+/// One deadline covers resolution, connection, writes and framed reads.
 fn http_post(base: &str, path: &str, body: &str, timeout: Duration) -> Option<String> {
     http_post_why(base, path, body, Instant::now() + timeout)
         .ok()
@@ -642,6 +669,27 @@ fn url_q(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn takeover_budget_outlasts_the_full_old_poll_and_error_backoff() {
+        assert!(default_lock_wait() > poll_timeout(ONCE_WAIT) + WATCH_RETRY);
+        assert_eq!(default_lock_wait(), Duration::from_secs(66));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_orphaned_lock_waiter_returns_without_waiting_for_the_deadline() {
+        let started = Instant::now();
+        assert!(
+            acquire_waiter_lock(
+                "orphaned-lock-test",
+                started + Duration::from_secs(10),
+                Some(u32::MAX)
+            )
+            .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     struct FailingWriter {
         writes_left: usize,

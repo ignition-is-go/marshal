@@ -393,3 +393,57 @@ fn an_oversized_response_is_rejected_before_reading_its_body() {
     assert_eq!(run_hook(&["claude-hook", "prompt-submit"], &base), "");
     assert!(requests.recv_timeout(Duration::from_millis(500)).is_err());
 }
+
+#[test]
+fn a_replacement_waiter_takes_over_after_the_old_process_releases_its_lock() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let config = temp_config("waiter-takeover");
+    let mut old = spawn_waiter(&base, &config);
+    let (held, _) = listener.accept().unwrap();
+    let mut replacement = Command::new(SHIM)
+        .args(["claude-hook", "wait"])
+        .env("MARSHAL_BASE_URL", &base)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("MARSHAL_WAITER_LOCK_WAIT_SECS", "3")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    replacement
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(HOOK_INPUT.as_bytes())
+        .unwrap();
+    thread::sleep(Duration::from_millis(200));
+    assert!(replacement.try_wait().unwrap().is_none());
+    old.kill().unwrap();
+    old.wait().unwrap();
+    drop(held);
+    listener.set_nonblocking(true).unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    let (mut stream, _) = loop {
+        if let Ok(pair) = listener.accept() {
+            break pair;
+        }
+        assert!(
+            Instant::now() < until,
+            "replacement never acquired the released waiter lock"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let mut request = [0; 4096];
+    assert!(stream.read(&mut request).unwrap() > 0);
+    let reply = "<marshal_inbox/>";
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{reply}",
+        reply.len()
+    )
+    .unwrap();
+    let out = replacement.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(String::from_utf8(out.stderr).unwrap().trim(), reply);
+}
