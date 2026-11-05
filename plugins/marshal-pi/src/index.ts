@@ -26,8 +26,10 @@ import type {
 import { Type } from "typebox";
 
 import { MarshalDaemon } from "./daemon.ts";
+import { pullForTurn } from "./inbox-pull.ts";
 import { resolveIdentity, type Identity } from "./identity.ts";
 import type { NotifyChannelMeta, SessionItem } from "./entities.ts";
+import { deliverLivePush } from "./live-push.ts";
 
 const DEFAULT_ADDRESS = "ws://localhost:6155";
 type MarshalToolResult = AgentToolResult<Record<string, unknown>>;
@@ -101,27 +103,17 @@ async function init(pi: ExtensionAPI) {
       sessionCtx.ui.notify(`marshal: new message from ${who}`, "info");
     }
 
-    const text = meta.body ? `new message from ${who} [response_required=${meta.response_required ?? false}]: ${meta.body}` : undefined;
-    void (async () => {
-      try {
-        if (text) {
-          await pi.sendMessage(
-            { customType: "marshal-channel", content: text, display: true },
-            { deliverAs: "steer", triggerTurn: true },
-          );
-          if (daemon) await daemon.drainInbox(sid).catch(() => {});
-        } else {
-          const inbox = await daemon!.drainInbox(sid).catch(() => null);
-          if (!inbox) return;
-          await pi.sendMessage(
-            { customType: "marshal-channel", content: inbox, display: true },
-            { deliverAs: "steer", triggerTurn: true },
-          );
-        }
-      } catch (e) {
-        log(`live push injection failed: ${String(e)}`);
-      }
-    })();
+    deliverLivePush(meta, who, {
+      inject: (content) =>
+        pi.sendMessage(
+          { customType: "marshal-channel", content, display: true },
+          { deliverAs: "steer", triggerTurn: true },
+        ),
+      drainInbox: () => (daemon ? daemon.drainInbox(sid) : Promise.resolve(null)),
+      ack: async (messageId) => {
+        if (daemon) await daemon.ackMessages(sid, [messageId]);
+      },
+    }).catch((e) => log(`live push injection failed: ${String(e)}`));
   }
 
   // ── Status helpers ────────────────────────────────────────────────────
@@ -260,9 +252,15 @@ async function init(pi: ExtensionAPI) {
   // ── Agent state → marshal status ───────────────────────────────────────
 
   pi.on("before_agent_start", async (event, _ctx) => {
+    // pi 1.2.0 also fires this for a run started by pi.sendMessage(...,
+    // { triggerTurn: true }), such as a live push. That event has messageType
+    // "custom" and no prompt. The run continues the last prompt's work, so it
+    // keeps that prompt's activity and status.
+    const prompt = (event as { prompt?: unknown }).prompt;
+    if (typeof prompt !== "string") return;
     resetActivity();
-    lastPrompt = event.prompt;
-    pushMarshalStatus(`🤔 "${truncate(event.prompt, 80)}"`);
+    lastPrompt = prompt;
+    pushMarshalStatus(`🤔 "${truncate(prompt, 80)}"`);
   });
 
   pi.on("agent_start", async (_event, _ctx) => {
@@ -309,19 +307,21 @@ async function init(pi: ExtensionAPI) {
     // Add marshal system prompt context (once per turn, before the LLM call).
     result.systemPrompt = event.systemPrompt + "\n\n" + SYSTEM_PROMPT_BLOCK;
 
-    // Drain any missed inbox messages — only if the daemon is connected.
-    if (daemon && sessionId && daemon.isConnected()) {
-      daemon.registerSession(sessionId); // self-heal a dropped roster row
-      const inbox = await Promise.race([
-        daemon.drainInbox(sessionId).catch(() => null),
-        new Promise<null>((r) => setTimeout(() => r(null), 2000)),
-      ]);
-      if (inbox) {
+    // Pull any missed inbox messages — only if the daemon is connected. The
+    // pull is acked only once its text goes into this turn; one that misses
+    // the deadline is released, so its messages stay unread for the next turn.
+    const d = daemon;
+    const sid = sessionId;
+    if (d && sid && d.isConnected()) {
+      d.registerSession(sid); // self-heal a dropped roster row
+      const pull = await pullForTurn(() => d.pullInbox(sid), 2000);
+      if (pull) {
         result.message = {
           customType: "marshal-inbox",
-          content: inbox,
+          content: pull.text,
           display: true,
         };
+        void pull.commit().catch(() => log("inbox ack failed"));
       }
     }
 
