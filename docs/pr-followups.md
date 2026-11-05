@@ -23,6 +23,9 @@ Run the helper tests with `ACTIONLINT=/path/to/actionlint python3 -m unittest di
 CI prints CPU, physical-memory, and free-disk facts before and after builds where checkout is available.
 Unavailable measurements are `null`. Reporting steps are bounded and cannot fail the build. They never dump environment variables.
 
+Linux CI installs Bun 1.3.11 and runs all three native plugins' `embedding-agent.test.ts` files against the built daemon and shim after the regular Cargo tests.
+It resolves the binary directory from Cargo metadata and sets `MARSHAL_DAEMON_BIN`, so those registration and reconnect tests run instead of taking their opt-in skip path.
+
 ## Exercise a future managed Windows pool
 
 Run `scripts/ci/windows-isolation.ps1` inside the intended Windows guest with its actual runner root and expected limits.
