@@ -99,6 +99,7 @@ fn session_set_event(id: &str) -> MEvent {
     let session = Session {
         id: SessionId(Arc::from(id)),
         client_id: None,
+        agent_id: None,
         pid: 0,
         cwd: "/tmp".into(),
         git_branch: None,

@@ -2584,6 +2584,7 @@ mod tests {
         Arc::new(Session {
             id: SessionId(Arc::from(id)),
             client_id: (!hook_owned).then(|| myko::entities::client::ClientId(Arc::from("client"))),
+            agent_id: None,
             pid: 1,
             cwd: "/repo".into(),
             git_branch: None,

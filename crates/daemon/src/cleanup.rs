@@ -368,6 +368,7 @@ mod tests {
         let session = Session {
             id: SessionId(Arc::from(id)),
             client_id: None,
+            agent_id: None,
             pid: 0,
             cwd: "/repo".into(),
             git_branch: None,

@@ -41,6 +41,7 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
         client_id: client_id.map(|c| ClientId(Arc::from(c))),
+        agent_id: None,
         pid: 0,
         cwd: "/repo".into(),
         git_branch: None,
@@ -402,4 +403,80 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         raw.starts_with("HTTP/1.1 404"),
         "unknown hook path must 404; got: {raw:?}"
     );
+}
+
+#[test]
+fn registration_preserves_metadata_across_hook_and_shim_writers() {
+    marshal_entities::link();
+    daemon::link();
+    let server = MykoServer::builder()
+        .with_default_persister(Arc::new(BlackholePersister))
+        .build();
+    let ctx = Arc::new(server.ctx());
+    let hook = |agent: Option<&str>| {
+        let mut body = serde_json::json!({"session_id":"metadata", "cwd":"/repo"});
+        if let Some(agent) = agent {
+            body["agent_id"] = agent.into();
+        }
+        daemon::hooks::dispatch(
+            "/hook/session-register",
+            "harness=codex",
+            body.to_string().as_bytes(),
+            &ctx,
+        )
+        .unwrap();
+    };
+    let register = || {
+        marshal_entities::RegisterSession {
+            session: session("metadata", Some("spoofed")),
+        }
+        .execute(cmd_ctx(&ctx, Some("transport")))
+        .unwrap();
+    };
+    let row = || {
+        cmd_ctx(&ctx, None)
+            .exec_query(GetAllSessions {})
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id.0.as_ref() == "metadata")
+            .unwrap()
+    };
+
+    hook(Some("  agent/\"x\nopaque  "));
+    register();
+    assert_eq!(row().agent_id.as_deref(), Some("agent/\"x\nopaque"));
+    assert_eq!(row().client_id.as_ref().unwrap().0.as_ref(), "transport");
+    hook(None);
+    hook(Some(" \t "));
+    assert_eq!(row().agent_id.as_deref(), Some("agent/\"x\nopaque"));
+    hook(Some("replacement"));
+    assert_eq!(row().agent_id.as_deref(), Some("replacement"));
+    assert_eq!(row().client_id.as_ref().unwrap().0.as_ref(), "transport");
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..100 {
+                register();
+            }
+        });
+        scope.spawn(|| {
+            for _ in 0..100 {
+                hook(Some("concurrent"));
+            }
+        });
+    });
+    assert_eq!(row().agent_id.as_deref(), Some("concurrent"));
+    assert_eq!(row().client_id.as_ref().unwrap().0.as_ref(), "transport");
+
+    daemon::hooks::dispatch(
+        "/hook/session-end",
+        "",
+        br#"{"session_id":"metadata"}"#,
+        &ctx,
+    )
+    .unwrap();
+    register();
+    assert_eq!(row().agent_id, None);
+    hook(Some("recreated"));
+    assert_eq!(row().agent_id.as_deref(), Some("recreated"));
 }

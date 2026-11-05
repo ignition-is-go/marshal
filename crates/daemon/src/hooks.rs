@@ -36,9 +36,8 @@ use myko::{
 use serde_json::Value;
 
 use marshal_entities::{
-    AckMessages, CONTEXT_BODY_MAX_CHARS, GetAllSessions, GetAllWakeWatchers, HostInfo, MessageId,
-    MessageView, ReadMessages, Session, SessionId, WakeWatcher, WakeWatcherId, context_preview,
-    nickname_for,
+    AckMessages, CONTEXT_BODY_MAX_CHARS, GetAllWakeWatchers, HostInfo, MessageId, MessageView,
+    ReadMessages, Session, SessionId, WakeWatcher, WakeWatcherId, context_preview, nickname_for,
 };
 
 const AUTO_INBOX_BODY_BUDGET_CHARS: usize = 8_000;
@@ -300,6 +299,12 @@ fn register_hook_session(
     let body = parse_body(body)?;
     let sid = body.get("session_id").and_then(|v| v.as_str())?;
     let sid = sid.to_string();
+    let agent_id = body
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
     let q = parse_query(query);
     let cwd = body
         .get("cwd")
@@ -332,9 +337,7 @@ fn register_hook_session(
     };
 
     let cmd_ctx = internal_cmd_ctx(ctx);
-    let existing: Vec<Arc<Session>> = cmd_ctx.exec_query(GetAllSessions {}).unwrap_or_default();
     let sid_typed = SessionId(Arc::from(sid.as_str()));
-    let prior = existing.iter().find(|s| s.id == sid_typed);
     let now = chrono::Utc::now().timestamp_millis();
     let active_at = (activity == Activity::Active).then_some(now);
     // Preserve shim-owned fields (client_id, pid, git_branch, last_tool*)
@@ -345,47 +348,52 @@ fn register_hook_session(
     // writes fields it uniquely sources (operator, host, project from
     // query string; cwd from payload; last_activity_at from "now", unless
     // the request is a wait).
-    let session = match prior {
-        Some(p) => {
-            let mut updated = (**p).clone();
-            updated.cwd = cwd;
-            if active_at.is_some() {
-                updated.last_activity_at = active_at;
+    let result =
+        marshal_entities::update_registered_session(&cmd_ctx, &sid_typed, |prior| match prior {
+            Some(p) => {
+                let mut updated = p.clone();
+                updated.cwd = cwd;
+                if agent_id.is_some() {
+                    updated.agent_id = agent_id;
+                }
+                if active_at.is_some() {
+                    updated.last_activity_at = active_at;
+                }
+                if updated.operator.is_none() {
+                    updated.operator = operator;
+                }
+                if updated.host.is_none() {
+                    updated.host = host;
+                }
+                if updated.project.is_none() {
+                    updated.project = project;
+                }
+                updated
             }
-            if updated.operator.is_none() {
-                updated.operator = operator;
-            }
-            if updated.host.is_none() {
-                updated.host = host;
-            }
-            if updated.project.is_none() {
-                updated.project = project;
-            }
-            updated
-        }
-        None => Session {
-            id: sid_typed,
-            client_id: None,
-            pid: 0,
-            cwd,
-            git_branch: None,
-            current_task: None,
-            // Codex has no per-PID name manifest; identity is hook-owned.
-            session_name: None,
-            activity: None,
-            kind: None,
-            connected_at: now,
-            last_activity_at: active_at,
-            last_tool: None,
-            last_tool_at: None,
-            operator,
-            host,
-            project,
-            channels_enabled: None,
-            acks_pushes: None,
-        },
-    };
-    if let Err(e) = cmd_ctx.emit_set(&session) {
+            None => Session {
+                id: sid_typed.clone(),
+                client_id: None,
+                agent_id,
+                pid: 0,
+                cwd,
+                git_branch: None,
+                current_task: None,
+                // Codex has no per-PID name manifest; identity is hook-owned.
+                session_name: None,
+                activity: None,
+                kind: None,
+                connected_at: now,
+                last_activity_at: active_at,
+                last_tool: None,
+                last_tool_at: None,
+                operator,
+                host,
+                project,
+                channels_enabled: None,
+                acks_pushes: None,
+            },
+        });
+    if let Err(e) = result {
         log::warn!("[hook] session SET failed for {sid}: {e:?}");
     }
     Some((sid, cmd_ctx))
@@ -512,6 +520,7 @@ fn handle_session_end(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome 
     let stub = Session {
         id: SessionId(Arc::from(sid)),
         client_id: None,
+        agent_id: None,
         pid: 0,
         cwd: String::new(),
         git_branch: None,

@@ -66,7 +66,16 @@ fn fake_hook_listener(reply: &'static str) -> (String, mpsc::Receiver<Seen>) {
 
 /// Run `marshal-shim <args>` with the hook JSON on stdin; return stdout.
 fn run_hook(args: &[&str], base: &str) -> String {
-    let mut child = Command::new(SHIM)
+    run_hook_with_agent(args, base, None)
+}
+
+fn run_hook_with_agent(args: &[&str], base: &str, agent: Option<&str>) -> String {
+    let mut command = Command::new(SHIM);
+    command.env_remove("MARSHAL_AGENT_ID");
+    if let Some(agent) = agent {
+        command.env("MARSHAL_AGENT_ID", agent);
+    }
+    let mut child = command
         .args(args)
         .env("MARSHAL_BASE_URL", base)
         .stdin(Stdio::piped())
@@ -213,6 +222,7 @@ fn temp_config(name: &str) -> std::path::PathBuf {
 fn spawn_waiter(base: &str, config: &std::path::Path) -> std::process::Child {
     let mut child = Command::new(SHIM)
         .args(["claude-hook", "wait"])
+        .env("MARSHAL_AGENT_ID", " waiter/\"agent\nopaque ")
         .env("MARSHAL_BASE_URL", base)
         .env("XDG_CONFIG_HOME", config)
         .env("APPDATA", config)
@@ -244,6 +254,9 @@ fn waiter_prints_mail_to_stderr_and_exits_2() {
         "{}",
         seen.request_line
     );
+    let body: serde_json::Value = serde_json::from_str(&seen.body).unwrap();
+    assert_eq!(body["agent_id"], "waiter/\"agent\nopaque");
+    assert!(!seen.request_line.contains("agent_id"));
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         String::from_utf8(out.stderr).unwrap().trim_end(),
@@ -449,4 +462,22 @@ fn a_replacement_waiter_takes_over_after_the_old_process_releases_its_lock() {
     let out = replacement.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(String::from_utf8(out.stderr).unwrap().trim(), reply);
+}
+
+#[test]
+fn both_harness_hooks_transport_normalized_metadata_only_in_json_body() {
+    for harness in ["codex-hook", "claude-hook"] {
+        for value in [None, Some(""), Some(" \t "), Some(" agent/\"x\nopaque ")] {
+            let (base, seen) = fake_hook_listener("");
+            run_hook_with_agent(&[harness, "session-start"], &base, value);
+            let seen = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+            let body: serde_json::Value = serde_json::from_str(&seen.body).unwrap();
+            let expected = value.map(str::trim).filter(|s| !s.is_empty());
+            assert_eq!(body["agent_id"].as_str(), expected);
+            assert_eq!(body["session_id"], "itest-claude");
+            assert_eq!(body["cwd"], "/tmp/proj");
+            assert!(!seen.request_line.contains("agent_id"));
+            assert!(!seen.request_line.contains("opaque"));
+        }
+    }
 }

@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import type { HostInfo } from "./entities.ts";
 
 export interface Identity {
+  agentId?: string;
   operator: string;
   host: HostInfo;
   gitBranch?: string;
@@ -57,5 +58,5 @@ export async function resolveIdentity(cwd: string): Promise<Identity> {
   const toplevel = tryText("git", ["rev-parse", "--show-toplevel"], cwd);
   const project = toplevel ? toplevel.split(/[/\\]/).pop() || undefined : undefined;
 
-  return { operator, host, gitBranch, project };
+  return { operator, host, gitBranch, project, agentId: process.env.MARSHAL_AGENT_ID?.trim() || undefined };
 }

@@ -8,6 +8,7 @@ import type { PluginInput } from "@opencode-ai/plugin";
 import type { HostInfo } from "./entities.js";
 
 export interface Identity {
+  agentId?: string;
   operator: string;
   host: HostInfo;
   gitBranch?: string;
@@ -62,5 +63,5 @@ export async function resolveIdentity($: Shell, cwd: string): Promise<Identity> 
   const toplevel = await tryText($, () => $`git -C ${cwd} rev-parse --show-toplevel`);
   const project = toplevel ? toplevel.split(/[/\\]/).pop() || undefined : undefined;
 
-  return { operator, host, gitBranch, project };
+  return { operator, host, gitBranch, project, agentId: process.env.MARSHAL_AGENT_ID?.trim() || undefined };
 }

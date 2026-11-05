@@ -377,6 +377,7 @@ async function init(pi: ExtensionAPI) {
           "",
           `nickname:  ${nick}`,
           `operator:  ${identity.operator}`,
+          `agent_id:  ${JSON.stringify(identity.agentId ?? null)}`,
           `host:      ${host}`,
           `project:   ${identity.project ?? "(none)"}`,
           `branch:    ${identity.gitBranch ?? "(none)"}`,
@@ -405,7 +406,7 @@ async function init(pi: ExtensionAPI) {
         const branch = s.gitBranch ? ` @${s.gitBranch}` : "";
         const op = s.operator ? ` (${s.operator})` : "";
         const task = s.currentTask ? ` — ${s.currentTask}` : "";
-        return `- ${host}:${dir}${branch}${op} [${s.id}]${task}`;
+        return `- ${host}:${dir}${branch}${op} [${s.id}]${s.agentId ? ` agent_id=${JSON.stringify(s.agentId)}` : ""}${task}`;
       });
       return { content: [{ type: "text", text: rows.join("\n") }], details: {} };
     },

@@ -111,6 +111,7 @@ fn wait_for(label: &str, mut f: impl FnMut() -> bool) {
 
 fn make_session(id: &str) -> Session {
     Session {
+        agent_id: None,
         id: SessionId(Arc::from(id)),
         client_id: None, // server auto-populates
         pid: 0,
