@@ -20,7 +20,7 @@ The plugin only registers the stdio MCP entry — it does not spawn the daemon f
 
 ## What you get
 
-Reads are MCP **resources**; writes are MCP **tools**. Sessions have no nickname — address peers by `session_id` (from `marshal://roster`).
+Reads are MCP **resources**; writes are MCP **tools**. Each session has a nickname — address peers by nickname or `session_id` (from `marshal://roster`).
 
 Resources (`resources/read`):
 
@@ -31,7 +31,7 @@ Resources (`resources/read`):
 
 Tools (`tools/call`):
 
-- `send_message(to, body)` — send to a peer by `session_id`
+- `send_message(to, body)` — send to a peer by nickname or `session_id`
 - `broadcast(to_room, body)` — fan-out to every member of a room
 - `join_room(room)` / `leave_room(room)` — create/join or leave an ad-hoc room
 - `set_status(text)` — set the free-form `current_task` text shown on the roster
@@ -77,9 +77,9 @@ Or run `/marshal-statusline` to have the plugin merge the block into your user s
 
 ## Install — no plugin, declarative project config
 
-The plugin is optional. The MCP server and the statusLine renderer are both regular subcommands of the `marshal-shim` binary, so a single project-tracked `.claude/settings.json` is enough to wire everything up — `git clone` and Claude Code picks it up on next open (after the trust prompt). No marketplace, no `/plugin install`, no per-machine config edits.
+The plugin is optional. The MCP server, the hooks and the statusLine renderer are all regular subcommands of the `marshal-shim` binary, so two project-tracked files are enough to wire everything up — `git clone` and Claude Code picks them up on next open (after the trust prompt). No marketplace, no `/plugin install`, no per-machine config edits.
 
-Drop this at `<project>/.claude/settings.json`:
+`mcpServers` isn't a supported key in `settings.json` (it's silently ignored there), so the MCP server goes in `<project>/.mcp.json`:
 
 ```json
 {
@@ -90,18 +90,18 @@ Drop this at `<project>/.claude/settings.json`:
         "MARSHAL_DAEMON_ADDRESS": "${MARSHAL_DAEMON_ADDRESS:-ws://localhost:6155}"
       }
     }
-  },
-  "statusLine": {
-    "type": "command",
-    "command": "marshal-shim statusline"
   }
 }
 ```
 
-For the hook inbox and idle wake without the plugin, add its hooks to the same file:
+The status line, and the hooks for the hook inbox and idle wake, go in `<project>/.claude/settings.json`:
 
 ```json
 {
+  "statusLine": {
+    "type": "command",
+    "command": "marshal-shim statusline"
+  },
   "hooks": {
     "SessionStart": [
       { "hooks": [
