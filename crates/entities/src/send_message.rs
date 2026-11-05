@@ -102,7 +102,8 @@ pub enum LivePushStatus {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
 pub enum WakeStatus {
-    /// The live push landed and marked the durable inbox copy read.
+    /// The live push landed. The durable inbox copy is marked read then, or,
+    /// for a recipient that acks its own pushes, when it acks.
     NotNeeded,
     /// No live push landed, but a waiter holds `/hook/wait` for the recipient,
     /// so the waiter will hand it the message and start a turn: the roster's
@@ -203,7 +204,11 @@ impl CommandHandler for SendMessage {
                     // marshal:") and no body (it would just be a truncated
                     // banner). `meta.body` is a bounded model-context preview;
                     // the persisted Message retains the complete body.
-                    direct_push_content(&from_nickname, to_operator.as_deref()),
+                    direct_push_content(
+                        &from_nickname,
+                        to_operator.as_deref(),
+                        body_truncated.then_some(msg.id.0.as_ref()),
+                    ),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "new_message",
@@ -262,7 +267,12 @@ impl CommandHandler for SendMessage {
         // recipient sees every direct message TWICE (once live, once in the
         // inbox). Best-effort: a failed write just falls back to that harmless
         // double-surface.
-        if delivered_live {
+        //
+        // "Delivered" here only means the push was queued on the connection,
+        // so a connection that stops being read and then dies loses it, already
+        // marked read. A recipient that acks its own pushes (`acks_pushes`)
+        // is left unread until that ack instead.
+        if delivered_live && recipient.acks_pushes != Some(true) {
             let read_id = MessageRead::make_id(msg.id.0.as_ref(), recipient.id.0.as_ref());
             if let Err(e) = ctx.emit_set(&MessageRead {
                 id: MessageReadId(Arc::from(read_id.as_str())),
@@ -474,13 +484,27 @@ pub(crate) fn push_to_client(client_id: &str, content: String, meta: serde_json:
 /// concise origin ping; human-addressed mail opens with the relay-to-operator
 /// contract so the recipient agent puts it in front of the person instead of
 /// acting on it. Pure so it can be asserted without a live client registry.
-pub(crate) fn direct_push_content(from_nickname: &str, to_operator: Option<&str>) -> String {
-    match to_operator {
+/// `truncated_id` is the message's id when its `meta.body` preview was cut,
+/// so the line the model reads says where the rest is.
+pub(crate) fn direct_push_content(
+    from_nickname: &str,
+    to_operator: Option<&str>,
+    truncated_id: Option<&str>,
+) -> String {
+    let banner = match to_operator {
         Some(op) => format!(
             "{} New message from {from_nickname}.",
             crate::message::operator_relay_notice(op)
         ),
         None => format!("new message from {from_nickname}"),
+    };
+    with_truncated_notice(banner, truncated_id)
+}
+
+pub(crate) fn with_truncated_notice(banner: String, truncated_id: Option<&str>) -> String {
+    match truncated_id {
+        Some(id) => format!("{banner} {}", crate::message::truncated_notice(id)),
+        None => banner,
     }
 }
 
@@ -491,15 +515,26 @@ mod push_content_tests {
     #[test]
     fn agent_addressed_banner_is_unchanged() {
         assert_eq!(
-            direct_push_content("fleet-wolf", None),
+            direct_push_content("fleet-wolf", None, None),
             "new message from fleet-wolf"
         );
     }
 
     #[test]
     fn human_addressed_banner_opens_with_the_relay_contract() {
-        let content = direct_push_content("fleet-wolf", Some("max@lucid.rocks"));
+        let content = direct_push_content("fleet-wolf", Some("max@lucid.rocks"), None);
         assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
         assert!(content.ends_with("New message from fleet-wolf."));
+    }
+
+    #[test]
+    fn a_cut_preview_says_where_the_full_message_is() {
+        assert_eq!(
+            direct_push_content("fleet-wolf", None, Some("m-1")),
+            "new message from fleet-wolf [truncated; full message m-1 remains in marshal://messages]"
+        );
+        let content = direct_push_content("fleet-wolf", Some("max@lucid.rocks"), Some("m-1"));
+        assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
+        assert!(content.ends_with("[truncated; full message m-1 remains in marshal://messages]"));
     }
 }

@@ -23,7 +23,10 @@ mod tools;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use hyphae::{Gettable, Watchable};
-use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session, SessionId};
+use marshal_entities::{
+    AckMessages, AckMessagesResult, GetAllSessions, HostInfo, MessageId, NotifyChannel, Session,
+    SessionId,
+};
 use mcp::ServerConfig;
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -81,6 +84,14 @@ fn main() -> Result<()> {
     // Code's status prefix from stdin.
     let mut argv = std::env::args().skip(1);
     match argv.next().as_deref() {
+        Some("-h" | "--help") => {
+            print!("{}", usage());
+            return Ok(());
+        }
+        Some("-V" | "--version") => {
+            println!("marshal-shim {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Some("--check") if argv.next().is_none() => {
             println!("ok");
             return Ok(());
@@ -96,7 +107,16 @@ fn main() -> Result<()> {
         Some("codex-hook") => {
             let ep = argv.next().unwrap_or_else(|| "prompt-submit".to_string());
             let base = argv.next();
-            codex_hook::run(&ep, base.as_deref());
+            codex_hook::run(&ep, base.as_deref(), codex_hook::Harness::Codex);
+            return Ok(());
+        }
+        // The same bridge for Claude Code, which the Claude plugin's
+        // `hooks/hooks.json` runs at SessionStart and UserPromptSubmit so a
+        // message the live channel didn't show still reaches the session.
+        Some("claude-hook") => {
+            let ep = argv.next().unwrap_or_else(|| "prompt-submit".to_string());
+            let base = argv.next();
+            codex_hook::run(&ep, base.as_deref(), codex_hook::Harness::Claude);
             return Ok(());
         }
         // Claude Code hook bridge: the same bridge, run from the plugin's
@@ -160,7 +180,7 @@ fn main() -> Result<()> {
                 .block_on(codex_bridge::run(&rest));
         }
         Some(other) => {
-            anyhow::bail!("unknown argument: {other}");
+            anyhow::bail!("unknown argument: {other} (try 'marshal-shim --help')");
         }
         None => {}
     }
@@ -173,6 +193,38 @@ fn main() -> Result<()> {
         .build()
         .context("building tokio runtime")?
         .block_on(serve())
+}
+
+/// The `--help` text: the subcommands dispatched in `main`, and how the
+/// default MCP-server mode finds the daemon.
+fn usage() -> String {
+    format!(
+        "marshal-shim {version}
+Connects an agent session to the Marshal daemon.
+
+Usage: marshal-shim [COMMAND]
+
+With no command, serves MCP on stdio for the agent session that started it.
+
+Commands:
+  statusline    Render the Claude Code status line prefix from stdin
+  codex-hook    Forward a Codex hook to the daemon:
+                codex-hook <session-start|session-end|prompt-submit|pre-tool-use|post-tool-use> [base-url]
+  codex-setup   Wire Marshal into a Codex install (codex-setup --help for options)
+  codex-run     Start Codex with Marshal live delivery
+  codex-bridge  Run the Codex live-delivery bridge on its own (codex-run starts it)
+
+Options:
+  --check        Print \"ok\" and exit (install smoke test)
+  -h, --help     Print this help and exit
+  -V, --version  Print the version and exit
+
+Daemon address, first match wins: the marshal/{ADDRESS_FILE} file in the
+per-user config directory, then {ADDRESS_ENV}, then {ADDRESS_ENV_LEGACY},
+then {DEFAULT_DAEMON_ADDRESS}.
+",
+        version = env!("CARGO_PKG_VERSION"),
+    )
 }
 
 async fn serve() -> Result<()> {
@@ -204,10 +256,7 @@ async fn serve() -> Result<()> {
     // role-deployed per-host config file. Config-wins makes the file the
     // per-host source of truth; env becomes a deliberate one-off
     // override the operator can apply by deleting the file.
-    let daemon_address = read_address_from_config_file()
-        .or_else(|| std::env::var(ADDRESS_ENV).ok())
-        .or_else(|| std::env::var(ADDRESS_ENV_LEGACY).ok())
-        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string());
+    let daemon_address = daemon_address();
 
     log::info!("[marshal-shim] connecting to {daemon_address}");
 
@@ -325,6 +374,9 @@ async fn serve() -> Result<()> {
         host: Some(host.clone()),
         project: project.clone(),
         channels_enabled,
+        // The drain task below acks each direct push once it is written to
+        // Claude, so the daemon can leave it unread until then.
+        acks_pushes: (!is_codex).then_some(true),
     };
     let session = Arc::new(Mutex::new(session));
 
@@ -851,6 +903,7 @@ async fn serve() -> Result<()> {
     });
 
     let notify_rx = Mutex::new(Some(notify_rx));
+    let client_for_acks = Arc::clone(&client);
     let served = mcp::serve_stdio(config, handler, Arc::clone(&activity), move |notifier| {
         // Spawn a task that drains the NotifyChannel buffer and emits each
         // one onto stdout via the MCP writer. The buffer accumulated any
@@ -858,7 +911,7 @@ async fn serve() -> Result<()> {
         if let Some(mut rx) = notify_rx.lock().ok().and_then(|mut g| g.take()) {
             tokio::spawn(async move {
                 while let Some(cmd) = rx.recv().await {
-                    notifier.channel(cmd.content, cmd.meta);
+                    forward_push(&notifier, &client_for_acks, cmd);
                 }
             });
             log::info!("[marshal-shim] notification drain task started");
@@ -874,6 +927,49 @@ async fn serve() -> Result<()> {
     }
     log::info!("[marshal-shim] stdin closed; deregistering and exiting");
     deregister_and_exit(&client, &session, is_codex);
+}
+
+/// Hand a daemon push to Claude. A direct message or @mention ping is acked
+/// once it has been written and flushed to Claude's stdin: the daemon leaves
+/// a direct message unread until then (our Session sets `acks_pushes`), so
+/// one that never gets this far comes back in the next inbox pull. A failed
+/// write, or an ack that doesn't land, leaves it unread; showing it twice
+/// beats losing it. A flushed line is not proof Claude showed it (Claude may
+/// stop reading and die with it in the pipe), but MCP notifications have no
+/// ack, so this is as far as the shim can see. A mention ping is a direct message too, so acking it keeps
+/// the per-turn inbox from showing it again. Any other push is passed on
+/// without an ack.
+fn forward_push(notifier: &mcp::Notifier, client: &Arc<MykoClient>, cmd: NotifyChannel) {
+    let kind = cmd.meta.get("kind").and_then(serde_json::Value::as_str);
+    let acked_message_id = matches!(kind, Some("new_message" | "mention"))
+        .then(|| {
+            cmd.meta
+                .get("message_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .flatten()
+        .map(|id| MessageId(Arc::from(id)));
+    let Some(message_id) = acked_message_id else {
+        notifier.channel(cmd.content, cmd.meta);
+        return;
+    };
+    let written = notifier.channel_written(cmd.content, cmd.meta);
+    let client = Arc::clone(client);
+    tokio::spawn(async move {
+        if written.await.is_err() {
+            log::warn!(
+                "[marshal-shim] push {} not written to Claude; left unread",
+                message_id.0
+            );
+            return;
+        }
+        // Fire-and-forget like the liveness setters: a lost ack leaves the
+        // message unread, which the next inbox pull repairs.
+        let _ = client.send_command::<AckMessages, AckMessagesResult>(&AckMessages {
+            message_ids: vec![message_id],
+            as_session: None,
+        });
+    });
 }
 
 /// Best-effort roster deregistration followed by a hard process exit.
@@ -958,6 +1054,28 @@ fn emit_session_del(client: &MykoClient, session: &Session) -> Result<()> {
 /// non-empty trimmed line from the first readable file. Trailing newlines
 /// and surrounding whitespace are stripped so an operator can `echo URL >
 /// daemon-address` without worrying about formatting.
+/// The daemon this shim connects to, in the order described in `main`:
+/// address file, then `MARSHAL_DAEMON_ADDRESS`, then `MYKO_ADDRESS`, then
+/// localhost. The Claude/Codex hook bridge derives its hook URL from the same
+/// answer.
+pub(crate) fn daemon_address() -> String {
+    first_daemon_address(
+        read_address_from_config_file(),
+        std::env::var(ADDRESS_ENV).ok(),
+        std::env::var(ADDRESS_ENV_LEGACY).ok(),
+    )
+}
+
+fn first_daemon_address(
+    file: Option<String>,
+    env: Option<String>,
+    legacy_env: Option<String>,
+) -> String {
+    file.or(env)
+        .or(legacy_env)
+        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string())
+}
+
 pub(crate) fn read_address_from_config_file() -> Option<String> {
     for path in config_file_candidates(ADDRESS_FILE) {
         if let Ok(contents) = std::fs::read_to_string(&path) {
@@ -1314,9 +1432,34 @@ fn detect_host() -> HostInfo {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_address_file_outranks_the_env_vars() {
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            first_daemon_address(
+                some("ws://file:6155"),
+                some("ws://env:6155"),
+                some("ws://old:6155")
+            ),
+            "ws://file:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, some("ws://env:6155"), some("ws://old:6155")),
+            "ws://env:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, None, some("ws://old:6155")),
+            "ws://old:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, None, None),
+            DEFAULT_DAEMON_ADDRESS
+        );
+    }
     use super::{
-        ROSTER_MISS_TICKS, default_current_task, detect_git_branch, registered_on_roster,
-        resolve_git_head_dir, roster_miss_step,
+        DEFAULT_DAEMON_ADDRESS, ROSTER_MISS_TICKS, default_current_task, detect_git_branch,
+        first_daemon_address, registered_on_roster, resolve_git_head_dir, roster_miss_step,
     };
     use marshal_entities::{Session, SessionId};
     use std::process::Command;
