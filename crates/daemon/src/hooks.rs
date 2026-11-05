@@ -471,7 +471,8 @@ fn mark_waiting(cmd_ctx: &CommandContext, sid: &str, now: i64) {
 /// actually serves: a message id isn't a path under `marshal://messages`.
 fn truncation_notice(message_id: &str, sent_at: i64) -> String {
     format!(
-        "  [truncated; full message {message_id} remains in marshal://messages?inbox=true&since={sent_at}]\n"
+        "  {} Read at marshal://messages?inbox=true&since={sent_at}\n",
+        marshal_entities::truncated_notice(message_id)
     )
 }
 
