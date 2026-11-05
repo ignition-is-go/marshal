@@ -73,9 +73,21 @@ impl HookOutcome {
 /// again, so a slow reader can see a duplicate but mail isn't lost.
 const DEFAULT_LEASE: Duration = Duration::from_secs(60);
 
+/// How long a lapsed lease is remembered, so that offering its mail again can be
+/// told apart from a first offer and logged.
+const FORGET_LAPSED: Duration = Duration::from_secs(60 * 60);
+
 /// Mail handed to a reader and not yet acked, as session and message to expiry.
 #[derive(Default)]
 struct Leases(HashMap<(SessionId, MessageId), Instant>);
+
+/// What [`Leases::take`] handed out.
+struct Taken {
+    /// The messages leased to this reader.
+    ids: HashSet<MessageId>,
+    /// How many of them were offered before, and that reader never acked.
+    reoffered: usize,
+}
 
 impl Leases {
     /// Lease whichever of `ids` nobody holds, returning those.
@@ -85,19 +97,24 @@ impl Leases {
         ids: &[MessageId],
         now: Instant,
         lease: Duration,
-    ) -> HashSet<MessageId> {
-        self.0.retain(|_, expires| *expires > now);
-        ids.iter()
+    ) -> Taken {
+        self.0.retain(|_, expires| *expires + FORGET_LAPSED > now);
+        let mut reoffered = 0;
+        let ids = ids
+            .iter()
             .filter(|id| {
                 let key = (session.clone(), (*id).clone());
-                if self.0.contains_key(&key) {
-                    return false;
+                match self.0.get(&key) {
+                    Some(expires) if *expires > now => return false,
+                    Some(_) => reoffered += 1,
+                    None => {}
                 }
                 self.0.insert(key, now + lease);
                 true
             })
             .cloned()
-            .collect()
+            .collect();
+        Taken { ids, reoffered }
     }
 
     fn release(&mut self, session: &SessionId, ids: &[MessageId]) {
@@ -177,6 +194,13 @@ fn handle_ack(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome {
         .map(|id| MessageId(Arc::from(id)))
         .collect();
     if let Some(session) = session {
+        if !ids.is_empty() {
+            log::info!(
+                "[hook] {}: client acked {} message(s)",
+                session.0.as_ref(),
+                ids.len()
+            );
+        }
         ack_surfaced(ctx, &session, ids);
     }
     HookOutcome::text(String::new())
@@ -513,9 +537,20 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
     let Ok(mut leases) = LEASES.lock() else {
         return (String::new(), Vec::new());
     };
-    let taken = leases.take(&sid_typed, &unread, Instant::now(), lease_duration());
+    let lease = lease_duration();
+    let taken = leases.take(&sid_typed, &unread, Instant::now(), lease);
     drop(leases);
-    result.messages.retain(|m| taken.contains(&m.message_id));
+    if taken.reoffered > 0 {
+        log::info!(
+            "[hook] {}: offering {} message(s) again: the last reader didn't ack within the {} s lease",
+            sid_typed.0.as_ref(),
+            taken.reoffered,
+            lease.as_secs()
+        );
+    }
+    result
+        .messages
+        .retain(|m| taken.ids.contains(&m.message_id));
     if result.messages.is_empty() {
         return (String::new(), Vec::new());
     }
@@ -665,10 +700,43 @@ mod lease_tests {
         let lease = Duration::from_secs(60);
         let now = Instant::now();
         let mut leases = Leases::default();
-        assert_eq!(leases.take(&session, &ids, now, lease).len(), 1);
-        assert!(leases.take(&session, &ids, now, lease).is_empty());
-        // No ack ever came: the path was lost, so offer it again.
-        assert_eq!(leases.take(&session, &ids, now + lease, lease).len(), 1);
+        let first = leases.take(&session, &ids, now, lease);
+        assert_eq!((first.ids.len(), first.reoffered), (1, 0));
+        assert!(leases.take(&session, &ids, now, lease).ids.is_empty());
+        // No ack ever came: the path was lost, so offer it again, and say so.
+        let again = leases.take(&session, &ids, now + lease, lease);
+        assert_eq!((again.ids.len(), again.reoffered), (1, 1));
+    }
+
+    #[test]
+    fn a_lapsed_lease_is_remembered_for_the_log_but_not_for_ever() {
+        let session = SessionId(Arc::from("s"));
+        let (m, other) = ([id("m")], [id("other")]);
+        let lease = Duration::from_secs(60);
+        let now = Instant::now();
+        let mut leases = Leases::default();
+        leases.take(&session, &m, now, lease);
+        // Another reader's take after m's lease lapsed doesn't forget it.
+        leases.take(&session, &other, now + lease * 2, lease);
+        assert_eq!(
+            leases.take(&session, &m, now + lease * 3, lease).reoffered,
+            1
+        );
+        // An hour after it lapsed, it's forgotten: a first offer again.
+        let later = now + lease * 4 + FORGET_LAPSED;
+        assert_eq!(leases.take(&session, &m, later, lease).reoffered, 0);
+    }
+
+    #[test]
+    fn an_acked_message_offered_again_is_not_a_reoffer() {
+        let session = SessionId(Arc::from("s"));
+        let ids = [id("m")];
+        let lease = Duration::from_secs(60);
+        let now = Instant::now();
+        let mut leases = Leases::default();
+        leases.take(&session, &ids, now, lease);
+        leases.release(&session, &ids);
+        assert_eq!(leases.take(&session, &ids, now + lease, lease).reoffered, 0);
     }
 
     #[test]
@@ -679,9 +747,9 @@ mod lease_tests {
         let now = Instant::now();
         let mut leases = Leases::default();
         leases.take(&a, &ids, now, lease);
-        assert_eq!(leases.take(&b, &ids, now, lease).len(), 1);
+        assert_eq!(leases.take(&b, &ids, now, lease).ids.len(), 1);
         leases.release(&a, &ids);
-        assert_eq!(leases.take(&a, &ids, now, lease).len(), 1);
+        assert_eq!(leases.take(&a, &ids, now, lease).ids.len(), 1);
     }
 }
 
