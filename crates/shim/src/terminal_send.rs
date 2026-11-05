@@ -2,8 +2,10 @@
 //! outside any Claude session.
 //!
 //! Sends go through myko like any other, so the sender has to be on the roster.
-//! The terminal registers a short-lived `Session` of kind `terminal`, under one id
-//! kept per machine, and removes it on exit. Each recipient gets a direct message rather than a room broadcast,
+//! The terminal registers a short-lived `Session` of kind `terminal`, under a fresh
+//! id for each run, and removes it on exit. Two runs at once (two scripts, or a
+//! loop with `&`) each have their own row, so the first to finish can't take the
+//! other's sender off the roster. Each recipient gets a direct message rather than a room broadcast,
 //! because only direct mail wakes an idle session.
 //!
 //! Any process on this account can run this command, so the label says which
@@ -13,7 +15,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use chrono::Utc;
 use hyphae::Gettable;
 use marshal_entities::{
@@ -24,7 +26,6 @@ use myko::client::MykoClient;
 use uuid::Uuid;
 
 const TERMINAL_KIND: &str = "terminal";
-const TERMINAL_ID_FILE: &str = "terminal-session";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_POLL: Duration = Duration::from_millis(200);
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -130,25 +131,10 @@ fn recipient_line(
     }
 }
 
-/// This machine's terminal id, created on first use.
-fn terminal_id() -> Result<String> {
-    let candidates = crate::config_file_candidates(TERMINAL_ID_FILE);
-    for path in &candidates {
-        if let Ok(id) = std::fs::read_to_string(path)
-            && Uuid::parse_str(id.trim()).is_ok()
-        {
-            return Ok(id.trim().to_string());
-        }
-    }
-    let path = candidates
-        .first()
-        .context("no config directory for this machine")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let id = Uuid::new_v4().to_string();
-    std::fs::write(path, &id).with_context(|| format!("writing {}", path.display()))?;
-    Ok(id)
+/// A fresh session id for this run. Not kept anywhere: a shared id would let one
+/// run's exit remove the row another run is still sending from.
+fn run_session_id() -> String {
+    Uuid::new_v4().to_string()
 }
 
 pub async fn run(target: Target, body: String) -> Result<()> {
@@ -158,7 +144,7 @@ pub async fn run(target: Target, body: String) -> Result<()> {
     let cwd = std::env::current_dir()
         .map(|d| d.display().to_string())
         .unwrap_or_default();
-    let id = SessionId(Arc::from(terminal_id()?.as_str()));
+    let id = SessionId(Arc::from(run_session_id().as_str()));
     let session = Session {
         id: id.clone(),
         client_id: None,
