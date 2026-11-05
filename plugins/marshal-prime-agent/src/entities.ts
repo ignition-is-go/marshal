@@ -158,7 +158,9 @@ export function setLastActivityAt(
   return { commandId: "SetSessionLastActivityAt", command: { id: sessionId, lastActivityAt } };
 }
 
-export function readMessages(args: ReadMessagesArgs): MarshalCommand<ReadMessagesResult> {
+export type ReadMessagesInput = Omit<ReadMessagesArgs, "since"> & { since?: number | null };
+
+export function readMessages(args: ReadMessagesInput): MarshalCommand<ReadMessagesResult> {
   const command = stripUndefined({
     asSession: args.asSession,
     inbox: args.inbox ?? false,

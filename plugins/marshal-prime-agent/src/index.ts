@@ -19,7 +19,7 @@
 // Config: set MARSHAL_DAEMON_ADDRESS (default ws://localhost:6155) and
 // MARSHAL_OPERATOR (optional) in the environment Prime Agent runs under.
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { MarshalDaemon } from "./daemon.ts";
@@ -27,6 +27,8 @@ import { pullForTurn } from "./inbox-pull.ts";
 import { resolveIdentity, type Identity } from "./identity.ts";
 import type { NotifyChannelMeta, SessionItem } from "./entities.ts";
 import { shouldRegisterPrimeAgentSession } from "./runtime.ts";
+
+type MarshalToolResult = AgentToolResult<unknown> & { isError?: boolean };
 
 const DEFAULT_ADDRESS = "ws://localhost:6155";
 
@@ -422,7 +424,7 @@ async function init(pi: ExtensionAPI) {
       body: Type.String({ description: "message text" }),
       response_required: Type.Optional(Type.Boolean({ description: "Whether this message needs an answer; defaults to false. Keep it out of the body." })),
     }),
-    async execute(_toolCallId: string, params: { to: string; body: string; response_required?: boolean }) {
+    async execute(_toolCallId: string, params: { to: string; body: string; response_required?: boolean }): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -453,7 +455,7 @@ async function init(pi: ExtensionAPI) {
       body: Type.String({ description: "message text" }),
       response_required: Type.Optional(Type.Boolean({ description: "Whether this message needs an answer; defaults to false. Keep it out of the body." })),
     }),
-    async execute(_toolCallId: string, params: { room: string; body: string; response_required?: boolean }) {
+    async execute(_toolCallId: string, params: { room: string; body: string; response_required?: boolean }): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -481,7 +483,7 @@ async function init(pi: ExtensionAPI) {
       name: Type.String({ description: "room name" }),
       description: Type.Optional(Type.String({ description: "optional room description" })),
     }),
-    async execute(_toolCallId: string, params: { name: string; description?: string }) {
+    async execute(_toolCallId: string, params: { name: string; description?: string }): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -508,7 +510,7 @@ async function init(pi: ExtensionAPI) {
     parameters: Type.Object({
       room: Type.String({ description: "room id/name" }),
     }),
-    async execute(_toolCallId: string, params: { room: string }) {
+    async execute(_toolCallId: string, params: { room: string }): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -561,7 +563,7 @@ async function init(pi: ExtensionAPI) {
       since: Type.Optional(Type.Number({ description: "only messages after this unix-millis timestamp" })),
       limit: Type.Optional(Type.Number({ description: "max messages (default 50)" })),
     }),
-    async execute(_toolCallId: string, params: { room?: string; since?: number; limit?: number }) {
+    async execute(_toolCallId: string, params: { room?: string; since?: number; limit?: number }): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
@@ -591,7 +593,7 @@ async function init(pi: ExtensionAPI) {
     parameters: Type.Object({
       message_ids: Type.Array(Type.String(), { description: "message ids to mark read" }),
     }),
-    async execute(_toolCallId: string, params: { message_ids: string[] }) {
+    async execute(_toolCallId: string, params: { message_ids: string[] }): Promise<MarshalToolResult> {
       if (!daemon || !sessionId) return { content: [{ type: "text", text: "marshal: not connected" }], details: {} };
       daemon.registerSession(sessionId);
       try {
