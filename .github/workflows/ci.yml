@@ -16,18 +16,36 @@ jobs:
     # in minutes instead of burning to GitHub's 6-hour default.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           fetch-tags: true
-      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev python3-venv
+      - name: Install pinned workflow validator
+        run: |
+          bash scripts/ci/install-actionlint.sh "$RUNNER_TEMP/actionlint"
+          python3 -m venv "$RUNNER_TEMP/workflow-validator"
+          "$RUNNER_TEMP/workflow-validator/bin/pip" install --disable-pip-version-check -r scripts/ci/requirements.txt
+      - name: Validate workflow and preservation contracts
+        env:
+          ACTIONLINT: ${{ runner.temp }}/actionlint/actionlint
+        run: |
+          "$RUNNER_TEMP/workflow-validator/bin/python" scripts/ci/check_workflows.py --actionlint "$ACTIONLINT"
+          "$RUNNER_TEMP/workflow-validator/bin/python" -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - run: cargo install cargo-flux
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
@@ -44,6 +62,12 @@ jobs:
       - name: Test release dispatch contract
         run: python3 scripts/test_release_dispatch_contract.py
 
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
   # marshal-shim ships to Windows (ue_plugindev) as a cross-compiled
   # x86_64-pc-windows-gnu binary, but its Windows code is `#[cfg(windows)]`
   # and so is invisible to the Linux `check` job above. #19 silently
@@ -55,11 +79,18 @@ jobs:
     runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-gnu
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install mingw-w64 cross linker
         # Bound apt's network waits (Acquire timeouts + retries) so a flaky
         # azure.archive.ubuntu.com mirror can't hang the job indefinitely —
@@ -73,6 +104,12 @@ jobs:
       - name: Cross-compile the Windows shim
         run: cargo check -p marshal-shim --target x86_64-pc-windows-gnu
 
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
   # Cross-compilation catches cfg(windows) build failures, but it cannot prove
   # the launcher/bridge behavior. Run the real multi-process wake canary on a
   # native Windows host as well: Windows Codex TUIs own isolated loopback
@@ -81,10 +118,27 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python scripts/ci/report_resources.py
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: false
+      - name: Test Windows isolation recipe offline
+        shell: pwsh
+        run: ./scripts/ci/test_windows_isolation.ps1
       - name: Run native Windows Codex wake canary
         run: cargo test -p marshal-shim -- --nocapture
+
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python scripts/ci/report_resources.py

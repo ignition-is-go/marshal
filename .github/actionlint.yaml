@@ -1,0 +1,6 @@
+self-hosted-runner:
+  labels:
+    - ram-ge-16g
+    - ram-ge-24g
+    - disk-ge-100g
+    - site-lucid-lab

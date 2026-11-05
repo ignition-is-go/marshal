@@ -12,7 +12,12 @@ jobs:
     runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
 
       - name: Verify runner isolation
         shell: bash
@@ -37,3 +42,9 @@ jobs:
 
       - name: Hold for concurrent observation
         run: sleep 60
+
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
