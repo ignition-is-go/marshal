@@ -2,8 +2,9 @@
 //! whichever resolved address accepts, and read its reply, including why it
 //! failed and which delivered messages to ack.
 
+use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Connect to the first address of `target` that accepts. A name like
 /// `localhost` can resolve to `::1` ahead of the `127.0.0.1` the daemon binds,
@@ -60,12 +61,79 @@ pub struct Reply {
     pub restarting: bool,
 }
 
-/// A complete HTTP response, or why there isn't a usable one.
+pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+fn response_length(buf: &[u8]) -> Result<Option<usize>, PostFailure> {
+    let Some(idx) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Ok(None);
+    };
+    let head = std::str::from_utf8(&buf[..idx]).map_err(|_| PostFailure::Unreachable)?;
+    let mut length = None;
+    for line in head.split("\r\n").skip(1) {
+        let (name, value) = line.split_once(':').ok_or(PostFailure::Unreachable)?;
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(PostFailure::Unreachable);
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let value = value.trim();
+            if length.is_some() || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(PostFailure::Unreachable);
+            }
+            length = Some(
+                value
+                    .parse::<usize>()
+                    .map_err(|_| PostFailure::Unreachable)?,
+            );
+        }
+    }
+    let total = (idx + 4)
+        .checked_add(length.ok_or(PostFailure::Unreachable)?)
+        .filter(|n| *n <= MAX_RESPONSE_BYTES)
+        .ok_or(PostFailure::Unreachable)?;
+    Ok(Some(total))
+}
+
+pub fn read_reply(stream: &mut TcpStream, deadline: Instant) -> Result<Reply, PostFailure> {
+    let mut buf = Vec::new();
+    let mut chunk = [0; 8192];
+    loop {
+        if let Some(total) = response_length(&buf)? {
+            if buf.len() >= total {
+                return parse_response(&buf);
+            }
+        }
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(PostFailure::Unreachable)?;
+        stream
+            .set_read_timeout(Some(left))
+            .map_err(|_| PostFailure::Unreachable)?;
+        let cap = chunk
+            .len()
+            .min(MAX_RESPONSE_BYTES.saturating_sub(buf.len()) + 1);
+        let read = stream
+            .read(&mut chunk[..cap])
+            .map_err(|_| PostFailure::Unreachable)?;
+        if read == 0 {
+            return Err(PostFailure::Unreachable);
+        }
+        buf.extend_from_slice(&chunk[..read]);
+        if buf.len() > MAX_RESPONSE_BYTES {
+            return Err(PostFailure::Unreachable);
+        }
+    }
+}
+
+/// Parse only a complete, unambiguous response before exposing acknowledgment IDs.
 pub fn parse_response(buf: &[u8]) -> Result<Reply, PostFailure> {
-    let text = String::from_utf8_lossy(buf);
+    if response_length(buf)? != Some(buf.len()) {
+        return Err(PostFailure::Unreachable);
+    }
+    let text = std::str::from_utf8(buf).map_err(|_| PostFailure::Unreachable)?;
     let idx = text.find("\r\n\r\n").ok_or(PostFailure::Unreachable)?;
-    let status = text[..idx]
-        .lines()
+    let mut lines = text[..idx].split("\r\n");
+    let status = lines
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
@@ -73,23 +141,33 @@ pub fn parse_response(buf: &[u8]) -> Result<Reply, PostFailure> {
     if !(200..300).contains(&status) {
         return Err(PostFailure::Status(status));
     }
-    let ack_ids = text[..idx]
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("x-marshal-ack"))
-        .map(|(_, ids)| {
-            ids.split(',')
-                .map(|id| id.trim().to_string())
-                .filter(|id| !id.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    let restarting = text[..idx]
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .any(|(name, _)| name.eq_ignore_ascii_case("x-marshal-restarting"));
+    let mut ack_ids = None;
+    let mut restarting = false;
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or(PostFailure::Unreachable)?;
+        if value.bytes().any(|b| b < 0x20 && b != b'\t' || b == 0x7f) {
+            return Err(PostFailure::Unreachable);
+        }
+        if name.eq_ignore_ascii_case("x-marshal-ack-v1") {
+            if ack_ids.is_some() {
+                return Err(PostFailure::Unreachable);
+            }
+            ack_ids = Some(
+                serde_json::from_str::<Vec<String>>(value.trim())
+                    .map_err(|_| PostFailure::Unreachable)?,
+            );
+        }
+        if name.eq_ignore_ascii_case("x-marshal-restarting") {
+            restarting = true;
+        }
+    }
+    let ack_ids = ack_ids.unwrap_or_default();
+    let body = text[idx + 4..].to_string();
+    if body.trim().is_empty() && !ack_ids.is_empty() {
+        return Err(PostFailure::Unreachable);
+    }
     Ok(Reply {
-        body: text[idx + 4..].to_string(),
+        body,
         ack_ids,
         restarting,
     })
@@ -116,23 +194,26 @@ mod tests {
     #[test]
     fn a_response_says_why_it_failed() {
         assert_eq!(
-            parse_response(b"HTTP/1.1 200 OK\r\nX-Marshal-Ack: a, b\r\n\r\nbody"),
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nX-Marshal-Ack-V1: [\"a\",\"b\"]\r\n\r\nbody"),
             Ok(Reply {
                 body: "body".to_string(),
                 ack_ids: vec!["a".to_string(), "b".to_string()],
                 restarting: false,
             })
         );
-        let stopping =
-            parse_response(b"HTTP/1.1 200 OK\r\nX-Marshal-Restarting: 1\r\n\r\n").unwrap();
+        let stopping = parse_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Marshal-Restarting: 1\r\n\r\n",
+        )
+        .unwrap();
         assert!(stopping.restarting && stopping.body.is_empty());
         for code in [401, 403] {
-            let raw = format!("HTTP/1.1 {code} No\r\n\r\n");
+            let raw = format!("HTTP/1.1 {code} No\r\nContent-Length: 0\r\n\r\n");
             let failure = parse_response(raw.as_bytes()).unwrap_err();
             assert_eq!(failure, PostFailure::Status(code));
             assert!(failure.is_refusal());
         }
-        let outage = parse_response(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").unwrap_err();
+        let outage =
+            parse_response(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n").unwrap_err();
         assert!(!outage.is_refusal());
         assert_eq!(parse_response(b""), Err(PostFailure::Unreachable));
     }

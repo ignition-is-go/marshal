@@ -25,7 +25,8 @@
 //! can never block or break a Codex or Claude turn.
 
 use std::io::{Read, Write};
-use std::time::Duration;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
 
 use crate::link::{PostFailure, Reply};
 
@@ -110,11 +111,15 @@ pub fn run_for(harness: Harness, ep: &str, base_override: Option<&str>) {
         harness.name()
     );
 
-    let Ok(reply) = http_post_why(&base, &path, &body, harness.timeout()) else {
+    let deadline = Instant::now() + harness.timeout();
+    let Ok(reply) = http_post_why(&base, &path, &body, deadline) else {
         return;
     };
     let resp = reply.body.trim_end_matches(['\n', '\r', ' ']);
-    if !resp.is_empty() {
+    if resp.is_empty() {
+        return;
+    }
+    {
         let out = serde_json::json!({
             "hookSpecificOutput": { "hookEventName": event, "additionalContext": resp }
         });
@@ -131,7 +136,7 @@ pub fn run_for(harness: Harness, ep: &str, base_override: Option<&str>) {
     if !reply.ack_ids.is_empty() {
         let ack =
             serde_json::json!({ "session_id": sid, "message_ids": reply.ack_ids }).to_string();
-        let _ = http_post_why(&base, "/hook/ack", &ack, ACK_TIMEOUT);
+        let _ = http_post_why(&base, "/hook/ack", &ack, deadline);
     }
 }
 
@@ -152,15 +157,7 @@ pub fn watch(session_id: &str, base_override: Option<&str>, once: bool) {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     wait_for_mail(session_id, &cwd, base_override, once, |resp| {
-        let wrapped = wrap_long_lines(resp, WATCH_LINE_CHARS);
-        for (i, chunk) in event_chunks(&wrapped, WATCH_EVENT_CHARS).iter().enumerate() {
-            if i > 0 {
-                std::thread::sleep(WATCH_EVENT_GAP);
-            }
-            let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "{chunk}");
-            let _ = out.flush();
-        }
+        write_watch_events(&mut std::io::stdout().lock(), resp)
     });
 }
 
@@ -192,7 +189,8 @@ pub fn wait_hook(base_override: Option<&str>) {
         }
     };
     let delivered = wait_for_mail(sid, cwd, base_override, true, |resp| {
-        eprintln!("{resp}");
+        let mut out = std::io::stderr().lock();
+        writeln!(out, "{resp}").and_then(|()| out.flush())
     });
     if delivered {
         std::process::exit(2);
@@ -224,7 +222,7 @@ fn wait_for_mail(
     cwd: &str,
     base_override: Option<&str>,
     once: bool,
-    deliver: impl Fn(&str),
+    mut deliver: impl FnMut(&str) -> std::io::Result<()>,
 ) -> bool {
     // A one-shot waiter only notices its parent is gone between polls, and until
     // then it could take mail for a closed session, so it polls more often.
@@ -255,7 +253,9 @@ fn wait_for_mail(
         if parent_pid() != parent {
             return false;
         }
-        let post = |path: &str, body: &str, timeout| http_post_why(&base, path, body, timeout);
+        let post = |path: &str, body: &str, timeout| {
+            http_post_why(&base, path, body, Instant::now() + timeout)
+        };
         match post(&path, &body, timeout) {
             Ok(reply) => {
                 failing = None;
@@ -272,7 +272,9 @@ fn wait_for_mail(
                     if parent_pid() != parent {
                         return false;
                     }
-                    deliver(resp);
+                    if deliver(resp).is_err() {
+                        return false;
+                    }
                     // Only now has it been handed on. A lost ack means the mail
                     // comes again, which beats losing it.
                     if !reply.ack_ids.is_empty() {
@@ -298,9 +300,9 @@ fn wait_for_mail(
                 // A new waiter or re-armed watcher mustn't tell it again, or
                 // every Stop would wake it.
                 if failure.is_refusal() && refusal_is_new(session_id, failure) {
-                    deliver(&format!(
+                    if deliver(&format!(
                         "Marshal can't deliver mail to this session: {failure}. Please tell your operator. This notice won't repeat."
-                    ));
+                    )).is_err() { return false; }
                     if once {
                         return true;
                     }
@@ -494,13 +496,7 @@ fn resolve_base(base_override: Option<&str>) -> String {
     {
         return b.trim_end_matches('/').to_string();
     }
-    // Fall back to the same daemon address the shim's MCP path uses, remapped
-    // from the WS endpoint to the plain-HTTP hook port.
-    let ws = std::env::var(crate::ADDRESS_ENV)
-        .ok()
-        .or_else(crate::read_address_from_config_file)
-        .unwrap_or_default();
-    base_from_daemon(&ws)
+    base_from_daemon(&crate::daemon_address())
 }
 
 fn base_from_daemon(daemon: &str) -> String {
@@ -530,7 +526,7 @@ fn base_from_daemon(daemon: &str) -> String {
 /// `Connection: close`, so we read to EOF and return the body. `None` on any
 /// transport failure. `timeout` bounds the connect and each read/write.
 fn http_post(base: &str, path: &str, body: &str, timeout: Duration) -> Option<String> {
-    http_post_why(base, path, body, timeout)
+    http_post_why(base, path, body, Instant::now() + timeout)
         .ok()
         .map(|reply| reply.body)
 }
@@ -540,9 +536,14 @@ fn http_post_why(
     base: &str,
     path: &str,
     body: &str,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<Reply, PostFailure> {
-    let unreachable = |_| PostFailure::Unreachable;
+    let left = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(PostFailure::Unreachable)
+    };
     let hostport = base
         .strip_prefix("http://")
         .ok_or(PostFailure::Unreachable)?
@@ -551,23 +552,51 @@ fn http_post_why(
         Some((h, p)) => (h, p.parse::<u16>().map_err(|_| PostFailure::Unreachable)?),
         None => (hostport, 80),
     };
-    let mut stream = crate::link::connect_any(format!("{host}:{port}"), timeout)
+    let addrs =
+        resolve_within(format!("{host}:{port}"), left()?).ok_or(PostFailure::Unreachable)?;
+    let mut stream = addrs
+        .into_iter()
+        .find_map(|addr| {
+            TcpStream::connect_timeout(&addr, Duration::from_secs(1).min(left().ok()?)).ok()
+        })
         .ok_or(PostFailure::Unreachable)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(unreachable)?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(unreachable)?;
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(req.as_bytes()).map_err(unreachable)?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(unreachable)?;
-    crate::link::parse_response(&buf)
+    let mut bytes = req.as_bytes();
+    while !bytes.is_empty() {
+        stream
+            .set_write_timeout(Some(left()?))
+            .map_err(|_| PostFailure::Unreachable)?;
+        let written = stream.write(bytes).map_err(|_| PostFailure::Unreachable)?;
+        if written == 0 {
+            return Err(PostFailure::Unreachable);
+        }
+        bytes = &bytes[written..];
+    }
+    crate::link::read_reply(&mut stream, deadline)
+}
+
+fn resolve_within(hostport: String, limit: Duration) -> Option<Vec<SocketAddr>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(hostport.to_socket_addrs().map(Iterator::collect));
+    });
+    rx.recv_timeout(limit).ok()?.ok()
+}
+
+fn write_watch_events(out: &mut impl Write, text: &str) -> std::io::Result<()> {
+    let wrapped = wrap_long_lines(text, WATCH_LINE_CHARS);
+    for (i, chunk) in event_chunks(&wrapped, WATCH_EVENT_CHARS).iter().enumerate() {
+        if i > 0 {
+            std::thread::sleep(WATCH_EVENT_GAP);
+        }
+        writeln!(out, "{chunk}")?;
+        out.flush()?;
+    }
+    Ok(())
 }
 
 fn short_host() -> String {

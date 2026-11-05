@@ -538,33 +538,10 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
         limit: Some(20),
         as_session: Some(sid_typed.clone()),
     };
-    let mut result = match read.execute(cmd_ctx.clone()) {
+    let result = match read.execute(cmd_ctx.clone()) {
         Ok(r) => r,
         Err(_) => return (String::new(), Vec::new()),
     };
-    // Mail another reader is delivering isn't offered twice.
-    let unread: Vec<MessageId> = result
-        .messages
-        .iter()
-        .map(|m| m.message_id.clone())
-        .collect();
-    let Ok(mut leases) = LEASES.lock() else {
-        return (String::new(), Vec::new());
-    };
-    let lease = lease_duration();
-    let taken = leases.take(&sid_typed, &unread, Instant::now(), lease);
-    drop(leases);
-    if taken.reoffered > 0 {
-        log::info!(
-            "[hook] {}: offering {} message(s) again: the last reader didn't ack within the {} s lease",
-            sid_typed.0.as_ref(),
-            taken.reoffered,
-            lease.as_secs()
-        );
-    }
-    result
-        .messages
-        .retain(|m| taken.ids.contains(&m.message_id));
     if result.messages.is_empty() {
         return (String::new(), Vec::new());
     }
@@ -616,30 +593,60 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
         .iter()
         .partition(|m| m.to_operator.is_some());
 
-    // Render in display order and stop before the block outgrows what Claude
-    // Code injects whole. Only what is rendered is acked; the rest stays
-    // unread, is counted in `remaining`, and comes next turn. The first
-    // message always goes in, so a backlog can't stall behind it.
-    let mut lines_budget = AUTO_INBOX_OUTPUT_BUDGET_UTF16;
-    let mut shown_human = Vec::new();
-    let mut shown_agent = Vec::new();
-    for (m, is_human) in human
+    let prepared: Vec<_> = human
         .iter()
         .map(|m| (*m, true))
         .chain(agent.iter().map(|m| (*m, false)))
-    {
-        let line = render_line(m);
+        .map(|(m, is_human)| (m, is_human, render_line(m)))
+        .collect();
+    let Ok(mut leases) = LEASES.lock() else {
+        return (String::new(), Vec::new());
+    };
+    let now = Instant::now();
+    let mut lines_budget = AUTO_INBOX_OUTPUT_BUDGET_UTF16;
+    let mut selected_ids = Vec::new();
+    let mut shown_human = Vec::new();
+    let mut shown_agent = Vec::new();
+    for (m, is_human, line) in prepared {
+        if leases
+            .0
+            .get(&(sid_typed.clone(), m.message_id.clone()))
+            .is_some_and(|until| *until > now)
+        {
+            continue;
+        }
         let units = utf16_len(&line);
-        let first = shown_human.is_empty() && shown_agent.is_empty();
-        if units > lines_budget && !first {
+        if units > lines_budget && !selected_ids.is_empty() {
             break;
         }
+        let mut candidate_ids = selected_ids.clone();
+        candidate_ids.push(m.message_id.clone());
+        // The UTF-16 body cap leaves at least64KiB for framing beside this header.
+        if crate::http_listener::ack_header(&candidate_ids).len() > 192 * 1024 {
+            log::warn!(
+                "[hook] skipped an inbox message whose acknowledgment metadata exceeds the response budget"
+            );
+            continue;
+        }
+        selected_ids = candidate_ids;
         lines_budget = lines_budget.saturating_sub(units);
         if is_human {
             shown_human.push((m, line));
         } else {
             shown_agent.push((m, line));
         }
+    }
+    let taken = leases.take(&sid_typed, &selected_ids, now, lease_duration());
+    drop(leases);
+    if taken.reoffered > 0 {
+        log::info!(
+            "[hook] {}: reoffered {} unacknowledged messages",
+            sid,
+            taken.reoffered
+        );
+    }
+    if selected_ids.is_empty() {
+        return (String::new(), Vec::new());
     }
     let shown = shown_human.len() + shown_agent.len();
 

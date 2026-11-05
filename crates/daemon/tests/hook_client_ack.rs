@@ -48,6 +48,7 @@ fn sender() -> Session {
         host: None,
         project: None,
         channels_enabled: None,
+        acks_pushes: None,
     }
 }
 
@@ -155,8 +156,8 @@ fn start_stoppable() -> (
 
 fn ack_ids(raw: &str) -> Vec<String> {
     raw.lines()
-        .find_map(|l| l.strip_prefix("X-Marshal-Ack: "))
-        .map(|ids| ids.trim().split(',').map(str::to_string).collect())
+        .find_map(|l| l.strip_prefix("X-Marshal-Ack-V1: "))
+        .map(|ids| serde_json::from_str(ids.trim()).expect("ack list"))
         .unwrap_or_default()
 }
 

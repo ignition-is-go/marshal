@@ -148,8 +148,7 @@ async fn handle_conn(
             // may drop it.
             let client_acks = query.split('&').any(|kv| kv == "ack=client");
             if client_acks && let Some((_, ids)) = &outcome.deferred_ack {
-                let ids: Vec<&str> = ids.iter().map(|id| id.0.as_ref()).collect();
-                let header = format!("X-Marshal-Ack: {}\r\n", ids.join(","));
+                let header = ack_header(&ids);
                 return write_response_with(&mut stream, 200, &header, &outcome.body).await;
             }
             write_response(&mut stream, 200, &outcome.body).await?;
@@ -205,8 +204,7 @@ async fn handle_wait(
             // mail on, which a written response alone can't tell us.
             if client_acks {
                 let ids = outcome.deferred_ack.map(|(_, ids)| ids).unwrap_or_default();
-                let ids: Vec<&str> = ids.iter().map(|id| id.0.as_ref()).collect();
-                let header = format!("X-Marshal-Ack: {}\r\n", ids.join(","));
+                let header = ack_header(&ids);
                 return write_response_with(&mut stream, 200, &header, &outcome.body).await;
             }
             write_response(&mut stream, 200, &outcome.body).await?;
@@ -227,6 +225,14 @@ async fn handle_wait(
             }
         }
     }
+}
+
+pub(crate) fn ack_header(ids: &[marshal_entities::MessageId]) -> String {
+    let ids: Vec<&str> = ids.iter().map(|id| id.0.as_ref()).collect();
+    let encoded = serde_json::to_string(&ids)
+        .expect("string list serializes")
+        .replace('\u{7f}', "\\u007f");
+    format!("X-Marshal-Ack-V1: {encoded}\r\n")
 }
 
 async fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
