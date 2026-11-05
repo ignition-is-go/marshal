@@ -176,6 +176,14 @@ and so cleanup can sweep them when the last member leaves — except
 - Reserved names + prefixes: `everyone`, `host:`, `op:`, `project:`.
   `join_room("host:foo")` and `join_room("everyone")` error loudly so
   users can't shadow auto-rooms.
+- Room names and descriptions reach other sessions' model context, so
+  `join_room` rejects names over 64 characters (descriptions over 256) and
+  any character on a blocklist: `<`, `>` and the listed lookalike angle brackets, `&`,
+  `"`, backtick, control characters, line separators, bidi controls, and a
+  blocklist of the invisible and formatting characters known to hide text.
+  Characters not on the list are allowed. Auto-rooms drop blocked characters
+  from the operator / project value instead of failing (added later; the
+  exact list is `FORBIDDEN_RANGES` in `crates/entities/src/room.rs`).
 
 ### Tool surface
 

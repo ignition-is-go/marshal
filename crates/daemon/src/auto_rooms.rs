@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use marshal_entities::{
-    AutoSource, GetAllRoomMembers, GetAllRooms, Room, RoomId, RoomKind, RoomMember, RoomMemberId,
-    Session,
+    AutoSource, GetAllRoomMembers, GetAllRooms, ROOM_NAME_MAX_CHARS, Room, RoomId, RoomKind,
+    RoomMember, RoomMemberId, Session, sanitize_room_text,
 };
 use myko::prelude::EventPublishing as _;
 use myko::{
@@ -95,26 +95,31 @@ impl CommandHandler for DispatchAutoRooms {
             "everyone".to_string(),
             AutoSource::Everyone,
         )];
-        if let Some(op) = session.operator.as_ref()
-            && !op.is_empty()
+        // The operator and project come from the client (hook query strings,
+        // the cwd's repo basename) and end up in the room name, which other
+        // sessions' model context renders. Sanitize rather than reject: the
+        // auto-room must still exist. Id, name and source all carry the
+        // sanitized value, so `id == name` keeps holding for auto-rooms.
+        if let Some((name, op)) = session
+            .operator
+            .as_deref()
+            .and_then(|op| anchor_name("op:", op))
         {
-            let id = format!("op:{op}");
             anchors.push((
-                RoomId(Arc::from(id.as_str())),
-                id,
-                AutoSource::Operator { name: op.clone() },
+                RoomId(Arc::from(name.as_str())),
+                name,
+                AutoSource::Operator { name: op },
             ));
         }
-        if let Some(project) = session.project.as_ref()
-            && !project.is_empty()
+        if let Some((name, basename)) = session
+            .project
+            .as_deref()
+            .and_then(|project| anchor_name("project:", project))
         {
-            let id = format!("project:{project}");
             anchors.push((
-                RoomId(Arc::from(id.as_str())),
-                id,
-                AutoSource::Project {
-                    basename: project.clone(),
-                },
+                RoomId(Arc::from(name.as_str())),
+                name,
+                AutoSource::Project { basename },
             ));
         }
 
@@ -148,4 +153,15 @@ impl CommandHandler for DispatchAutoRooms {
 
         Ok(())
     }
+}
+
+/// The auto-room name for `prefix` + `value`, and the value it carries.
+/// Only the value goes through the shared room text rule (forbidden
+/// characters dropped), capped so the whole name fits in
+/// `ROOM_NAME_MAX_CHARS`. `None` when nothing of `value` survives, so a value
+/// made only of forbidden characters gets no anchor, the same as an empty one.
+fn anchor_name(prefix: &str, value: &str) -> Option<(String, String)> {
+    let cap = ROOM_NAME_MAX_CHARS.saturating_sub(prefix.chars().count());
+    let value = sanitize_room_text(value, cap);
+    (!value.is_empty()).then(|| (format!("{prefix}{value}"), value))
 }
