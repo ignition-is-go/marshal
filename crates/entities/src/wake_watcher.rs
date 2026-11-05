@@ -1,8 +1,9 @@
 //! `WakeWatcher`: the daemon's record that a session is holding `/hook/wait`.
 //!
-//! This is separate from `Session` because a session writes its own `Session`
-//! row, so a field there would only be the session's claim. Only the daemon's
-//! hook listener writes this one. The entity `id` is the session id.
+//! This is separate from `Session`, which each session writes for itself. The
+//! daemon's hook listener writes this one, but any connected client can also
+//! write one, so it's the daemon's record, not proof. The entity `id` is the
+//! session id.
 
 use std::sync::Arc;
 
