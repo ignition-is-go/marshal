@@ -105,8 +105,8 @@ async fn main() -> Result<()> {
     //
     // Set on SIGTERM or Ctrl-C, so held waits end cleanly before the daemon exits.
     // A listener that can't bind or stops is logged, and the daemon keeps
-    // running, as it always has: the hooks are opt-in, and fail quietly within
-    // their timeout when nothing answers.
+    // running, as it always has: the hooks fail quietly within their timeout
+    // when nothing answers.
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     {
         let hook_ctx = Arc::new(server.ctx());
