@@ -389,14 +389,13 @@ fn live_client_with_channels_off_is_not_delivered_live() {
         "channels-off recipient must report delivered_live=false (queued to inbox), not a phantom live delivery"
     );
     assert_eq!(result.live_push, LivePushStatus::Unavailable);
-    // ...but it is NOT the same as an absent recipient: this one is connected and
-    // wakes by its own path (the Codex bridge starts an idle turn). Reporting
-    // both cases identically made every healthy Codex session read as
-    // unreachable, which is the confusion this distinction removes.
+    // A live client alone isn't a wake path: a Claude session's MCP shim
+    // without the channels flag is connected but can't wake the session, and
+    // the roster calls it `wake: none`. Only a waiter makes it `expected`.
     assert_eq!(
         result.wake,
-        WakeStatus::Expected,
-        "a connected channels-off recipient has a wake path; only a disconnected one is `unobserved`"
+        WakeStatus::Unobserved,
+        "a connected channels-off recipient with no waiter has no wake path"
     );
     // No push should have been emitted (it'd be dropped anyway).
     thread::sleep(Duration::from_millis(200));

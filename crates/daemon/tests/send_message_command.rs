@@ -19,6 +19,7 @@ use std::sync::Arc;
 use hyphae::{Gettable, Materialize};
 use marshal_entities::{
     LivePushStatus, Message, SendMessage, SendMessageResult, Session, SessionId, WakeStatus,
+    WakeWatcher, WakeWatcherId,
 };
 use myko::{
     command::{CommandContext, CommandHandler},
@@ -144,6 +145,61 @@ fn offline_recipient_succeeds_and_persists_for_pull() {
     .expect("read persisted requirement");
     assert!(read.messages[0].response_required);
     assert_eq!(read.messages[0].body, "hi");
+}
+
+/// A waiter holding `/hook/wait` for `id`, as the hook listener records it.
+fn set_waiter(ctx: &MykoServerContext, id: &str) {
+    let watcher = WakeWatcher {
+        id: WakeWatcherId(Arc::from(id)),
+        until: chrono::Utc::now().timestamp_millis() + 60_000,
+    };
+    let ev = MEvent::from_item(&watcher, MEventType::SET, &Uuid::new_v4().to_string());
+    ctx.apply_event_batch(vec![ev])
+        .expect("apply WakeWatcher SET");
+}
+
+fn send_to_recipient(ctx: &MykoServerContext) -> SendMessageResult {
+    SendMessage {
+        response_required: false,
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "hi".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(ctx, Some("c-sender")))
+    .expect("send")
+}
+
+#[test]
+fn a_connected_channels_off_recipient_without_a_waiter_has_no_wake_path() {
+    // A Claude session's MCP shim without the channels flag is connected but
+    // can't wake the session, and the roster says `wake: none`.
+    let ctx = setup();
+    set_session(&ctx, &session("sender", Some("c-sender")));
+    let mut recipient = session("recipient", Some("c-recipient"));
+    recipient.channels_enabled = Some(false);
+    set_session(&ctx, &recipient);
+
+    let result = send_to_recipient(&ctx);
+    assert_eq!(result.live_push, LivePushStatus::Unavailable);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
+    assert_eq!(message_count(&ctx), 1);
+}
+
+#[test]
+fn a_recipient_with_a_waiter_expects_a_wake() {
+    // Connected without channels, or a pull row: either way a waiter holding
+    // `/hook/wait` will hand it the message.
+    for client in [Some("c-recipient"), None] {
+        let ctx = setup();
+        set_session(&ctx, &session("sender", Some("c-sender")));
+        let mut recipient = session("recipient", client);
+        recipient.channels_enabled = Some(false);
+        set_session(&ctx, &recipient);
+        set_waiter(&ctx, "recipient");
+
+        let result = send_to_recipient(&ctx);
+        assert_eq!(result.wake, WakeStatus::Expected, "client {client:?}");
+    }
 }
 
 #[test]

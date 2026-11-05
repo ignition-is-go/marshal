@@ -104,15 +104,13 @@ pub enum LivePushStatus {
 pub enum WakeStatus {
     /// The live push landed and marked the durable inbox copy read.
     NotNeeded,
-    /// The recipient is connected but does not render channel pushes (a Codex
-    /// bridge, or any channels-off harness), so the message will be picked up by
-    /// that connection's own wake path — typically starting an idle turn shortly
-    /// after this response. States that a path EXISTS, never that a wake
-    /// happened: the daemon still cannot observe the later `turn/start`.
+    /// No live push landed, but a waiter holds `/hook/wait` for the recipient,
+    /// so the waiter will hand it the message and start a turn: the roster's
+    /// `wake: waiting`. States that a path EXISTS, never that a wake happened.
     ///
-    /// This exists because `live_push: unavailable` alone cannot tell a sender
-    /// whether the recipient is dead or simply wakes by another route, which
-    /// reads as "live delivery is broken" for every healthy Codex session.
+    /// It exists because `live_push: unavailable` alone can't tell a sender
+    /// whether the recipient will wake or will only see the message at its next
+    /// turn. A live client alone doesn't count.
     Expected,
     /// Wake handling, if configured, happens after this response and is not
     /// observed by the sender.
@@ -231,21 +229,18 @@ impl CommandHandler for SendMessage {
             _ => LivePushStatus::Unavailable,
         };
         let delivered_live = live_push == LivePushStatus::Delivered;
-        // A recipient that is connected but cannot render channel pushes still
-        // has a wake path: its harness picks the message up from the inbox (the
-        // Codex bridge starts an idle turn). Distinguish that from a recipient
-        // with no usable connection — otherwise both report the same thing and a
-        // healthy Codex session looks unreachable.
+        // Report a wake path only when one exists: the same rule as the
+        // roster's `wake_state`. A live push that landed needs no wake.
+        // Otherwise the message wakes the recipient only through a waiter
+        // holding `/hook/wait` (a `WakeWatcher`).
         //
-        // Narrow deliberately: only the case where the push was SKIPPED because
-        // the live client cannot render. A `Failed` push means the binding was
-        // stale (the connection is gone), which is no wake path at all —
-        // claiming one there would repeat the "delivered_live lied" mistake in a
-        // new field.
-        //
-        // A pull row with a waiter holding `/hook/wait` also has a wake path:
-        // a Claude Code session without the channels flag, whose asyncRewake
-        // waiter starts a turn when mail arrives.
+        // A live client alone isn't a wake path. A Claude session's MCP shim
+        // without the channels flag is connected but can't wake it, and the
+        // roster calls that session `none`; reporting `expected` there told
+        // senders a session would wake when it wouldn't. Codex's MCP shim
+        // registers no session, so its rows are hook-owned and its bridge's
+        // wake leaves no trace here: those report `unobserved`, as the roster
+        // reports `none`.
         let waiting = || {
             ctx.exec_query(GetAllWakeWatchers {})
                 .unwrap_or_default()
@@ -256,9 +251,7 @@ impl CommandHandler for SendMessage {
         };
         let wake = match live_push {
             LivePushStatus::Delivered => WakeStatus::NotNeeded,
-            LivePushStatus::Unavailable if recipient.client_id.is_some() || waiting() => {
-                WakeStatus::Expected
-            }
+            _ if waiting() => WakeStatus::Expected,
             _ => WakeStatus::Unobserved,
         };
 
