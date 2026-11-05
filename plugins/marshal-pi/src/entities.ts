@@ -70,11 +70,15 @@ export type RoomMemberItem = RoomMember;
 export interface NotifyChannelMeta {
   source?: string;
   kind?: string;
+  message_id?: string;
   from_session?: string;
   from_nickname?: string;
   to_session?: string;
   response_required?: boolean;
+  /** A preview capped at `CONTEXT_BODY_MAX_CHARS`; see `body_truncated`. */
   body?: string;
+  /** Set when `body` was clipped. The durable message keeps the full body. */
+  body_truncated?: boolean;
   sent_at?: number;
 }
 
