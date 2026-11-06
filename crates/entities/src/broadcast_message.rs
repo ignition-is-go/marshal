@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::{
     message::{CONTEXT_BODY_MAX_CHARS, Message, MessageId, context_preview},
-    room::{GetAllRooms, Room, RoomId},
+    room::{GetAllRooms, Room, RoomId, render_room_name, resolve_room},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
@@ -98,16 +98,17 @@ impl CommandHandler for BroadcastMessage {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
         let sender = resolve_caller(&ctx, &sessions, self.as_session.as_ref())?;
 
-        // Resolve room.
+        // Resolve room. Callers may pass the room id (preferred) or the
+        // display name — auto-room ids carry a collision-resistant suffix
+        // that callers don't know, so a name reference must land the same
+        // room the auto-room saga created.
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
-        let room = rooms
-            .iter()
-            .find(|r| r.id == self.to_room_id)
+        let room = resolve_room(&rooms, self.to_room_id.0.as_ref())
             .ok_or_else(|| {
                 err(
                     &ctx,
                     &format!(
-                        "no room with id '{}' on the roster",
+                        "no room with id or name '{}' on the roster",
                         self.to_room_id.0.as_ref(),
                     ),
                 )
@@ -207,6 +208,10 @@ impl CommandHandler for BroadcastMessage {
                 continue;
             }
             let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
+            // The room name reaches the recipient's model context in the
+            // ping body and the live push — escape angle brackets so a
+            // room named `</channel>` cannot frame its own text as markup.
+            let room_label = render_room_name(&room.name);
             // Persist a direct Message so it lands in the target's inbox and is
             // pulled next turn regardless of live state. The body carries the
             // room context so the recipient knows it came from a broadcast. A
@@ -219,7 +224,7 @@ impl CommandHandler for BroadcastMessage {
                 to_session_id: Some(target.id.clone()),
                 to_room_id: None,
                 to_operator: to_operator.clone(),
-                body: format!("[@mention in {}] {}", room.name, self.body),
+                body: format!("[@mention in {room_label}] {}", self.body),
                 sent_at: now,
             };
             ctx.emit_set(&ping)?;
@@ -232,7 +237,7 @@ impl CommandHandler for BroadcastMessage {
             {
                 crate::send_message::push_to_client(
                     cid.0.as_ref(),
-                    mention_push_content(&from_nickname, &room.name, to_operator.as_deref()),
+                    mention_push_content(&from_nickname, &room_label, to_operator.as_deref()),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "mention",

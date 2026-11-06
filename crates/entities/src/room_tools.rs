@@ -19,7 +19,7 @@ use myko::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    room::{GetAllRooms, Room, RoomId, RoomKind, validate_room_description, validate_room_name},
+    room::{GetAllRooms, Room, RoomId, RoomKind, resolve_room, validate_room_description, validate_room_name},
     room_member::{GetAllRoomMembers, RoomMember, RoomMemberId},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
@@ -182,9 +182,7 @@ impl CommandHandler for LeaveRoom {
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
 
-        let room = rooms
-            .iter()
-            .find(|r| r.id.0.as_ref() == self.room || r.name == self.room)
+        let room = resolve_room(&rooms, &self.room)
             .ok_or_else(|| err(&ctx, &format!("no room matching '{}'", self.room)))?
             .clone();
 
