@@ -242,38 +242,33 @@ fn handle_session_start(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) 
         return HookOutcome::text(String::new());
     };
 
-    // Inject the agent's own marshal identity for context — recognising
-    // itself in the roster, addressing self-sends. Persists in context across
-    // the session; re-injected on resume. The `asSession` guidance is
-    // harness-specific: Claude reaches marshal through the shim, which resolves
-    // the sender from its WS connection, so the agent does NOT pass it. Codex's
-    // MCP server has no connection identity (Codex never tells it the session),
-    // so the Codex agent must name itself explicitly on every write.
-    // The agent's own handle — so it recognises itself in the roster and can say
-    // who it is. Authoritative (assigned handle, else the computed candidate the
-    // assigner would use), matching what peers see in marshal://roster.
-    let q = parse_query(query);
-    let nick = nickname_for(&cmd_ctx, &sid).unwrap_or_else(|_| marshal_entities::nickname(&sid));
-    // Assigned handles are wordlist pairs, but the nickname store takes any SET.
-    let nick = peer_attr(&nick);
-    let mut out = if q.get("harness").map(String::as_str) == Some("codex") {
-        format!(
-            "<marshal_session nickname=\"{nick}\" id=\"{sid}\">Use id as asSession on writes and \
-             ?asSession= on caller-relative reads.</marshal_session>\n"
-        )
-    } else {
-        // The `asyncRewake` hook `marshal-shim claude-hook wait` handles live
-        // delivery, so the agent has nothing to keep armed.
-        format!(
-            "<marshal_session nickname=\"{nick}\" id=\"{sid}\">Marshal tools attach this \
-             identity.</marshal_session>\n"
-        )
-    };
+    let mut out = session_identity(query, &cmd_ctx, &sid);
     let (inbox, ids) = surface_unread(&cmd_ctx, &sid);
     out.push_str(&inbox);
     HookOutcome {
         body: out,
         deferred_ack: (!ids.is_empty()).then(|| (SessionId(Arc::from(sid)), ids)),
+    }
+}
+
+/// Hook session_id is authoritative even when a fork inherited its parent's
+/// developer context and SessionStart never ran for the new thread.
+fn session_identity(query: &str, cmd_ctx: &CommandContext, sid: &str) -> String {
+    let q = parse_query(query);
+    let nick = nickname_for(cmd_ctx, sid).unwrap_or_else(|_| marshal_entities::nickname(sid));
+    let nick = peer_attr(&nick);
+    if q.get("harness").map(String::as_str) == Some("codex") {
+        format!(
+            "<marshal_session nickname=\"{nick}\" id=\"{sid}\">Current thread identity; \
+             supersedes inherited marshal_session blocks. Use id as asSession on writes and \
+             ?asSession= on caller-relative reads. Host-provided MCP thread metadata takes \
+             precedence over tool arguments.</marshal_session>\n"
+        )
+    } else {
+        format!(
+            "<marshal_session nickname=\"{nick}\" id=\"{sid}\">Marshal tools attach this \
+             identity.</marshal_session>\n"
+        )
     }
 }
 
@@ -410,8 +405,14 @@ fn handle_prompt_submit(query: &str, body: &[u8], ctx: &Arc<MykoServerContext>) 
     };
 
     let (inbox, ids) = surface_unread(&cmd_ctx, &sid);
+    let mut context = if parse_query(query).get("harness").map(String::as_str) == Some("codex") {
+        session_identity(query, &cmd_ctx, &sid)
+    } else {
+        String::new()
+    };
+    context.push_str(&inbox);
     HookOutcome {
-        body: inbox,
+        body: context,
         deferred_ack: (!ids.is_empty()).then(|| (SessionId(Arc::from(sid)), ids)),
     }
 }

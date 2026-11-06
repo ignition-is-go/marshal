@@ -292,17 +292,10 @@ async fn serve() -> Result<()> {
         .unwrap_or(false);
 
     let (session_id, git_branch) = if is_codex {
-        // Codex harness: the shim does NOT own identity. Codex never tells its
-        // MCP servers which session they serve (openai/codex#19937), and disk
-        // discovery is unreliable (spawn-vs-write race, resume, same-cwd
-        // concurrency) — inferring an id gets peer attribution wrong, which
-        // breaks reply routing. So under Codex the shim registers NO Session
-        // and never sends with an inferred id: the daemon's SessionStart hook
-        // registers the authoritative Session (Codex hands the hook the real
-        // id) and injects it, and the agent passes it back as `asSession` on
-        // write tools, which the shim forwards. This id is a local placeholder
-        // that is never published to the daemon (registration is skipped
-        // below), present only to satisfy the shared `ToolHost` shape.
+        // Codex requests bind identity from host-provided params._meta.threadId.
+        // One MCP process may serve multiple threads, so no process-wide Session
+        // is published. Older clients use asSession from the latest hook context.
+        // This placeholder only satisfies the shared ToolHost shape.
         (
             SessionId(std::sync::Arc::from(format!("codex-shim-{pid}"))),
             git_branch,
@@ -529,12 +522,12 @@ async fn serve() -> Result<()> {
     // Identity line is harness-aware. Under Codex the shim owns no session id
     // (its `session_id` here is a placeholder), so asserting it would tell the
     // agent the WRONG identity — defer to the authoritative <marshal_session>
-    // block the SessionStart hook injects. Claude's shim owns the real id.
+    // block the latest hook injects. Claude's shim owns the real id.
     let identity_line = if is_codex {
         format!(
-            "You are a marshal-connected Codex session in {cwd}. Use the id from \
+            "You are a marshal-connected Codex session in {cwd}. Use the id from the latest \
              <marshal_session> as `asSession` on writes and `?asSession=` on \
-             caller-relative reads."
+             caller-relative reads. Host-provided MCP thread metadata overrides inherited identity arguments."
         )
     } else {
         format!("You are marshal session {} in {cwd}.", session_id.0)
