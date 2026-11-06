@@ -14,8 +14,8 @@ use std::sync::Arc;
 use daemon::auto_rooms::DispatchAutoRooms;
 use hyphae::{Gettable, Materialize};
 use marshal_entities::{
-    AutoSource, JoinRoom, ROOM_DESCRIPTION_MAX_CHARS, ROOM_NAME_MAX_CHARS, Room, RoomKind, Session,
-    SessionId,
+    AutoSource, BroadcastMessage, JoinRoom, ReadMessages, ROOM_DESCRIPTION_MAX_CHARS,
+    ROOM_NAME_MAX_CHARS, Room, RoomId, RoomKind, RoomMember, Session, SessionId,
 };
 use myko::{
     command::{CommandContext, CommandHandler},
@@ -95,6 +95,33 @@ fn rooms(ctx: &MykoServerContext) -> Vec<Room> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn room_members(ctx: &MykoServerContext) -> Vec<RoomMember> {
+    ctx.registry
+        .get(RoomMember::ENTITY_NAME_STATIC)
+        .map(|s| {
+            s.entries()
+                .materialize()
+                .get()
+                .into_iter()
+                .filter_map(|(_, it)| downcast_item::<RoomMember>(&it))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An auto-room id is the display label plus `~` plus a 16-hex-character
+/// fingerprint of the original (pre-sanitization) value.
+fn assert_fingerprinted_id(case: &str, id: &str, label: &str) {
+    let Some(suffix) = id.strip_prefix(&format!("{label}~")) else {
+        panic!("{case}: id {id:?} is not the label plus a fingerprint suffix");
+    };
+    assert_eq!(suffix.len(), 16, "{case}: fingerprint is 16 hex chars");
+    assert!(
+        suffix.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{case}: fingerprint must be hex"
+    );
 }
 
 /// A daemon with one connected caller, ready to run `JoinRoom`.
@@ -390,8 +417,10 @@ fn auto_rooms_sanitize_project_and_operator_instead_of_rejecting() {
                 )
             })
             .unwrap_or_else(|| panic!("{case}: project auto-room still created"));
+        // The display name is the sanitized label; the id is the label plus
+        // a collision-resistant fingerprint of the ORIGINAL value.
         assert_eq!(room.name, *expected, "{case}");
-        assert_eq!(room.id.0.as_ref(), *expected, "{case}: id equals name");
+        assert_fingerprinted_id(case, room.id.0.as_ref(), expected);
         assert_clean(case, &room.name);
         let RoomKind::Auto {
             source: AutoSource::Project { basename },
@@ -399,7 +428,7 @@ fn auto_rooms_sanitize_project_and_operator_instead_of_rejecting() {
         else {
             unreachable!()
         };
-        assert_clean(case, basename);
+        assert_eq!(basename, project, "{case}: the source keeps the original value");
     }
 
     let ctx = setup();
@@ -410,14 +439,22 @@ fn auto_rooms_sanitize_project_and_operator_instead_of_rejecting() {
         .find(|r| r.id.0.starts_with("op:"))
         .expect("operator auto-room still created");
     assert_eq!(op.name, "op:maxb@example.com");
-    assert_eq!(op.id.0.as_ref(), "op:maxb@example.com");
+    assert_fingerprinted_id("operator", op.id.0.as_ref(), "op:maxb@example.com");
+    let RoomKind::Auto {
+        source: AutoSource::Operator { name },
+    } = &op.kind
+    else {
+        unreachable!()
+    };
+    assert_eq!(name, "max\n<b>@example.com", "the source keeps the original value");
 }
 
 #[test]
 fn auto_room_cap_keeps_the_prefix_and_counts_characters() {
-    // A multi-byte basename longer than the cap: the value is cut at
-    // `ROOM_NAME_MAX_CHARS - "project:".len()` characters, and the source
-    // carries exactly that cut value.
+    // A multi-byte basename longer than the cap: the display label is cut at
+    // `ROOM_NAME_MAX_CHARS - "project:".len()` characters, while the id
+    // carries a fingerprint of the full original value and the source
+    // carries exactly the original value.
     let ctx = setup();
     let long = "é".repeat(ROOM_NAME_MAX_CHARS * 2);
     dispatch_auto_rooms(&ctx, None, Some(&long));
@@ -431,7 +468,7 @@ fn auto_room_cap_keeps_the_prefix_and_counts_characters() {
         room.kind,
         RoomKind::Auto {
             source: AutoSource::Project {
-                basename: expected_value
+                basename: long
             }
         }
     );
@@ -447,7 +484,122 @@ fn auto_room_names_are_capped() {
         .find(|r| r.id.0.starts_with("project:"))
         .expect("project auto-room still created");
     assert_eq!(room.name.chars().count(), ROOM_NAME_MAX_CHARS);
-    assert_eq!(room.id.0.as_ref(), room.name);
+    assert!(
+        room.id.0.as_ref().starts_with(&format!("{}~", room.name)),
+        "the id extends the capped name with a fingerprint"
+    );
+}
+
+#[test]
+fn auto_rooms_keep_colliding_identities_apart() {
+    let ctx = setup();
+    // The reviewer's collision cases: two projects that sanitize to the same
+    // 56-character label but differ in the tail, and `a<b` vs `ab`.
+    let prefix = "p".repeat(56);
+    let projects: Vec<String> = vec![
+        format!("{prefix}-alpha"),
+        format!("{prefix}-bravo"),
+        "a<b".into(),
+        "ab".into(),
+    ];
+
+    for (i, project) in projects.iter().enumerate() {
+        let id = format!("sess-{i}");
+        let mut s = session(&id, &format!("c-{i}"));
+        s.project = Some(project.clone());
+        set_session(&ctx, &s);
+        DispatchAutoRooms {
+            session_id: id.clone(),
+        }
+        .execute(cmd_ctx(&ctx, "DispatchAutoRooms", None))
+        .expect("auto-room dispatch");
+    }
+
+    let project_rooms: Vec<Room> = rooms(&ctx)
+        .into_iter()
+        .filter(|r| r.id.0.starts_with("project:"))
+        .collect();
+    assert_eq!(
+        project_rooms.len(),
+        4,
+        "sanitized labels may coincide but must not merge: {project_rooms:?}"
+    );
+    let shared_label = format!("project:{prefix}");
+    assert_eq!(
+        project_rooms.iter().filter(|r| r.name == shared_label).count(),
+        2,
+        "the 56-char-prefix pair shares a display label"
+    );
+    let members = room_members(&ctx);
+    for project in &projects {
+        let room = project_rooms
+            .iter()
+            .find(|r| {
+                matches!(
+                    &r.kind,
+                    RoomKind::Auto {
+                        source: AutoSource::Project { basename },
+                    } if basename == project
+                )
+            })
+            .expect("the room for this identity exists");
+        let in_room = members
+            .iter()
+            .filter(|m| m.room_id == room.id)
+            .count();
+        assert_eq!(
+            in_room,
+            1,
+            "exactly this identity's session is in its room ({project:?})"
+        );
+    }
+}
+
+#[test]
+fn auto_rooms_are_addressable_by_their_display_name() {
+    let ctx = setup();
+    // Two sessions in the same project: the auto-room is their shared room.
+    let mut alice = session("alice", "c-alice");
+    alice.project = Some("acme-app".into());
+    set_session(&ctx, &alice);
+    let mut bob = session("bob", "c-bob");
+    bob.project = Some("acme-app".into());
+    set_session(&ctx, &bob);
+    for id in ["alice", "bob"] {
+        DispatchAutoRooms {
+            session_id: id.into(),
+        }
+        .execute(cmd_ctx(&ctx, "DispatchAutoRooms", None))
+        .expect("auto-room dispatch");
+    }
+
+    // Broadcast addressed to the DISPLAY NAME, not the fingerprinted id —
+    // the only form a caller has.
+    let result = BroadcastMessage {
+        to_room_id: RoomId(Arc::from("project:acme-app")),
+        response_required: false,
+        body: "hello room".into(),
+        as_session: Some(SessionId(Arc::from("alice"))),
+    }
+    .execute(cmd_ctx(&ctx, "BroadcastMessage", None))
+    .expect("broadcast by display name must resolve the auto-room");
+    assert_eq!(result.total, 1, "bob is the only other member");
+
+    // ...and the broadcast is readable back by display name.
+    let read = ReadMessages {
+        room: Some(RoomId(Arc::from("project:acme-app"))),
+        from: None,
+        to_session: None,
+        inbox: false,
+        sent: false,
+        unread: false,
+        since: None,
+        limit: None,
+        as_session: Some(SessionId(Arc::from("bob"))),
+    }
+    .execute(cmd_ctx(&ctx, "ReadMessages", None))
+    .expect("read by display name must resolve the auto-room");
+    assert_eq!(read.messages.len(), 1, "the broadcast must be visible by name");
 }
 
 #[test]

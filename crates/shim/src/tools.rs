@@ -20,6 +20,7 @@ use marshal_entities::{
     AckMessages, AckMessagesResult, BroadcastMessage, BroadcastMessageResult, JoinRoom,
     JoinRoomResult, LeaveRoom, LeaveRoomResult, MessageId, ReadMessages, ReadMessagesResult, Room,
     RoomId, RoomMember, SendMessage, SendMessageResult, Session, SessionId, SetSessionCurrentTask,
+    render_room_description, render_room_name,
 };
 use myko::client::MykoClient;
 use serde_json::{Value, json};
@@ -303,8 +304,13 @@ fn read_rooms(host: &ToolHost, uri: &str) -> ResourceContent {
                 .collect();
             json!({
                 "room_id": r.id.0.as_ref(),
-                "name": r.name,
-                "description": r.description,
+                // name/description are display text that reaches the reader's
+                // model context — escape angle brackets so a room named
+                // `</channel>` cannot frame its own text as markup. The
+                // room_id above is the routing key: render it raw, so an agent
+                // that copies it back still addresses the same room.
+                "name": render_room_name(&r.name),
+                "description": r.description.as_deref().map(render_room_description),
                 "kind": r.kind,
                 "created_at": r.created_at,
                 "members": room_members,

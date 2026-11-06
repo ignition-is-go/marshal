@@ -21,16 +21,17 @@ use serde::{Deserialize, Serialize};
 use crate::{
     message::{GetAllMessages, Message, MessageId},
     message_read::{GetAllMessageReads, MessageRead},
-    room::RoomId,
+    room::{GetAllRooms, Room, RoomId, resolve_room},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
 
 #[myko_command(ReadMessagesResult)]
 pub struct ReadMessages {
-    /// Filter to messages addressed to this room. Polymorphic id —
-    /// `everyone`, `host:*`, `op:*`, `project:*`, or any ad-hoc room
-    /// id.
+    /// Filter to messages addressed to this room. Polymorphic reference —
+    /// a room id (preferred) or a room display name (auto-room ids carry a
+    /// collision-resistant suffix callers don't know), e.g. `everyone`,
+    /// `op:*`, `project:*`, or any ad-hoc room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<RoomId>,
 
@@ -145,6 +146,17 @@ impl CommandHandler for ReadMessages {
             .map(|n| n.min(MAX_LIMIT))
             .unwrap_or(DEFAULT_LIMIT);
 
+        // A `room` reference may be the display name (auto-room ids carry a
+        // collision-resistant suffix callers don't know). Resolve it once —
+        // id first, then name — and filter on the resolved id.
+        let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
+        let room_filter: Option<RoomId> = self
+            .room
+            .as_ref()
+            .and_then(|reference| {
+                resolve_room(&rooms, reference.0.as_ref()).map(|room| room.id.clone())
+            });
+
         // Visibility + filter pipeline.
         let visible: Vec<&Arc<Message>> = messages
             .iter()
@@ -162,8 +174,8 @@ impl CommandHandler for ReadMessages {
                 is_sender || is_direct_recipient || is_room_member
             })
             // Apply user filters (AND).
-            .filter(|m| match &self.room {
-                Some(r) => m.to_room_id.as_ref() == Some(r),
+            .filter(|m| match &room_filter {
+                Some(rid) => m.to_room_id.as_ref() == Some(rid),
                 None => true,
             })
             .filter(|m| match &self.from {
