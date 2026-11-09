@@ -60,6 +60,10 @@ fn session(id: &str, client_id: &str) -> Session {
         host: None,
         project: None,
         channels_enabled: None,
+        // Upstream added these after this fixture was written (#140 acks_pushes, agent_id);
+        // the fork's own fixup patch carried acks_pushes, and the rebase onto v0.58.1 needs both.
+        acks_pushes: None,
+        agent_id: None,
     }
 }
 
