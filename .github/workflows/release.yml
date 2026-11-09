@@ -359,7 +359,7 @@ jobs:
         needs.publish-packages.result == 'success' &&
         needs.build-macos.result == 'success'
       }}
-    runs-on: ubuntu-latest
+    runs-on: {group: ci-untrusted, labels: [self-hosted, Linux, X64, ram-ge-16g, disk-ge-100g]}
     permissions:
       contents: read
     steps:

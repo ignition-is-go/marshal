@@ -130,7 +130,7 @@ jobs:
   # native Windows host as well: Windows Codex TUIs own isolated loopback
   # app-servers, so each bridge must wake only the thread its endpoint owns.
   windows-native-wake:
-    runs-on: windows-2025
+    runs-on: {group: ci-windows-ephemeral, labels: [self-hosted, Windows, X64, ram-ge-8g, disk-ge-100g]}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
