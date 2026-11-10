@@ -312,7 +312,7 @@ jobs:
   build-macos:
     needs: release
     if: needs.release.outputs.skip == 'false'
-    runs-on: ["self-hosted", "macOS", "ARM64", "site-lucid-lab", "ram-ge-24g", "disk-ge-100g"]
+    runs-on: ["self-hosted", "macOS", "ARM64", "site-lucid-lab", "ram-ge-24g"]
     timeout-minutes: 40
     permissions:
       contents: write
