@@ -253,9 +253,7 @@ async fn main() -> Result<()> {
         if let Signal::Value(value) = signal {
             let map: HashMap<String, String> = (**value)
                 .iter()
-                .map(|n: &Arc<SessionNickname>| {
-                    (n.id.0.as_ref().to_string(), n.nickname.clone())
-                })
+                .map(|n: &Arc<SessionNickname>| (n.id.0.as_ref().to_string(), n.nickname.clone()))
                 .collect();
             nicknames_state.update(|s| s.nicknames = map);
         }
@@ -539,41 +537,48 @@ fn draw_agents(snap: &StateInner, mode: GroupMode, area: Rect, frame: &mut ratat
         return;
     }
 
-    // Grouped mode: the bordered block is rendered bare and its
-    // interior split manually — a full-width label line per group,
-    // then a header-less sub-table of that group's members. Every
-    // sub-table shares AGENT_COLUMNS with the standalone header row
-    // at the top, so columns stay aligned across groups. Groups past
-    // the bottom edge get zero-height chunks from the layout solver
-    // and clip, same as overflow rows in the flat table.
+    // Spend rows in display order instead of letting equal-priority layout
+    // constraints shrink member tables to zero. A label is only rendered
+    // when at least one of its members also fits. In a one-line interior,
+    // prefer a session over the column header.
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let groups = group_sessions(snap, mode);
-    let mut constraints = vec![Constraint::Length(1)]; // column header
-    for (_, members) in &groups {
-        constraints.push(Constraint::Length(1)); // group label
-        constraints.push(Constraint::Length(members.len() as u16));
+    let mut y = inner.y;
+    let mut remaining = inner.height;
+    if remaining > 1 {
+        frame.render_widget(
+            Table::new(Vec::<Row>::new(), AGENT_COLUMNS).header(agents_header()),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y += 1;
+        remaining -= 1;
     }
-    let chunks = Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints(constraints)
-        .split(inner);
-
-    frame.render_widget(
-        Table::new(Vec::<Row>::new(), AGENT_COLUMNS).header(agents_header()),
-        chunks[0],
-    );
-    for (i, (label, members)) in groups.iter().enumerate() {
-        let label_line = Paragraph::new(Line::from(Span::styled(
-            format!("▾ {label} ({})", members.len()),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
-        frame.render_widget(label_line, chunks[1 + i * 2]);
-        let rows: Vec<Row> = members.iter().map(|s| session_row(snap, s, now)).collect();
-        frame.render_widget(Table::new(rows, AGENT_COLUMNS), chunks[2 + i * 2]);
+    for (label, members) in group_sessions(snap, mode) {
+        if remaining == 0 {
+            break;
+        }
+        if remaining > 1 {
+            let label_line = Paragraph::new(Line::from(Span::styled(
+                format!("▾ {label} ({})", members.len()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            frame.render_widget(label_line, Rect::new(inner.x, y, inner.width, 1));
+            y += 1;
+            remaining -= 1;
+        }
+        let visible = members.len().min(usize::from(remaining)) as u16;
+        let rows = members
+            .iter()
+            .take(usize::from(visible))
+            .map(|s| session_row(snap, s, now));
+        frame.render_widget(
+            Table::new(rows, AGENT_COLUMNS),
+            Rect::new(inner.x, y, inner.width, visible),
+        );
+        y += visible;
+        remaining -= visible;
     }
 }
 
@@ -849,5 +854,112 @@ fn format_duration(diff_ms: i64) -> String {
         format!("{}h", s / 3600)
     } else {
         format!("{}d", s / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marshal_entities::{RoomId, RoomMemberId, SessionId};
+    use ratatui::backend::TestBackend;
+
+    fn fixture() -> StateInner {
+        let mut snap = StateInner::default();
+        for i in 0..6 {
+            let id = format!("session{i}");
+            snap.nicknames.insert(id.clone(), format!("agent-{i}"));
+            snap.sessions.push(Arc::new(Session {
+                id: SessionId(id.clone().into()),
+                client_id: None,
+                pid: 1,
+                cwd: format!("/repo/{i}"),
+                git_branch: None,
+                current_task: None,
+                connected_at: 0,
+                last_activity_at: None,
+                last_tool: None,
+                last_tool_at: None,
+                operator: Some(format!("operator{i}")),
+                host: None,
+                project: Some(format!("project{i}")),
+                channels_enabled: None,
+            }));
+            for room in ["everyone".to_string(), format!("room{i}")] {
+                snap.members.push(Arc::new(RoomMember {
+                    id: RoomMemberId(RoomMember::make_id(&room, &id).into()),
+                    room_id: RoomId(room.into()),
+                    session_id: SessionId(id.clone().into()),
+                    joined_at: 0,
+                }));
+            }
+        }
+        snap.members.push(Arc::new(RoomMember {
+            id: RoomMemberId(RoomMember::make_id("room1", "session0").into()),
+            room_id: RoomId("room1".into()),
+            session_id: SessionId("session0".into()),
+            joined_at: 0,
+        }));
+        snap
+    }
+
+    fn render(snap: &StateInner, mode: GroupMode, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(160, height)).unwrap();
+        terminal
+            .draw(|frame| draw_agents(snap, mode, frame.area(), frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..160)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn small_grouped_pane_keeps_header_and_session_rows() {
+        let snap = fixture();
+        for mode in [
+            GroupMode::Identity,
+            GroupMode::Project,
+            GroupMode::Cwd,
+            GroupMode::Room,
+        ] {
+            let screen = render(&snap, mode, 8); // six interior lines
+            assert!(
+                screen.contains("conn") && screen.contains("name"),
+                "{screen}"
+            );
+            assert!(
+                screen.contains("agent-0") && screen.contains("session0"),
+                "{screen}"
+            );
+            assert!(screen.contains("agent-1"), "{screen}");
+            assert!(!screen.contains("agent-5"), "{screen}");
+        }
+    }
+
+    #[test]
+    fn room_render_repeats_members_and_skips_everyone() {
+        let screen = render(&fixture(), GroupMode::Room, 8);
+        assert!(screen.contains("▾ #room0 (1)"), "{screen}");
+        assert!(screen.contains("▾ #room1 (2)"), "{screen}");
+        assert_eq!(screen.matches("agent-0").count(), 2, "{screen}");
+        assert!(!screen.contains("#everyone"), "{screen}");
+    }
+
+    #[test]
+    fn tiny_grouped_pane_prioritizes_sessions() {
+        let snap = fixture();
+        for height in 3..=4 {
+            let screen = render(&snap, GroupMode::Project, height);
+            assert!(screen.contains("agent-0"), "{screen}");
+            assert!(!screen.contains("▾"), "{screen}");
+        }
+        for height in 0..=2 {
+            render(&snap, GroupMode::Project, height);
+        }
     }
 }
