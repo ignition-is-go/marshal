@@ -1,9 +1,35 @@
 # Browser authentication and agent compatibility
 
-This draft validates browser authentication and agent compatibility. The presence
-backend is pending a shared-package command namespace fix. Daemon package
-publication also needs a decision because the shared Pulse crates are private
-Git dependencies. Do not deploy this draft.
+This draft validates browser authentication and trusted legacy agent compatibility.
+It does not yet implement login for remote agent clients. Presence integration
+is pending the shared operation namespace fix. Do not deploy this draft.
+
+## Client authentication direction
+
+The normal Marshal clients must connect to a user-selected server and authenticate
+at runtime. Preserve the existing binary distribution and installation contract;
+do not introduce server-specific or tenant-specific authenticated builds.
+
+The proposed wiring is one credential profile per canonical server/resource:
+
+- A human logs in to the selected server through its advertised OAuth flow.
+  The client stores and refreshes credentials scoped to that server.
+- Shims, TUI, and one-shot hooks use the selected profile. Hooks never start an
+  interactive login during a tool call.
+- Unattended agents can use an explicitly configured service credential.
+- Native WebSocket, HTTP MCP, and hook requests all carry credentials when the
+  chosen server requires them. Switching servers must not forward another
+  server's credentials.
+- The server binds agent sessions to the verified principal. `asSession` selects
+  an agent session within that authority; it is not an authentication credential.
+- Trusted local/mesh operation remains an explicit server policy. Authentication
+  failures must not cause clients to retry anonymously against a remote server.
+
+Myko supplies credential providers, bearer transports, verification, and MCP OAuth
+server discovery/handoff. Marshal still needs the client login, endpoint-scoped
+credential storage/refresh, hook wiring, and authenticated agent-session policy.
+The details above are a design proposal; only server choice, runtime client auth,
+and preserving ordinary binary distribution are established user constraints.
 
 Marshal's operator UI uses Pulse login, the shared participant bubbles, and the
 shared profile menu. The default pane layout is Roster on the left at 61.8% and
