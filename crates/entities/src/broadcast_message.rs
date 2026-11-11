@@ -35,6 +35,7 @@ use crate::{
 };
 
 #[myko_command(BroadcastMessageResult)]
+#[myko_public]
 pub struct BroadcastMessage {
     pub to_room_id: RoomId,
     #[serde(default)]

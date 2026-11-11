@@ -38,6 +38,7 @@ use crate::{
 };
 
 #[myko_command(SendMessageResult)]
+#[myko_public]
 pub struct SendMessage {
     pub to_session_id: SessionId,
     #[serde(default)]

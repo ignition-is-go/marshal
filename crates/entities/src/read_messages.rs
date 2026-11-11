@@ -27,6 +27,7 @@ use crate::{
 };
 
 #[myko_command(ReadMessagesResult)]
+#[myko_public]
 pub struct ReadMessages {
     /// Filter to messages addressed to this room. Polymorphic id —
     /// `everyone`, `host:*`, `op:*`, `project:*`, or any ad-hoc room

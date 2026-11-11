@@ -105,6 +105,7 @@ pub fn App() -> impl IntoView {
     let base_css = BaseStyle::default().css();
     let mullion_css = PulseMullionStyle.css();
 
+    myko_leptos::provide_myko(&daemon_address());
     let auth = provide_auth("/auth/user".into());
     view! {
         <Title text="marshal"/>

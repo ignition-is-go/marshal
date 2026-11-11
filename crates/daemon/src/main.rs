@@ -84,18 +84,18 @@ async fn main() -> Result<()> {
     // the event table grows with session lifecycle, not with heartbeats
     // (lv-6731). Late-bound to the Postgres producer after build below.
     let session_filter = Arc::new(daemon::liveness_filter::SessionLivenessFilter::new());
-    let browser = match daemon::browser::BrowserConfig::from_env()? {
-        Some(config) => Some(daemon::browser::Browser::new(config).await?),
+    let auth = match daemon::auth::AuthSettings::from_env()? {
+        Some(settings) => Some(daemon::auth::PreparedAuth::new(settings).await?),
         None => None,
     };
-    let browser_lifetime = Arc::new(std::sync::Mutex::new(None));
-    let browser_owner = browser_lifetime.clone();
+    let auth_provider = auth.as_ref().map(daemon::auth::PreparedAuth::provider);
+    let auth_lifetime = Arc::new(std::sync::Mutex::new(None));
+    let auth_owner = auth_lifetime.clone();
     let mut builder = MykoServer::builder()
+        .with_auth_provider(auth_provider)
         .try_after_init(move |server| {
-            if let Some(browser) = browser {
-                log::info!("marshal browser listening on {}", browser.local_addr()?);
-                *browser_owner.lock().expect("browser lifetime lock") =
-                    Some(browser.install(server)?);
+            if let Some(auth) = auth {
+                *auth_owner.lock().expect("auth lifetime lock") = Some(auth.install(server)?);
             }
             Ok(())
         })
@@ -217,14 +217,14 @@ Options:
   -V, --version  Print the version and exit
 
 Environment:
-  MARSHAL_BROWSER_BIND     Protected browser HTTP/WS listen address (optional)
-  MARSHAL_UI_DIR           Built UI directory (required with browser listener)
   MARSHAL_AUTH_ISSUER      OIDC issuer
   MARSHAL_AUTH_CLIENT_ID   Browser OIDC client ID
   MARSHAL_AUTH_CLIENT_SECRET  Browser OIDC client secret
   MARSHAL_AUTH_ORIGIN      Public browser origin
   MARSHAL_AUTH_EMAIL_DOMAINS  Comma-separated admitted verified email domains
-  MARSHAL_AUTH_POSTGRES_URL  Persistent browser session database
+  MARSHAL_AUTH_POSTGRES_URL  Shared auth session database (or MYKO_POSTGRES_URL)
+  MARSHAL_AUTH_OAUTH_ISSUER  Optional Myko OAuth issuer URL
+  MARSHAL_AUTH_OAUTH_RESOURCE  Optional canonical MCP resource URL
   MARSHAL_BIND       WebSocket and MCP listen address (default {DEFAULT_BIND})
   MARSHAL_HOOK_BIND  HTTP hook listen address (default {DEFAULT_HOOK_BIND})
   MYKO_POSTGRES_URL  Postgres URL for durable state; without it the daemon

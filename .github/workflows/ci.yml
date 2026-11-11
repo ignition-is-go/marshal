@@ -128,6 +128,9 @@ jobs:
       - name: Verify signed browser login and existing agent compatibility
         working-directory: scripts/browser
         run: npm run verify
+      - name: Verify shared MCP OAuth handoff
+        working-directory: scripts/browser
+        run: MARSHAL_VERIFY_OAUTH=1 npm run verify
 
   # marshal-shim ships to Windows (ue_plugindev) as a cross-compiled
   # x86_64-pc-windows-gnu binary, but its Windows code is `#[cfg(windows)]`

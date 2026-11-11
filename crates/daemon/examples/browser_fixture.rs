@@ -1,12 +1,10 @@
-//! Disposable signed-issuer fixture. Uses the production browser listener and
-//! agent server with an explicitly in-memory auth store. Never a daemon mode.
+//! Disposable signed-issuer fixture using the production shared Myko integration.
 use anyhow::{Context, Result};
-use daemon::browser::Browser;
+use daemon::auth::PreparedAuth;
 use myko_server::{BlackholePersister, MykoServer};
 use pulse_auth::server::{AuthConfig, AuthState};
 use std::{
     net::SocketAddr,
-    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -25,27 +23,35 @@ async fn main() -> Result<()> {
         namespace: "marshal_test".into(),
     })
     .await?;
-    let browser = Browser::with_state(
-        required("MARSHAL_BROWSER_BIND")?.parse()?,
-        PathBuf::from(required("MARSHAL_UI_DIR")?),
-        auth,
-    )
-    .await?;
+    let oauth = match (
+        std::env::var("MARSHAL_AUTH_OAUTH_ISSUER"),
+        std::env::var("MARSHAL_AUTH_OAUTH_RESOURCE"),
+    ) {
+        (Ok(issuer), Ok(resource)) => Some(Arc::new(
+            myko_auth::oauth::OAuthServer::new(
+                &issuer,
+                &resource,
+                &required("MARSHAL_AUTH_ORIGIN")?,
+            )?
+            .with_dynamic_registration(),
+        )),
+        _ => None,
+    };
+    let prepared = PreparedAuth::from_state(auth, oauth);
     let lifetime = Arc::new(Mutex::new(None));
     let owner = lifetime.clone();
     let server = Arc::new(
         MykoServer::builder()
             .with_bind_addr(required("MARSHAL_BIND")?.parse::<SocketAddr>()?)
+            .with_auth_provider(prepared.provider())
             .with_default_persister(Arc::new(BlackholePersister))
             .try_after_init(move |server| {
-                *owner.lock().unwrap() = Some(browser.install(server)?);
+                *owner.lock().unwrap() = Some(prepared.install(server)?);
                 Ok(())
             })
             .build(),
     );
-    let listener = tokio::net::TcpListener::bind(required("MARSHAL_HOOK_BIND")?).await?;
-    let hook_address = listener.local_addr()?;
-    drop(listener);
+    let hook_address: SocketAddr = required("MARSHAL_HOOK_BIND")?.parse()?;
     let ctx = Arc::new(server.ctx());
     tokio::spawn(async move { daemon::http_listener::run(hook_address, ctx).await.unwrap() });
     tokio::spawn(daemon::cleanup::run_sweeper(server.ctx()));

@@ -133,7 +133,9 @@ mod tests {
 }
 
 #[myko_item]
+#[myko_public_queries(all)]
 #[myko::myko_external(SET, DEL)]
+#[myko_public_events(set, delete)]
 pub struct Session {
     /// WebSocket client this session is currently bound to. Auto-populated
     /// by the server from the WS connection — clients send the SET command
@@ -307,6 +309,9 @@ pub fn resolve_caller(
     sessions: &[Arc<Session>],
     as_session: Option<&SessionId>,
 ) -> Result<Arc<Session>, CommandError> {
+    if let Some(id) = as_session {
+        require_console_owner(ctx, id)?;
+    }
     if let Some(sid) = as_session {
         return sessions
             .iter()
@@ -354,6 +359,7 @@ fn caller_err(ctx: &CommandContext, message: &str) -> CommandError {
 }
 
 #[myko::myko_command]
+#[myko_public]
 pub struct RegisterSession {
     pub session: Session,
 }
@@ -366,40 +372,6 @@ impl myko::command::CommandHandler for RegisterSession {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(mut self, ctx: CommandContext) -> Result<(), CommandError> {
-        if let Some(identity) = ctx.req.auth.as_ref().and_then(|auth| auth.identity()) {
-            let user = identity.user_id.as_ref().ok_or_else(|| {
-                CommandError::new(
-                    ctx.req.tx.to_string(),
-                    ctx.command_id.to_string(),
-                    "Verified user required",
-                )
-            })?;
-            if !self
-                .session
-                .id
-                .0
-                .starts_with(&operator_console_prefix(user.as_ref()))
-            {
-                return Err(CommandError::new(
-                    ctx.req.tx.to_string(),
-                    ctx.command_id.to_string(),
-                    "Console belongs to another user",
-                ));
-            }
-            self.session.operator = identity
-                .claims
-                .get("verified_email")
-                .and_then(|email| email.as_str())
-                .map(str::to_owned);
-            self.session.pid = 0;
-            self.session.host = Some(HostInfo {
-                name: "web-console".into(),
-                os: "browser".into(),
-                arch: "wasm".into(),
-            });
-            self.session.agent_id = None;
-            self.session.channels_enabled = Some(false);
-        }
         self.session.client_id = ctx.client_id().map(|id| ClientId(Arc::from(id)));
         let id = self.session.id.clone();
         update_registered_session(&ctx, &id, |_| self.session)
@@ -413,6 +385,7 @@ pub fn update_registered_session(
     id: &SessionId,
     update: impl FnOnce(Option<&Session>) -> Session,
 ) -> Result<(), CommandError> {
+    require_console_owner(ctx, id)?;
     static REGISTRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = REGISTRATION
         .lock()
@@ -471,5 +444,117 @@ impl myko::command::CommandHandler for CloseOperatorConsole {
             ctx.emit_del(session.as_ref())?;
         }
         Ok(())
+    }
+}
+
+/// Identifies the reserved, verified operator namespace rather than legacy agents.
+pub fn is_operator_console(id: &str) -> bool {
+    id.starts_with("console-") && id.contains(':')
+}
+
+#[myko::myko_command]
+pub struct RegisterOperatorConsole {
+    pub session: Session,
+}
+impl myko::command::CommandHandler for RegisterOperatorConsole {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _ctx: CommandContext) -> Result<(), CommandError> {
+        unreachable!("operator registration is server-only")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(mut self, ctx: CommandContext) -> Result<(), CommandError> {
+        if let Some(identity) = ctx.req.auth.as_ref().and_then(|auth| auth.identity()) {
+            let user = identity.user_id.as_ref().ok_or_else(|| {
+                CommandError::new(
+                    ctx.req.tx.to_string(),
+                    ctx.command_id.to_string(),
+                    "Verified user required",
+                )
+            })?;
+            if !self
+                .session
+                .id
+                .0
+                .starts_with(&operator_console_prefix(user.as_ref()))
+            {
+                return Err(CommandError::new(
+                    ctx.req.tx.to_string(),
+                    ctx.command_id.to_string(),
+                    "Console belongs to another user",
+                ));
+            }
+            self.session.operator = identity
+                .claims
+                .get("verified_email")
+                .and_then(|email| email.as_str())
+                .map(str::to_owned);
+            self.session.pid = 0;
+            self.session.host = Some(HostInfo {
+                name: "web-console".into(),
+                os: "browser".into(),
+                arch: "wasm".into(),
+            });
+            self.session.agent_id = None;
+            self.session.channels_enabled = Some(false);
+        } else {
+            return Err(caller_err(&ctx, "Verified user required"));
+        }
+        self.session.client_id = ctx.client_id().map(|id| ClientId(Arc::from(id)));
+        let id = self.session.id.clone();
+        update_registered_session(&ctx, &id, |_| self.session)
+    }
+}
+
+// The schema generates these commands. Declare just the legacy client contract.
+macro_rules! public_session_commands {
+    ($($command:ty),* $(,)?) => { $(
+        #[cfg(not(target_arch = "wasm32"))]
+        myko::submit! { myko::auth::public_access::PublicOperationRegistration {
+            kind: myko::auth::OperationKind::Command,
+            operation: <$command as myko::command::CommandIdStatic>::COMMAND_ID,
+        } }
+    )* };
+}
+public_session_commands!(
+    SetSessionCurrentTask,
+    SetSessionGitBranch,
+    SetSessionSessionName,
+    SetSessionActivity,
+    SetSessionLastActivityAt,
+    SetSessionLastTool,
+    SetSessionLastToolAt,
+    DeleteSession
+);
+
+#[cfg(not(target_arch = "wasm32"))]
+myko::submit! { myko::auth::public_access::PublicOperationRegistration {
+    kind: myko::auth::OperationKind::Query,
+    operation: "GetAllClients",
+} }
+
+fn require_console_owner(ctx: &CommandContext, id: &SessionId) -> Result<(), CommandError> {
+    if !is_operator_console(id.0.as_ref()) {
+        return Ok(());
+    }
+    let owns = ctx
+        .req
+        .auth
+        .as_ref()
+        .and_then(|session| session.identity())
+        .and_then(|identity| identity.user_id.as_ref())
+        .is_some_and(|user| id.0.starts_with(&operator_console_prefix(user.as_ref())));
+    if owns {
+        Ok(())
+    } else {
+        Err(caller_err(ctx, "Verified console belongs to another user"))
+    }
+}
+
+// Myko clients subscribe automatically to discover peer-server addresses.
+#[cfg(not(target_arch = "wasm32"))]
+myko::submit! {
+    myko::auth::public_access::PublicOperationRegistration {
+        kind: myko::auth::OperationKind::Query,
+        operation: "GetPeerServers",
     }
 }

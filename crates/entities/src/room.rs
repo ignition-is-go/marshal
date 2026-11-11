@@ -18,6 +18,7 @@ use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, Re
 use serde::{Deserialize, Serialize};
 
 #[myko_item]
+#[myko_public_queries(all)]
 pub struct Room {
     /// Display name. For auto-rooms, equal to `id`. For ad-hoc rooms,
     /// the user-supplied label (which `id` is slugified from).

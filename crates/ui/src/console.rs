@@ -13,8 +13,8 @@
 use leptos::prelude::*;
 use marshal_entities::{
     BroadcastMessage, BroadcastMessageResult, CloseOperatorConsole, GetAllRooms, GetAllSessions,
-    HostInfo, JoinRoom, JoinRoomResult, LivePushStatus, RegisterSession, RoomId, SendMessage,
-    SendMessageResult, Session, SessionId, WakeStatus, operator_console_prefix,
+    HostInfo, JoinRoom, JoinRoomResult, LivePushStatus, RegisterOperatorConsole, RoomId,
+    SendMessage, SendMessageResult, Session, SessionId, WakeStatus, operator_console_prefix,
 };
 use myko_leptos::{CommandSink, use_command_sink};
 use pulse_leptos_ui::{Button, ButtonVariant, EmptyState, Field, Select};
@@ -80,8 +80,8 @@ impl Console {
     fn register(&self) {
         let error = self.registration_error;
         let online = self.online;
-        self.sink.dispatch::<RegisterSession, ()>(
-            RegisterSession {
+        self.sink.dispatch::<RegisterOperatorConsole, ()>(
+            RegisterOperatorConsole {
                 session: self.session(),
             },
             move |result| {
