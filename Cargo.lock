@@ -3295,6 +3295,7 @@ dependencies = [
  "notify-debouncer-mini",
  "pulse-auth",
  "pulse-multi-user",
+ "reqwest 0.12.28",
  "serde_json",
  "tempfile",
  "tokio",

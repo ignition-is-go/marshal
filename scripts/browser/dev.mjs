@@ -48,7 +48,7 @@ try {
   }
   if (!ready) throw new Error('Dev daemon did not become ready');
   await writeFile(resolve(artifacts,'server.json'),JSON.stringify(identity,null,2));
-  console.log(`Marshal dev ready: ${identity.origin}\nAuth: ${identity.mode}\nDatabase: dedicated local Postgres\nPID: ${identity.pid}\nOnly loopback listeners are exposed. Use an SSH port forward for another machine.`);
+  console.log(`Marshal dev ready: ${identity.origin}\nAuth: ${identity.mode}\nDatabase: dedicated local Postgres\nPID: ${identity.pid}\nMyko and hook listeners remain on loopback.`);
   if (fixture) console.log('Test accounts: Alice and Bob. This does not validate the real identity provider.');
 } catch (error) {
   await stop();

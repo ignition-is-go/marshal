@@ -19,6 +19,7 @@ use pulse_multi_user::{AccessPolicy, RoomGrant, RoomId, RoomRegistration, RoomSe
 pub struct AuthSettings {
     config: AuthConfig,
     postgres: String,
+    ca_cert: Option<String>,
     oauth: Option<Arc<OAuthServer>>,
 }
 impl AuthSettings {
@@ -79,6 +80,7 @@ impl AuthSettings {
         Ok(Some(Self {
             config,
             postgres,
+            ca_cert: get("MARSHAL_AUTH_CA_CERT"),
             oauth,
         }))
     }
@@ -90,7 +92,25 @@ pub struct PreparedAuth {
 }
 impl PreparedAuth {
     pub async fn new(settings: AuthSettings) -> Result<Self> {
-        let auth = AuthState::new(settings.config, &settings.postgres).await?;
+        let auth = if let Some(path) = settings.ca_cert {
+            let certificate = reqwest::Certificate::from_pem(
+                &std::fs::read(&path)
+                    .with_context(|| format!("read auth CA certificate {path}"))?,
+            )?;
+            let http = reqwest::Client::builder()
+                .https_only(settings.config.issuer.starts_with("https://"))
+                .add_root_certificate(certificate)
+                .build()?;
+            AuthState::new_with_http_client(
+                settings.config,
+                &settings.postgres,
+                Default::default(),
+                http,
+            )
+            .await?
+        } else {
+            AuthState::new(settings.config, &settings.postgres).await?
+        };
         Ok(Self::from_state(auth, settings.oauth))
     }
     pub fn from_state(auth: Arc<AuthState>, oauth: Option<Arc<OAuthServer>>) -> Self {

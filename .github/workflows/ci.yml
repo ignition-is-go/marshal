@@ -89,24 +89,10 @@ jobs:
         run: python3 scripts/ci/report_resources.py
 
   browser-auth:
-    runs-on: {group: ci-trusted-linux-persistent, labels: [self-hosted, Linux, X64, ram-ge-16g, disk-ge-100g]}
+    runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
     timeout-minutes: 30
     env:
       NO_COLOR: "true"
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_DB: marshal_dev
-          POSTGRES_USER: marshal_dev
-          POSTGRES_PASSWORD: marshal-dev-only
-        ports:
-          - 5432/tcp
-        options: >-
-          --health-cmd "pg_isready -U marshal_dev -d marshal_dev"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Authenticate private Cargo dependencies
@@ -145,12 +131,27 @@ jobs:
       - name: Verify shared MCP OAuth handoff
         working-directory: scripts/browser
         run: MARSHAL_VERIFY_OAUTH=1 npm run verify
+      - name: Start isolated Postgres for daemon restart validation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql postgresql-client libpq-dev
+          pg_bin=$(pg_config --bindir)
+          pg_data=$(mktemp -d "$RUNNER_TEMP/marshal-postgres.XXXXXX")
+          pg_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+          "$pg_bin/initdb" -D "$pg_data" --auth=trust --username=marshal_dev --no-locale
+          echo "MARSHAL_DEV_PG_BIN=$pg_bin" >> "$GITHUB_ENV"
+          echo "MARSHAL_DEV_PG_DATA=$pg_data" >> "$GITHUB_ENV"
+          "$pg_bin/pg_ctl" -D "$pg_data" -o "-h 127.0.0.1 -p $pg_port -k $pg_data" -l "$pg_data/server.log" -w start
+          "$pg_bin/createdb" -h 127.0.0.1 -p "$pg_port" -U marshal_dev marshal_dev
+          echo "MYKO_POSTGRES_URL=postgres://marshal_dev@127.0.0.1:$pg_port/marshal_dev" >> "$GITHUB_ENV"
       - name: Verify actual daemon with Postgres and restart
         working-directory: scripts/browser
         env:
-          MYKO_POSTGRES_URL: postgres://marshal_dev:marshal-dev-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/marshal_dev
           MARSHAL_VERIFY_RESTART: "1"
         run: npm run verify
+      - name: Stop isolated dev Postgres
+        if: always() && env.MARSHAL_DEV_PG_DATA != ''
+        run: '"$MARSHAL_DEV_PG_BIN/pg_ctl" -D "$MARSHAL_DEV_PG_DATA" -m fast -w stop'
 
   # marshal-shim ships to Windows (ue_plugindev) as a cross-compiled
   # x86_64-pc-windows-gnu binary, but its Windows code is `#[cfg(windows)]`

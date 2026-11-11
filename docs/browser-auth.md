@@ -46,6 +46,7 @@ Partial configuration fails startup.
 | `MARSHAL_AUTH_ORIGIN` | Exact browser origin |
 | `MARSHAL_AUTH_EMAIL_DOMAINS` | Comma-separated admitted verified domains |
 | `MARSHAL_AUTH_POSTGRES_URL` | Session database; falls back to `MYKO_POSTGRES_URL` |
+| `MARSHAL_AUTH_CA_CERT` | Optional PEM root for a private development identity provider; default public roots remain trusted |
 | `MARSHAL_AUTH_OAUTH_ISSUER` | Optional Myko OAuth authorization server issuer |
 | `MARSHAL_AUTH_OAUTH_RESOURCE` | Optional protected MCP resource; requires OAuth issuer |
 
@@ -121,9 +122,18 @@ This requires the dedicated database URL and the built daemon. The check exercis
 browser login, two-user presence, old agent compatibility, graceful daemon stop,
 new-process startup, durable console/message replay, browser session restoration,
 presence reconnect, and logout revocation after restart. It never resets the live
-Marshal daemon. CI runs this check against its own Postgres service.
+Marshal daemon. CI runs this check against its own temporary Postgres cluster.
 
 Before production rollout, validate the dedicated dev OAuth application with real
 sign-in, the intended HTTPS origin and ingress, MCP host consent, and the existing
 agent launchers. Session expiry and the final release/package artifact remain
 separate acceptance checks. A local signed-issuer pass does not satisfy those gates.
+
+For a mesh-accessible dev URL, keep the local launcher on loopback behind a
+separate HTTPS proxy. Set `MARSHAL_DEV_ORIGIN` to that HTTPS origin so the test
+issuer and callback use the address opened in the browser. When the dev issuer
+uses a private CA, set `MARSHAL_AUTH_CA_CERT` to its PEM root for the daemon and
+`NODE_EXTRA_CA_CERTS` for the launcher. The daemon uses the shared Pulse
+`AuthState::new_with_http_client` integration with an additional trusted root;
+certificate verification and HTTPS-only issuer requests remain enabled. No auth
+routes or token implementation are added to the proxy.

@@ -54,8 +54,8 @@ export async function startDevRuntime({ fixture = true, binary: configuredBinary
     socket.on('close', () => upstream.destroy());
   });
   await new Promise((done) => proxy.listen(port, '127.0.0.1', done));
-  const origin = !fixture && process.env.MARSHAL_AUTH_ORIGIN ? process.env.MARSHAL_AUTH_ORIGIN : `http://127.0.0.1:${proxy.address().port}`;
-  if (fixture) issuer = await startOidcFixture({ appOrigin: origin, internalIssuer: true });
+  const origin = process.env.MARSHAL_DEV_ORIGIN ?? (!fixture && process.env.MARSHAL_AUTH_ORIGIN ? process.env.MARSHAL_AUTH_ORIGIN : `http://127.0.0.1:${proxy.address().port}`);
+  if (fixture) issuer = await startOidcFixture({ appOrigin: origin, internalIssuer: !process.env.MARSHAL_DEV_ORIGIN });
   const target = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {cwd: resolve(import.meta.dirname, '../..'), encoding: 'utf8'})).target_directory;
   const binary = configuredBinary ?? process.env.MARSHAL_BROWSER_FIXTURE ?? resolve(target, process.env.MARSHAL_VERIFY_RESTART ? 'debug/marshal-daemon' : 'debug/examples/browser_fixture');
   const dist = resolve(import.meta.dirname, process.env.MARSHAL_FRONTEND_DIST ?? '../../crates/ui/dist');
