@@ -156,6 +156,78 @@ impl GroupMode {
     }
 }
 
+/// Scroll offsets are independent for each pane and clamped on every render,
+/// including when the terminal resizes or the subscribed data shrinks.
+#[derive(Default)]
+struct PaneScroll {
+    offset: usize,
+    page_size: usize,
+    max_offset: usize,
+    focused: bool,
+}
+
+impl PaneScroll {
+    fn update(&mut self, max_offset: usize, page_size: usize) {
+        self.max_offset = max_offset;
+        self.page_size = page_size.max(1);
+        self.offset = self.offset.min(max_offset);
+    }
+
+    fn title(&self) -> String {
+        if self.max_offset > 0 {
+            format!(" [{} / {}] ", self.offset + 1, self.max_offset + 1)
+        } else {
+            String::new()
+        }
+    }
+
+    fn border_style(&self) -> Style {
+        Style::default().fg(if self.focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        })
+    }
+}
+
+#[derive(Default)]
+struct ViewState {
+    group_mode: GroupMode,
+    live_only: bool,
+    focus: usize, // agents, rooms, messages
+    panes: [PaneScroll; 3],
+}
+
+impl ViewState {
+    fn key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Tab => self.focus = (self.focus + 1) % 3,
+            KeyCode::BackTab => self.focus = (self.focus + 2) % 3,
+            KeyCode::Char('g') => {
+                self.group_mode = self.group_mode.next();
+                self.panes[0].offset = 0;
+            }
+            KeyCode::Char('f') => {
+                self.live_only = !self.live_only;
+                self.panes[0].offset = 0;
+            }
+            key => {
+                let pane = &mut self.panes[self.focus];
+                pane.offset = match key {
+                    KeyCode::Up => pane.offset.saturating_sub(1),
+                    KeyCode::Down => pane.offset.saturating_add(1),
+                    KeyCode::PageUp => pane.offset.saturating_sub(pane.page_size),
+                    KeyCode::PageDown => pane.offset.saturating_add(pane.page_size),
+                    KeyCode::Home => 0,
+                    KeyCode::End => pane.max_offset,
+                    _ => pane.offset,
+                }
+                .min(pane.max_offset);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -309,11 +381,10 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
     let result = (|| -> Result<()> {
-        let mut group_mode = GroupMode::default();
-        let mut live_only = false;
+        let mut view = ViewState::default();
         loop {
             let snap = state.snapshot();
-            terminal.draw(|frame| draw(&snap, group_mode, live_only, frame.area(), frame))?;
+            terminal.draw(|frame| draw(&snap, &mut view, frame.area(), frame))?;
             if event::poll(FRAME_POLL)?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
@@ -324,9 +395,7 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
                     }
-                    KeyCode::Char('g') => group_mode = group_mode.next(),
-                    KeyCode::Char('f') => live_only = !live_only,
-                    _ => {}
+                    _ => view.key(key.code),
                 }
             }
         }
@@ -339,13 +408,7 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
     result
 }
 
-fn draw(
-    snap: &StateInner,
-    group_mode: GroupMode,
-    live_only: bool,
-    area: Rect,
-    frame: &mut ratatui::Frame,
-) {
+fn draw(snap: &StateInner, view: &mut ViewState, area: Rect, frame: &mut ratatui::Frame) {
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
@@ -357,11 +420,21 @@ fn draw(
         ])
         .split(area);
 
+    for (i, pane) in view.panes.iter_mut().enumerate() {
+        pane.focused = i == view.focus;
+    }
     draw_header(snap, chunks[0], frame);
-    draw_agents(snap, group_mode, live_only, chunks[1], frame);
-    draw_rooms(snap, chunks[2], frame);
-    draw_messages(snap, chunks[3], frame);
-    draw_status(snap, group_mode, live_only, chunks[4], frame);
+    draw_agents(
+        snap,
+        view.group_mode,
+        view.live_only,
+        &mut view.panes[0],
+        chunks[1],
+        frame,
+    );
+    draw_rooms(snap, &mut view.panes[1], chunks[2], frame);
+    draw_messages(snap, &mut view.panes[2], chunks[3], frame);
+    draw_status(snap, view.group_mode, view.live_only, chunks[4], frame);
 }
 
 fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
@@ -557,6 +630,7 @@ fn draw_agents(
     snap: &StateInner,
     mode: GroupMode,
     live_only: bool,
+    scroll: &mut PaneScroll,
     area: Rect,
     frame: &mut ratatui::Frame,
 ) {
@@ -572,13 +646,34 @@ fn draw_agents(
     } else {
         format!(" Agents ({count}) · by {}{filter} ", mode.label())
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let interior_height = area.height.saturating_sub(2);
+    let capacity = usize::from(interior_height.saturating_sub(u16::from(interior_height > 1)));
+    // Group labels consume variable space, so the last session is a valid
+    // starting position. Flat tables can clamp to a full final page.
+    let groups = group_sessions(snap, mode, live_only, now);
+    let total = groups
+        .iter()
+        .map(|(_, members)| members.len())
+        .sum::<usize>();
+    let max_offset = if mode == GroupMode::None {
+        total.saturating_sub(capacity.max(1))
+    } else if total + groups.len() <= capacity {
+        0
+    } else {
+        total.saturating_sub(1)
+    };
+    scroll.update(max_offset, capacity);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(scroll.border_style())
+        .title(format!("{title}{}", scroll.title()));
 
     if mode == GroupMode::None {
         let rows: Vec<Row> = snap
             .sessions
             .iter()
             .filter(|s| !live_only || session_is_present(snap, s, now))
+            .skip(scroll.offset)
             .map(|s| session_row(snap, s, now))
             .collect();
         let table = Table::new(rows, AGENT_COLUMNS)
@@ -604,13 +699,22 @@ fn draw_agents(
         y += 1;
         remaining -= 1;
     }
-    for (label, members) in group_sessions(snap, mode, live_only, now) {
+    let mut skip = scroll.offset;
+    let mut rendered_members = 0;
+    for (label, members) in groups {
+        if skip >= members.len() {
+            skip -= members.len();
+            continue;
+        }
+        let group_size = members.len();
+        let members = &members[skip..];
+        skip = 0;
         if remaining == 0 {
             break;
         }
         if remaining > 1 {
             let label_line = Paragraph::new(Line::from(Span::styled(
-                format!("▾ {label} ({})", members.len()),
+                format!("▾ {label} ({group_size})"),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -630,7 +734,9 @@ fn draw_agents(
         );
         y += visible;
         remaining -= visible;
+        rendered_members += usize::from(visible);
     }
+    scroll.page_size = rendered_members.max(1);
 }
 
 /// Replace the user's home directory in `cwd` with `~` so the column
@@ -647,7 +753,7 @@ fn short_cwd(cwd: &str) -> String {
     cwd.to_string()
 }
 
-fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+fn draw_rooms(snap: &StateInner, scroll: &mut PaneScroll, area: Rect, frame: &mut ratatui::Frame) {
     let header = Row::new(vec![
         RowCell::from("kind"),
         RowCell::from("room"),
@@ -672,8 +778,11 @@ fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         (auto_rank, everyone_first, r.id.0.as_ref().to_string())
     });
 
+    let capacity = usize::from(area.height.saturating_sub(3));
+    scroll.update(sorted.len().saturating_sub(capacity.max(1)), capacity);
     let rows: Vec<Row> = sorted
         .iter()
+        .skip(scroll.offset)
         .map(|r| {
             let count = snap.members.iter().filter(|m| m.room_id == r.id).count();
             let kind_label = match &r.kind {
@@ -708,7 +817,8 @@ fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Rooms ({}) ", snap.rooms.len())),
+            .border_style(scroll.border_style())
+            .title(format!(" Rooms ({}) {}", snap.rooms.len(), scroll.title())),
     );
     frame.render_widget(table, area);
 }
@@ -758,12 +868,23 @@ fn session_label(nicknames: &HashMap<String, String>, session_id: &str) -> Strin
         .unwrap_or_else(|| short_sid(session_id))
 }
 
-fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+fn draw_messages(
+    snap: &StateInner,
+    scroll: &mut PaneScroll,
+    area: Rect,
+    frame: &mut ratatui::Frame,
+) {
     let now = now_ms();
 
+    let capacity = usize::from(area.height.saturating_sub(2));
+    scroll.update(
+        snap.messages.len().saturating_sub(capacity.max(1)),
+        capacity,
+    );
     let lines: Vec<Line> = snap
         .messages
         .iter()
+        .skip(scroll.offset)
         .map(|m| {
             // Broadcasts (to_room_id set) render with a `#` prefix on the
             // recipient and a brighter arrow so the eye picks them out
@@ -818,7 +939,12 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let p = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Recent messages ({}) ", snap.messages.len())),
+            .border_style(scroll.border_style())
+            .title(format!(
+                " Recent messages ({}) {}",
+                snap.messages.len(),
+                scroll.title()
+            )),
     );
     frame.render_widget(p, area);
 }
@@ -847,7 +973,10 @@ fn draw_status(
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw("  "),
-        Span::styled("q quit", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "Tab pane  ↑↓/PgUp/PgDn scroll  Home/End  q quit",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
     frame.render_widget(p, area);
 }
@@ -971,7 +1100,16 @@ mod tests {
     fn render_filtered(snap: &StateInner, mode: GroupMode, height: u16, live_only: bool) -> String {
         let mut terminal = Terminal::new(TestBackend::new(160, height)).unwrap();
         terminal
-            .draw(|frame| draw_agents(snap, mode, live_only, frame.area(), frame))
+            .draw(|frame| {
+                draw_agents(
+                    snap,
+                    mode,
+                    live_only,
+                    &mut PaneScroll::default(),
+                    frame.area(),
+                    frame,
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
@@ -1088,6 +1226,143 @@ mod tests {
             session_presence(&snap, &snap.sessions[0], now),
             Presence::Idle
         );
+    }
+
+    fn render_pane(
+        snap: &StateInner,
+        pane: usize,
+        mode: GroupMode,
+        scroll: &mut PaneScroll,
+        height: u16,
+    ) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(160, height)).unwrap();
+        terminal
+            .draw(|frame| match pane {
+                0 => draw_agents(snap, mode, false, scroll, frame.area(), frame),
+                1 => draw_rooms(snap, scroll, frame.area(), frame),
+                _ => draw_messages(snap, scroll, frame.area(), frame),
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn every_overflow_agent_is_reachable_in_every_group_mode() {
+        let snap = fixture();
+        for mode in [
+            GroupMode::None,
+            GroupMode::Identity,
+            GroupMode::Project,
+            GroupMode::Cwd,
+            GroupMode::Room,
+        ] {
+            let mut scroll = PaneScroll::default();
+            let first = render_pane(&snap, 0, mode, &mut scroll, 6);
+            assert!(
+                first.contains("agent-0") && !first.contains("agent-5"),
+                "{first}"
+            );
+            let mut screens = String::new();
+            for offset in 0..=scroll.max_offset {
+                scroll.offset = offset;
+                screens.push_str(&render_pane(&snap, 0, mode, &mut scroll, 6));
+            }
+            for i in 0..6 {
+                assert!(screens.contains(&format!("agent-{i}")));
+            }
+            scroll.offset = usize::MAX;
+            let end = render_pane(&snap, 0, mode, &mut scroll, 6);
+            assert!(end.contains("agent-5"), "{end}");
+            if mode == GroupMode::Room {
+                assert!(end.contains("#room5"), "{end}");
+            }
+            render_pane(&StateInner::default(), 0, mode, &mut scroll, 6);
+            assert_eq!(scroll.offset, 0);
+        }
+    }
+
+    #[test]
+    fn rooms_and_messages_scroll_to_last_row_and_clamp_after_resize() {
+        use marshal_entities::MessageId;
+        let mut snap = fixture();
+        for i in 0..8 {
+            snap.rooms.push(Arc::new(Room {
+                id: RoomId(format!("room-{i}").into()),
+                name: format!("room-name-{i}"),
+                description: None,
+                kind: RoomKind::Adhoc,
+                created_at: 0,
+            }));
+            snap.messages.push(Arc::new(Message {
+                id: MessageId(format!("message-{i}").into()),
+                from_session_id: SessionId("session0".into()),
+                to_session_id: Some(SessionId("session1".into())),
+                to_room_id: None,
+                to_operator: None,
+                body: format!("message-body-{i}"),
+                sent_at: 0,
+            }));
+        }
+        for (pane, first_label, last_label) in [
+            (1, "room-name-0", "room-name-7"),
+            (2, "message-body-0", "message-body-7"),
+        ] {
+            let mut scroll = PaneScroll::default();
+            let first = render_pane(&snap, pane, GroupMode::None, &mut scroll, 6);
+            assert!(
+                first.contains(first_label) && !first.contains(last_label),
+                "{first}"
+            );
+            scroll.offset = scroll.max_offset;
+            let last = render_pane(&snap, pane, GroupMode::None, &mut scroll, 6);
+            assert!(
+                last.contains(last_label) && !last.contains(first_label),
+                "{last}"
+            );
+            let expanded = render_pane(&snap, pane, GroupMode::None, &mut scroll, 16);
+            assert_eq!(scroll.offset, 0);
+            assert!(
+                expanded.contains(first_label) && expanded.contains(last_label),
+                "{expanded}"
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_scrolls_only_focused_pane_and_resets_agent_view_changes() {
+        let mut view = ViewState::default();
+        for pane in &mut view.panes {
+            pane.update(20, 5);
+        }
+        view.key(KeyCode::Down);
+        assert_eq!(view.panes[0].offset, 1);
+        view.key(KeyCode::Tab);
+        view.key(KeyCode::PageDown);
+        assert_eq!(view.panes[1].offset, 5);
+        assert_eq!(view.panes[0].offset, 1);
+        view.key(KeyCode::End);
+        assert_eq!(view.panes[1].offset, 20);
+        view.key(KeyCode::Down);
+        assert_eq!(view.panes[1].offset, 20);
+        view.key(KeyCode::PageUp);
+        assert_eq!(view.panes[1].offset, 15);
+        view.key(KeyCode::Home);
+        view.key(KeyCode::Up);
+        assert_eq!(view.panes[1].offset, 0);
+        view.key(KeyCode::BackTab);
+        view.key(KeyCode::Char('g'));
+        assert_eq!(view.panes[0].offset, 0);
+        view.key(KeyCode::Down);
+        view.key(KeyCode::Char('f'));
+        assert_eq!(view.panes[0].offset, 0);
+        view.key(KeyCode::BackTab);
+        assert_eq!(view.focus, 2);
     }
 
     #[test]
