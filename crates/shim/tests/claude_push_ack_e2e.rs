@@ -419,7 +419,7 @@ fn ordinary_shim_preserves_hook_metadata_and_exposes_it_in_resources() {
             let actual = if uri.ends_with("whoami") {
                 &content["agent_id"]
             } else {
-                &content["sessions"]
+                content["sessions"]
                     .as_array()
                     .unwrap()
                     .iter()
