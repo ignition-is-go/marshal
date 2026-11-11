@@ -1,0 +1,55 @@
+{
+  "dependencies": {
+    "@myko/core": "^6.5.13"
+  },
+  "description": "pi extension that connects a pi coding-agent session to the marshal coordination daemon — roster registration, send_message/broadcast/join_room/leave_room/set_status tools, and real-time + per-turn delivery of sibling-agent messages. The pi-native counterpart of the Claude Code marshal-shim, built on pi's extension API instead of a shim binary.",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.3.3"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "flux": {
+    "bridges": [
+      "cargo:marshal-entities"
+    ],
+    "tasks": [
+      "check",
+      "gen",
+      "publish"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "marshal",
+    "agent-coordination"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "main": "./src/index.ts",
+  "name": "@agent-marshal/marshal-pi",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "repository": {
+    "directory": "plugins/marshal-pi",
+    "type": "git",
+    "url": "https://github.com/ignition-is-go/marshal"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "gen": "cargo run -p marshal-entities --no-default-features --features codegen --bin typegen -- src/generated"
+  },
+  "type": "module",
+  "version": "0.58.1"
+}

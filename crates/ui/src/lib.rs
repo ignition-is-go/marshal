@@ -11,16 +11,16 @@
 //! view is a self-contained panel that pulls its own live queries, so panes can
 //! be split, resized, docked, and rearranged freely.
 //!
-//! Read-only for now — like the TUI, the console is a watcher, not a roster
-//! participant (it creates no `Session`).
+//! Watching does not register a session. Operator messaging is opt-in, and
+//! sandbox imports write separate experiment records without joining the roster.
 
 use leptos::prelude::*;
 use leptos_meta::{Title, provide_meta_context};
 use mullion::{
-    ActivityDef, ActivityIcon, ActivityId, Category, CategoryId, MullionRoot, MullionTheme,
-    PaneEvent, PaneId, PaneNode, SplitDirection,
+    ActivityDef, ActivityIcon, ActivityId, ActivityNode, Category, CategoryId, MullionRoot,
+    PaneEvent, PaneId, PaneNode,
 };
-use pulse_leptos_ui::{BaseStyle, Status, StatusVariant};
+use pulse_leptos_ui::{BaseStyle, PULSE_MULLION_CLASS, PulseMullionStyle, Status, StatusVariant};
 use serde::{Deserialize, Serialize};
 use styleable::Styleable;
 
@@ -31,6 +31,8 @@ mod notify;
 mod palette;
 mod rooms;
 mod roster;
+mod sandbox;
+mod sandbox_run;
 mod session_detail;
 mod time;
 
@@ -88,11 +90,23 @@ pub fn use_focus() -> Focus {
 /// on the daemon's port — keeping the built bundle independent of which host it
 /// lands on. Falls back to the dev default under `trunk serve` (localhost).
 fn daemon_address() -> String {
-    let host = web_sys::window()
-        .and_then(|w| w.location().hostname().ok())
+    let location = web_sys::window().map(|w| w.location());
+    let host = location
+        .as_ref()
+        .and_then(|location| location.hostname().ok())
         .unwrap_or_default();
     if !host.is_empty() && host != "localhost" && host != "127.0.0.1" {
-        format!("{host}:{DAEMON_PORT}")
+        // The HTTPS operator domain terminates TLS in Caddy, which proxies
+        // /myko back to the daemon. Keep the browser connection same-origin
+        // to avoid mixed content; plain HTTP and local development use :6155.
+        let (scheme, port) = match location
+            .and_then(|location| location.protocol().ok())
+            .as_deref()
+        {
+            Some("https:") => ("wss", 443),
+            _ => ("ws", DAEMON_PORT),
+        };
+        format!("{scheme}://{host}:{port}")
     } else {
         format!("localhost:{DAEMON_PORT}")
     }
@@ -104,6 +118,7 @@ pub fn App() -> impl IntoView {
 
     // Inject the pulse-leptos-ui design tokens + reset once at root.
     let base_css = BaseStyle::default().css();
+    let mullion_css = PulseMullionStyle.css();
 
     // One shared 1 Hz clock for the whole console — drives every freshness age.
     time::provide_now();
@@ -122,29 +137,17 @@ pub fn App() -> impl IntoView {
     });
     notify::provide_notifications();
 
-    // mullion workspace theme — wired straight to the pulse-leptos-ui BaseStyle
-    // tokens (injected at root) so the panes use the brand palette. The `--ml-*`
-    // vars just alias the `--color-*` brand tokens.
-    provide_context(MullionTheme {
-        bg: "var(--color-base-100)".into(),
-        surface: "var(--color-base-200)".into(),
-        border: "var(--color-border)".into(),
-        accent: "var(--color-base-250)".into(),
-        highlight: "var(--color-base-300)".into(),
-        text: "var(--color-text-primary)".into(),
-        text_muted: "var(--color-text-secondary)".into(),
-        drop_indicator: "color-mix(in oklch, var(--color-primary) 22%, transparent)".into(),
-    });
-
     view! {
         <Title text="marshal"/>
         <style>{base_css}</style>
+        <style>{mullion_css}</style>
         <div class="app-shell">
             <Header connected=connected.into() addr=address.clone() />
-            <main class="app-main">
+            <main class=format!("app-main {PULSE_MULLION_CLASS}")>
                 <MullionRoot
                     initial_tree=load_layout()
-                    categories=categories()
+                    items=items()
+                    show_focus_indicator=true
                     on_event=|ev| {
                         // Persist the full tree after every mutation so drags,
                         // resizes, splits, and view-switches survive a reload.
@@ -173,73 +176,79 @@ pub fn App() -> impl IntoView {
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 struct Slot;
 
-/// The four console views, registered as activities under one category. Each
+/// Console views, registered as activities under one category. Each
 /// renders inside a `pane-scroll` wrapper because the pane content area clips
 /// overflow — the view scrolls within its pane. `render` is a non-capturing fn
 /// (the panel component pulls its own context), so no closure state is needed.
-fn categories() -> Vec<Category<Slot>> {
-    vec![Category {
+fn items() -> Vec<ActivityNode<Slot>> {
+    vec![ActivityNode::category(Category {
         id: CategoryId::new("views"),
         name: "Views".into(),
-        order: 0,
         icon: ActivityIcon::Svg(ICON_APP.to_string()),
         color: "var(--color-primary)".into(),
-        activities: vec![
-            ActivityDef {
-                id: ActivityId::new("roster"),
-                name: "Roster".into(),
-                icon: ActivityIcon::Svg(ICON_USERS.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
+        children: vec![
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("roster"),
+                "Roster",
+                ActivityIcon::Svg(ICON_USERS.to_string()),
+                |_| true,
+                |_p, _d| {
                     view! { <div class="pane-scroll"><roster::RosterPanel /></div> }.into_any()
                 },
-            },
-            ActivityDef {
-                id: ActivityId::new("messages"),
-                name: "Messages".into(),
-                icon: ActivityIcon::Svg(ICON_CHAT.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("messages"),
+                "Messages",
+                ActivityIcon::Svg(ICON_CHAT.to_string()),
+                |_| true,
+                |_p, _d| {
                     view! { <div class="pane-scroll"><messages::MessagesPanel /></div> }.into_any()
                 },
-            },
-            ActivityDef {
-                id: ActivityId::new("rooms"),
-                name: "Rooms".into(),
-                icon: ActivityIcon::Svg(ICON_HASH.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
-                    view! { <div class="pane-scroll"><rooms::RoomsPanel /></div> }.into_any()
-                },
-            },
-            ActivityDef {
-                id: ActivityId::new("session"),
-                name: "Session".into(),
-                icon: ActivityIcon::Svg(ICON_ID.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("rooms"),
+                "Rooms",
+                ActivityIcon::Svg(ICON_HASH.to_string()),
+                |_| true,
+                |_p, _d| view! { <div class="pane-scroll"><rooms::RoomsPanel /></div> }.into_any(),
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("session"),
+                "Session",
+                ActivityIcon::Svg(ICON_ID.to_string()),
+                |_| true,
+                |_p, _d| {
                     view! { <div class="pane-scroll"><session_detail::SessionDetail /></div> }
                         .into_any()
                 },
-            },
-            ActivityDef {
-                id: ActivityId::new("console"),
-                name: "Console".into(),
-                icon: ActivityIcon::Svg(ICON_SEND.to_string()),
-                filter: |_| true,
-                render: |_p, _d| {
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("sandbox"),
+                "Zoo",
+                ActivityIcon::Svg(ICON_FLASK.to_string()),
+                |_| true,
+                |_p, _d| {
+                    view! { <div class="pane-scroll"><sandbox::SandboxPanel /></div> }.into_any()
+                },
+            )),
+            ActivityNode::activity(ActivityDef::new(
+                ActivityId::new("console"),
+                "Console",
+                ActivityIcon::Svg(ICON_SEND.to_string()),
+                |_| true,
+                |_p, _d| {
                     view! { <div class="pane-scroll"><console::ConsolePanel /></div> }.into_any()
                 },
-            },
+            )),
         ],
-    }]
+    })]
 }
 
 /// localStorage key for the persisted pane layout.
 const LAYOUT_KEY: &str = "marshal-ui-layout";
 /// Bump when `default_layout()` changes — a persisted layout with an older
 /// version is discarded so the new default reaches everyone once.
-const LAYOUT_VERSION: u32 = 2;
+const LAYOUT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct StoredLayout {
@@ -287,51 +296,9 @@ fn save_layout(tree: &PaneNode<Slot>) {
     }
 }
 
-/// Default arrangement — a three-column IDE workspace:
-///
-/// ```text
-/// ┌──────────────┬──────────────────┬─────────────┐
-/// │   roster     │                  │   session   │
-/// │   (hero)     │     messages     │  (detail)   │
-/// ├──────────────┤     (feed)       ├─────────────┤
-/// │   rooms      │                  │   console   │
-/// └──────────────┴──────────────────┴─────────────┘
-/// ```
-///
-/// Two live views get the prime real estate: the roster (hero, top-left, with
-/// rooms tucked beneath) and the message feed (full height in the middle, where
-/// a stream wants the vertical room). The click-to-drill session detail and the
-/// operator console form a right rail — a drill-down over an action pad.
-/// Drag/resize/split to taste, or switch any pane's view from its activity bar.
+/// Start with one full-width view. Switch activities or split panes as needed.
 fn default_layout() -> PaneNode<Slot> {
-    let leaf = |id: &str| PaneNode::leaf_with_activity(PaneId::new(id), ActivityId::new(id), Slot);
-    // Column 1 (left): roster hero over rooms.
-    let left = PaneNode::Split {
-        direction: SplitDirection::Vertical,
-        ratio: 0.64,
-        first: Box::new(leaf("roster")),
-        second: Box::new(leaf("rooms")),
-    };
-    // Column 3 (right rail): session detail over the operator console.
-    let rail = PaneNode::Split {
-        direction: SplitDirection::Vertical,
-        ratio: 0.55,
-        first: Box::new(leaf("session")),
-        second: Box::new(leaf("console")),
-    };
-    // Column 2 (middle): the message feed, full height — beside the rail.
-    let middle_and_rail = PaneNode::Split {
-        direction: SplitDirection::Horizontal,
-        ratio: 0.62,
-        first: Box::new(leaf("messages")),
-        second: Box::new(rail),
-    };
-    PaneNode::Split {
-        direction: SplitDirection::Horizontal,
-        ratio: 0.38,
-        first: Box::new(left),
-        second: Box::new(middle_and_rail),
-    }
+    PaneNode::leaf_with_activity(PaneId::new("main"), ActivityId::new("roster"), Slot)
 }
 
 #[component]
@@ -379,6 +346,7 @@ const ICON_USERS: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="current
 const ICON_CHAT: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>"#;
 const ICON_HASH: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>"#;
 const ICON_ID: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M15 8h2M15 12h2M7 16h10"/></svg>"#;
+const ICON_FLASK: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6M10 3v7L4 19a1 1 0 0 0 1 2h14a1 1 0 0 0 1-2l-6-9V3M7 15h10"/></svg>"#;
 const ICON_SEND: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>"#;
 
 /// Shell chrome + the shared dense-table / stat-band / nickname grammar every
@@ -391,6 +359,7 @@ const SHELL_CSS: &str = r#"
 .app-header .reset-btn { appearance: none; border: 1px solid var(--color-border); background: var(--color-base-150); color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.02em; padding: 4px 10px; border-radius: var(--radius-sm); cursor: pointer; transition: color 0.12s, border-color 0.12s, background 0.12s; }
 .app-header .reset-btn:hover { color: var(--color-text-primary); border-color: var(--color-border-hover); background: var(--color-base-100); }
 .app-main { flex: 1; min-height: 0; }
+@media(max-width:600px) { .app-header { padding:8px 12px; gap:8px; } .app-header .substrate { display:none; } .app-header .reset-btn { white-space:nowrap; } }
 /* the notification bell, pinned to a fixed corner and out of the flex flow */
 .notif-anchor { position: fixed; bottom: 12px; right: 12px; z-index: 90; }
 .pane-scroll { height: 100%; overflow: auto; padding: 14px 16px; }

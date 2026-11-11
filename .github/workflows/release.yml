@@ -1,35 +1,38 @@
 name: Release
 
-# Single workflow that stamps the next version, tags it, creates a
-# GitHub Release, and publishes the marshal-* crates to crates.io —
-# all in one job. Combined because GITHUB_TOKEN-created `release:
-# published` events don't trigger downstream workflows; chaining a
-# separate publish.yml would silently never fire. (Switching to a
-# GitHub App or PAT would unlock that path; for now the single-job
-# flow is simpler and reliable.)
+# Single workflow that stamps the next version, tags it, creates a GitHub
+# Release, and fans out binary builds and registry publication. The Linux
+# deploy artifacts are uploaded before package publication begins: a registry
+# credential or availability failure must never leave a valid release tag with
+# no binaries for pulse-deploy to install.
 
 on:
   push:
     branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      publish_version:
+        description: Existing release version to retry package publication for
+        required: false
+        type: string
 
 # Serialize release runs. This job commits a version bump back onto the branch
 # and pushes it, which cannot be done concurrently: two runs from back-to-back
 # merges race the `git push` and all but one fail non-fast-forward (leaving
 # tags with no built artifacts). `cancel-in-progress: false` QUEUES runs so each
-# starts only after the previous has pushed. Paired with the `git pull --ff-only`
-# in the stamp step (which re-syncs a queued run's now-stale checkout to the
-# just-pushed release commit), a batch of merges yields one successful release
-# per merge instead of failed, artifact-less runs.
+# starts only after the previous has pushed. The release guard first fast-forwards
+# a queued run's stale checkout, then re-checks whether the new tip is already a
+# release commit. Back-to-back merges are therefore folded into the first run
+# that reaches the branch tip; stale queued runs exit successfully.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    # Backstop: this single job does crates.io publish + apt + cross-build +
-    # the marshal-ui WASM bundle + upload. A flaky apt mirror hung it ~2h on
-    # 2026-06-18; fail in minutes.
+    runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
+    # Backstop: this job does apt + cross-build + the marshal-ui WASM bundle +
+    # upload. A flaky apt mirror hung it ~2h on 2026-06-18; fail in minutes.
     timeout-minutes: 40
     permissions:
       contents: write
@@ -41,32 +44,98 @@ jobs:
     # guard; `version` is the stamped version the mac job checks out + tags.
     outputs:
       skip: ${{ steps.check.outputs.skip }}
-      version: ${{ steps.stamp.outputs.version }}
+      version: ${{ steps.check.outputs.version }}
+      release_sha: ${{ steps.stamp.outputs.release_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           fetch-tags: true
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          # Public runners are disposable and intentionally have no ambient
+          # Rust components. The release script formats the stamped manifests.
+          components: rustfmt
+      - name: Install release system dependencies
+        run: |
+          # The public runner network permits Ubuntu mirrors over HTTPS only.
+          sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
+          sudo timeout 8m apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          sudo timeout 8m apt-get install -y -o Acquire::Retries=3 \
+            build-essential gh jq libssl-dev pkg-config
+          gh --version
+          jq --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # Prebuilt trunk (fast) — builds the marshal-ui WASM bundle shipped as a
       # release asset below.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2
         with:
           tool: trunk
 
       - run: cargo install cargo-flux
 
-      # Avoid an infinite release-on-release loop: the previous run of
-      # this workflow committed `chore(release): vX`. If we re-trigger
-      # on that push, skip and exit cleanly.
-      - name: Skip if release commit
+      # Re-sync before checking the subject. A serialized run may have been
+      # queued from an older merge while the previous run pushed the release
+      # commit; checking the trigger SHA would incorrectly try to release again.
+      # This also avoids the infinite release-on-release loop.
+      - name: Sync branch tip and skip if already released
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_VERSION: ${{ inputs.publish_version || '' }}
         run: |
-          if git log -1 --format='%s' | grep -q '^chore(release):'; then
+          git pull --ff-only origin "$GITHUB_REF_NAME"
+          if [ -n "$PUBLISH_VERSION" ]; then
+            gh release view "v$PUBLISH_VERSION" >/dev/null
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "version=$PUBLISH_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SUBJECT=$(git log -1 --format='%s')
+          if [[ "$SUBJECT" =~ ^chore\(release\):\ v(.+)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            VERSION=$(cargo flux version)
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A release is complete only when every artifact produced by this
+          # workflow exists. A prior run may have stamped/pushed before a
+          # runner or tool failed; that state must resume, not be skipped.
+          ASSETS=$(gh release view "v$VERSION" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          COMPLETE=true
+          for asset in \
+            install-codex.sh \
+            marshal-daemon-x86_64-unknown-linux-gnu \
+            marshal-shim-x86_64-unknown-linux-gnu \
+            marshal-shim-x86_64-pc-windows-gnu.exe \
+            marshal-ui-dist.tar.gz \
+            marshal-shim-aarch64-apple-darwin; do
+            if ! grep -Fxq "$asset" <<<"$ASSETS"; then
+              COMPLETE=false
+              break
+            fi
+          done
+
+          if [ "$COMPLETE" = true ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Configure git identity
@@ -75,21 +144,13 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-      - name: Stamp, commit, tag, push, release, and publish
+      - name: Stamp, commit, tag, push, release, and upload Linux assets
         id: stamp
         if: steps.check.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          # Re-sync to the branch tip before stamping. With runs serialized
-          # (see `concurrency` above), a queued run's checkout is the SHA that
-          # triggered it — now behind the prior run's pushed release commit.
-          # Fast-forward to latest so the version-bump commit below pushes
-          # cleanly instead of being rejected non-fast-forward.
-          git pull --ff-only origin "$GITHUB_REF_NAME"
-          VERSION=$(cargo flux version)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          VERSION="${{ steps.check.outputs.version }}"
           cargo flux stamp "$VERSION"
           # Keep Claude Code plugin manifests in lockstep with the workspace
           # version so `/plugin update` actually detects new releases.
@@ -99,36 +160,58 @@ jobs:
           cargo update --workspace
           cargo fmt --all
           git add -A
-          git commit -m "chore(release): v$VERSION"
-          git tag "v$VERSION" -m "Release $VERSION"
-          git push origin HEAD "v$VERSION"
-          BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          if [ "$BRANCH" = "main" ]; then
-            gh release create "v$VERSION" --title "v$VERSION" --generate-notes --latest
-          else
-            gh release create "v$VERSION" --title "v$VERSION" --generate-notes --prerelease
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): v$VERSION"
           fi
-          # Publish marshal-* crates to crates.io in workspace dep order.
-          cargo flux run publish
 
+          if git rev-parse --verify --quiet "refs/tags/v$VERSION" >/dev/null; then
+            TAG_COMMIT=$(git rev-list -n 1 "v$VERSION")
+            HEAD_COMMIT=$(git rev-parse HEAD)
+            if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+              echo "v$VERSION already points to $TAG_COMMIT, not $HEAD_COMMIT" >&2
+              exit 1
+            fi
+          else
+            git tag "v$VERSION" -m "Release $VERSION"
+          fi
+          git push origin HEAD "refs/tags/v$VERSION"
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            if [ "$BRANCH" = "main" ]; then
+              gh release create "v$VERSION" --title "v$VERSION" --generate-notes --latest
+            else
+              gh release create "v$VERSION" --title "v$VERSION" --generate-notes --prerelease
+            fi
+          fi
           # Publish prebuilt binaries as release assets so deployers download
           # instead of compiling — this is what lets the daemon and shims
           # track ONE released version off a single artifact source (no
           # cargo-install-from-pinned-tag for the daemon, no local
           # target/release build for the shims). Triple-suffixed so a fetch
           # can pick the right platform.
-          rustup target add x86_64-pc-windows-gnu
-          # Bounded apt (Acquire timeouts + retries) so a flaky Ubuntu mirror
-          # can't hang the release — the failure mode that stalled v0.16.0 ~2h.
-          sudo apt-get update \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
-          sudo apt-get install -y -o Acquire::Retries=3 mingw-w64
+          #
+          # The Linux deploy artifacts build and upload before the optional
+          # Windows cross toolchain. v0.49.6 and v0.49.7 both hit the 40-min
+          # backstop inside the mingw apt install — the mirror TRICKLED bytes,
+          # which Acquire's stall timeouts never trip. A Windows/UI failure
+          # below is therefore visible with fleet-deployable Linux assets
+          # already present.
           cargo build --release -p marshal-daemon
           cargo build --release -p marshal-shim
-          cargo build --release -p marshal-shim --target x86_64-pc-windows-gnu
           cp target/release/marshal-daemon  marshal-daemon-x86_64-unknown-linux-gnu
           cp target/release/marshal-shim    marshal-shim-x86_64-unknown-linux-gnu
+          gh release upload "v$VERSION" --clobber \
+            marshal-daemon-x86_64-unknown-linux-gnu \
+            marshal-shim-x86_64-unknown-linux-gnu \
+            scripts/install-codex.sh
+
+          rustup target add x86_64-pc-windows-gnu
+          # Bounded apt: Acquire timeouts + retries bound connection stalls,
+          # and the hard `timeout` bounds a mirror that keeps trickling bytes
+          # (the 2026-08-19 failure mode — 33 min inside one apt install).
+          sudo timeout 8m apt-get install -y -o Acquire::Retries=3 mingw-w64
+          cargo build --release -p marshal-shim --target x86_64-pc-windows-gnu
           cp target/x86_64-pc-windows-gnu/release/marshal-shim.exe marshal-shim-x86_64-pc-windows-gnu.exe
 
           # marshal-ui: build the Leptos/WASM dashboard to a static bundle and
@@ -139,46 +222,182 @@ jobs:
           ( cd crates/ui && trunk build --release )
           tar -czf marshal-ui-dist.tar.gz -C crates/ui/dist .
 
-          gh release upload "v$VERSION" \
-            marshal-daemon-x86_64-unknown-linux-gnu \
-            marshal-shim-x86_64-unknown-linux-gnu \
+          gh release upload "v$VERSION" --clobber \
             marshal-shim-x86_64-pc-windows-gnu.exe \
-            marshal-ui-dist.tar.gz \
-            scripts/install-codex.sh
+            marshal-ui-dist.tar.gz
+
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+  # Registry publication is deliberately downstream of the deploy artifacts.
+  # It remains a required job (so missing credentials are visible), but cannot
+  # strand a GitHub Release without the binaries used by pulse-deploy.
+  publish-packages:
+    needs: release
+    if: needs.release.outputs.skip == 'false' || inputs.publish_version != ''
+    runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+      # A recovery checks out the immutable release tag for package contents,
+      # but the tag necessarily predates any repair to the publishing tools.
+      # Overlay only those tools from the workflow revision being dispatched.
+      - name: Load current publication recovery tools
+        if: inputs.publish_version != ''
+        run: |
+          git fetch --no-tags origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:flux.toml" > flux.toml
+          git show "$GITHUB_SHA:scripts/publish-cargo-package.sh" > scripts/publish-cargo-package.sh
+          git show "$GITHUB_SHA:scripts/publish-npm-package.sh" > scripts/publish-npm-package.sh
+          chmod +x scripts/publish-cargo-package.sh scripts/publish-npm-package.sh
+      - name: Install package build dependencies
+        run: |
+          sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
+          sudo timeout 8m apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          sudo timeout 8m apt-get install -y -o Acquire::Retries=3 \
+            build-essential libssl-dev pkg-config
+      # npm trusted publishing uses GitHub OIDC, which requires Node >=22.14
+      # and npm >=11.5.1. The runner's ambient npm has repeatedly fallen back
+      # to legacy token auth (ENEEDAUTH), even though id-token permission is
+      # present, so pin a supported toolchain rather than relying on the image.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Install an OIDC-capable npm
+        run: npm install --global npm@11
+      - name: Verify publishing toolchain
+        run: |
+          node --version
+          npm --version
+          node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'
+          test "$(npm --version | awk -F. '{ print ($1 > 11 || ($1 == 11 && $2 >= 5)) ? "true" : "false" }')" = true
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo install cargo-flux
+      - name: Publish crates and plugins
+        run: cargo flux run publish
+
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
 
   # marshal-shim for macOS — the ONLY marshal binary a Mac needs (the daemon +
   # UI run on the Linux marshal LXC; a Mac is purely a Codex/Claude CLIENT).
   # Darwin can't be cross-built from the Ubuntu release job (no Apple SDK), so a
-  # native macos runner builds both arches and uploads them to the SAME release.
+  # native macos runner builds Apple Silicon and uploads it to the SAME release.
   # Gated on `release` so the tag + GitHub release already exist to upload into.
   build-macos:
     needs: release
     if: needs.release.outputs.skip == 'false'
-    runs-on: macos-latest
+    runs-on: ["self-hosted", "macOS", "ARM64", "site-lucid-lab", "ram-ge-24g"]
     timeout-minutes: 40
     permissions:
       contents: write
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Build the exact commit the release job stamped + tagged.
           ref: v${{ needs.release.outputs.version }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build + upload macOS marshal-shim (arm64 + x86_64)
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build + upload macOS marshal-shim
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ needs.release.outputs.version }}"
-          # macos-latest is Apple Silicon (aarch64 native); x86_64 is a cross
-          # target the universal Apple SDK on the runner already supports.
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup target add aarch64-apple-darwin
           cargo build --release -p marshal-shim --target aarch64-apple-darwin
-          cargo build --release -p marshal-shim --target x86_64-apple-darwin
           cp target/aarch64-apple-darwin/release/marshal-shim marshal-shim-aarch64-apple-darwin
-          cp target/x86_64-apple-darwin/release/marshal-shim  marshal-shim-x86_64-apple-darwin
-          gh release upload "v$VERSION" \
-            marshal-shim-aarch64-apple-darwin \
-            marshal-shim-x86_64-apple-darwin
+          gh release upload "v$VERSION" --clobber \
+            marshal-shim-aarch64-apple-darwin
+
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+  notify-pulse-deploy:
+    needs: [release, publish-packages, build-macos]
+    if: >-
+      ${{
+        needs.release.outputs.skip == 'false' &&
+        needs.release.result == 'success' &&
+        needs.publish-packages.result == 'success' &&
+        needs.build-macos.result == 'success'
+      }}
+    runs-on: {group: ci-untrusted, labels: [self-hosted, Linux, X64, ram-ge-16g, disk-ge-100g]}
+    permissions:
+      contents: read
+    steps:
+      - name: Mint pulse-deploy dispatch token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ignition-is-go
+          repositories: pulse-deploy
+          permission-contents: write
+
+      - name: Dispatch immutable release metadata
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_TAG: v${{ needs.release.outputs.version }}
+          RELEASE_SHA: ${{ needs.release.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          published_at=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .published_at)
+          payload=$(jq -cn \
+            --arg schema "marshal-release.v1" \
+            --arg delivery_id "${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.${RELEASE_SHA}" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg tag "$RELEASE_TAG" \
+            --arg release_sha "$RELEASE_SHA" \
+            --arg source_run_id "$GITHUB_RUN_ID" \
+            --arg source_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg published_at "$published_at" \
+            '{event_type: "marshal-release.v1", client_payload: {
+              schema: $schema,
+              delivery_id: $delivery_id,
+              repository: $repository,
+              tag: $tag,
+              release_sha: $release_sha,
+              source_run_id: $source_run_id,
+              source_run_attempt: $source_run_attempt,
+              published_at: $published_at
+            }}')
+          gh api --method POST repos/ignition-is-go/pulse-deploy/dispatches --input - <<<"$payload"

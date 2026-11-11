@@ -6,16 +6,21 @@
 //!    `delivered_live` honestly. There is no in-band MCP signal for it, so it
 //!    is read from the parent's command line.
 //!
-//! 2. [`marshal_reachable`] — can this session receive AT ALL? This is what
-//!    the statusline warns on. Delivery has TWO paths: the live channel (needs
-//!    the flag) and the flag-independent INBOX (the `UserPromptSubmit` hook
-//!    POSTs to the daemon and surfaces `<marshal_inbox>` on the next prompt).
-//!    The inbox works for any session whose host can reach the daemon —
-//!    including VS Code's flagless `claude`. So "communication is not possible"
-//!    means the daemon is UNREACHABLE, NOT merely that the live flag is absent.
-//!    Warning on flag-absence alone false-alarms every VS Code session even
-//!    though inbox delivery is working; keying on reachability is both correct
-//!    and matches "warn when communication is not possible".
+//! 2. [`cannot_receive`] — is the daemon UNREACHABLE (the statusline's
+//!    top-severity warning, meaning nothing delivers at all)? Delivery has TWO
+//!    paths: the live channel (needs the flag) and the turn-boundary INBOX (the
+//!    `UserPromptSubmit` hook POSTs to the daemon and surfaces `<marshal_inbox>`
+//!    on the NEXT prompt). Neither works if the daemon is unreachable, so that
+//!    is the "can't communicate at all" signal, keyed on reachability.
+//!
+//!    But the two paths are NOT equivalent, and flag-off is NOT harmless: the
+//!    inbox only fires at a prompt boundary, so a flag-off session that goes
+//!    heads-down (a long autonomous turn) silently misses LIVE messages until it
+//!    returns to a prompt. So flag-off is its OWN distinct statusline warning
+//!    (`no live channel`), separate from and lower-severity than UNREACHABLE —
+//!    surfaced off the shim-written channels file, see `statusline::pick_warnings`.
+//!    (The earlier design suppressed it to avoid "false-alarming" flagless VS
+//!    Code sessions; that was wrong — the state is real and worth showing.)
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -176,10 +181,38 @@ pub fn parent_cmdline() -> Vec<String> {
     {
         windows_parent_cmdline().unwrap_or_default()
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_parent_cmdline().unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Vec::new()
     }
+}
+
+/// macOS has no `/proc`, so ask `ps` for the parent's argv. Without this the
+/// detection is always unknown on a Mac, and the daemon treats an unknown
+/// session as able to render pushes: it pushes into a flagless Claude (which
+/// drops the notification) and marks the message read, so the inbox hook never
+/// shows it.
+#[cfg(target_os = "macos")]
+fn macos_parent_cmdline() -> Option<Vec<String>> {
+    let ppid = unsafe { libc::getppid() };
+    // `-ww` disables column truncation; `args=` prints argv with no header.
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-o", "args=", "-p", &ppid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if line.is_empty() {
+        return None;
+    }
+    // Substring-matched after joining, like the Windows path.
+    Some(vec![line])
 }
 
 /// Windows: read the parent's CommandLine via the supported WMI query
@@ -218,6 +251,19 @@ mod tests {
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// The test process always has a parent (cargo or the test runner), so a
+    /// readable cmdline is expected; an empty one means detection is broken
+    /// and every Mac session would report "unknown".
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reads_the_parent_cmdline() {
+        let cmd = super::parent_cmdline();
+        assert!(
+            cmd.iter().any(|s| !s.trim().is_empty()),
+            "parent cmdline unreadable on macOS: {cmd:?}"
+        );
     }
 
     #[test]

@@ -11,8 +11,10 @@
 
 mod activity;
 mod channels;
+mod codex_bridge;
 mod codex_hook;
 mod codex_setup;
+mod link;
 mod mcp;
 mod session_discovery;
 mod statusline;
@@ -21,7 +23,10 @@ mod tools;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use hyphae::{Gettable, Watchable};
-use marshal_entities::{GetAllSessions, HostInfo, NotifyChannel, Session, SessionId};
+use marshal_entities::{
+    AckMessages, AckMessagesResult, GetAllSessions, HostInfo, MessageId, NotifyChannel, Session,
+    SessionId,
+};
 use mcp::ServerConfig;
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -79,6 +84,14 @@ fn main() -> Result<()> {
     // Code's status prefix from stdin.
     let mut argv = std::env::args().skip(1);
     match argv.next().as_deref() {
+        Some("-h" | "--help") => {
+            print!("{}", usage());
+            return Ok(());
+        }
+        Some("-V" | "--version") => {
+            println!("marshal-shim {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Some("--check") if argv.next().is_none() => {
             println!("ok");
             return Ok(());
@@ -97,6 +110,38 @@ fn main() -> Result<()> {
             codex_hook::run(&ep, base.as_deref());
             return Ok(());
         }
+        // Claude Code hook bridge: the same bridge, run from the plugin's
+        // `hooks/hooks.json` as `marshal-shim claude-hook
+        // session-start|prompt-submit|post-tool-use`. It pulls unread direct
+        // messages into the turn, so a session launched without the channels
+        // flag still receives them. `claude-hook wait` is the asyncRewake
+        // waiter that wakes an idle session when mail arrives.
+        Some("claude-hook") => {
+            let ep = argv.next().unwrap_or_else(|| "prompt-submit".to_string());
+            let base = argv.next();
+            if ep == "wait" {
+                codex_hook::wait_hook(base.as_deref());
+            } else {
+                codex_hook::run_for(codex_hook::Harness::Claude, &ep, base.as_deref());
+            }
+            return Ok(());
+        }
+        // Live inbox without the channels flag: Claude runs `marshal-shim watch
+        // <session_id>` under its Monitor tool, and each message the daemon
+        // hands back is printed as a Monitor event that wakes the session.
+        // `--once` exits after one delivery, for a background Bash command.
+        Some("watch") => {
+            let mut args: Vec<String> = argv.by_ref().collect();
+            let once = args.iter().any(|a| a == "--once");
+            args.retain(|a| a != "--once");
+            let mut args = args.into_iter();
+            let sid = args
+                .next()
+                .context("usage: marshal-shim watch <session_id> [base-url] [--once]")?;
+            let base = args.next();
+            codex_hook::watch(&sid, base.as_deref(), once);
+            return Ok(());
+        }
         // One-shot cross-platform setup: wire marshal into a Codex install
         // (CLI / IDE / desktop app) by writing the config.toml + AGENTS.md
         // managed blocks. For laptops / the desktop app where there's no
@@ -106,8 +151,27 @@ fn main() -> Result<()> {
             codex_setup::run(&rest)?;
             return Ok(());
         }
+        // Opt-in Codex launcher with real idle-session wakeups. It starts the
+        // managed Codex app-server, runs the local marshal bridge, then attaches
+        // the normal Codex TUI to that shared server. See `codex_bridge`.
+        Some("codex-run") => {
+            let rest: Vec<String> = argv.collect();
+            codex_bridge::run_codex(&rest)?;
+            return Ok(());
+        }
+        // Long-lived local half of Codex live delivery. Normally started by
+        // `codex-run`; exposed as a subcommand so services and tests can run it
+        // independently.
+        Some("codex-bridge") => {
+            let rest: Vec<String> = argv.collect();
+            return tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building tokio runtime")?
+                .block_on(codex_bridge::run(&rest));
+        }
         Some(other) => {
-            anyhow::bail!("unknown argument: {other}");
+            anyhow::bail!("unknown argument: {other} (try 'marshal-shim --help')");
         }
         None => {}
     }
@@ -122,7 +186,50 @@ fn main() -> Result<()> {
         .block_on(serve())
 }
 
+/// The `--help` text: the subcommands dispatched in `main`, and how the
+/// default MCP-server mode finds the daemon.
+fn usage() -> String {
+    format!(
+        "marshal-shim {version}
+Connects an agent session to the Marshal daemon.
+
+Usage: marshal-shim [COMMAND]
+
+With no command, serves MCP on stdio for the agent session that started it.
+
+Commands:
+  statusline    Render the Claude Code status line prefix from stdin
+  claude-hook   Forward a Claude hook, or wait for mail:
+                claude-hook <session-start|prompt-submit|post-tool-use|wait> [base-url]
+  watch         Print live mail: watch <session_id> [base-url] [--once]
+  codex-hook    Forward a Codex hook to the daemon:
+                codex-hook <session-start|session-end|prompt-submit|pre-tool-use|post-tool-use> [base-url]
+  codex-setup   Wire Marshal into a Codex install (codex-setup --help for options)
+  codex-run     Start Codex with Marshal live delivery
+  codex-bridge  Run the Codex live-delivery bridge on its own (codex-run starts it)
+
+Options:
+  --check        Print \"ok\" and exit (install smoke test)
+  -h, --help     Print this help and exit
+  -V, --version  Print the version and exit
+
+Daemon address, first match wins: the marshal/{ADDRESS_FILE} file in the
+per-user config directory, then {ADDRESS_ENV}, then {ADDRESS_ENV_LEGACY},
+then {DEFAULT_DAEMON_ADDRESS}.
+",
+        version = env!("CARGO_PKG_VERSION"),
+    )
+}
+
 async fn serve() -> Result<()> {
+    // Capture the spawner's pid FIRST — before any other startup work — so
+    // the parent-death watchdog below baselines against the real spawner.
+    // Captured later, a spawner that died during our own startup would have
+    // already reparented us and the watchdog would baseline against the
+    // subreaper instead, never firing.
+    #[cfg(unix)]
+    let initial_ppid = unsafe { libc::getppid() };
+
     init_logging();
     marshal_entities::link();
 
@@ -143,10 +250,7 @@ async fn serve() -> Result<()> {
     // role-deployed per-host config file. Config-wins makes the file the
     // per-host source of truth; env becomes a deliberate one-off
     // override the operator can apply by deleting the file.
-    let daemon_address = read_address_from_config_file()
-        .or_else(|| std::env::var(ADDRESS_ENV).ok())
-        .or_else(|| std::env::var(ADDRESS_ENV_LEGACY).ok())
-        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string());
+    let daemon_address = daemon_address();
 
     log::info!("[marshal-shim] connecting to {daemon_address}");
 
@@ -231,13 +335,32 @@ async fn serve() -> Result<()> {
             .unwrap_or(None)
     };
 
+    // Live fields from Claude's per-PID manifest: the session name (its
+    // `/rename` value or auto-title), the busy/idle/shell activity, and the
+    // interactive/bg kind. The publisher loop re-reads them — event-driven via
+    // the manifest fs-watch below, tick as backstop — so a mid-session rename
+    // or turn-state flip lands on the roster. Codex has no such manifest → None
+    // (its identity is hook-owned).
+    let manifest = if is_codex {
+        None
+    } else {
+        session_discovery::parent_pid().and_then(session_discovery::manifest_fields)
+    };
+    let session_name = manifest.as_ref().and_then(|m| m.name.clone());
+    let activity = manifest.as_ref().and_then(|m| m.activity.clone());
+    let kind = manifest.and_then(|m| m.kind);
+
     let session = Session {
         id: session_id.clone(),
         client_id: None,
+        agent_id: codex_hook::agent_id_from_env(),
         pid,
         cwd: cwd.clone(),
         git_branch: git_branch.clone(),
-        current_task: None,
+        current_task: default_current_task(&cwd, git_branch.as_deref()),
+        session_name,
+        activity,
+        kind,
         connected_at: Utc::now().timestamp_millis(),
         last_activity_at: None,
         last_tool: None,
@@ -246,6 +369,9 @@ async fn serve() -> Result<()> {
         host: Some(host.clone()),
         project: project.clone(),
         channels_enabled,
+        // The drain task below acks each direct push once it is written to
+        // Claude, so the daemon can leave it unread until then.
+        acks_pushes: (!is_codex).then_some(true),
     };
     let session = Arc::new(Mutex::new(session));
 
@@ -260,6 +386,9 @@ async fn serve() -> Result<()> {
         .watch_query::<marshal_entities::GetAllRoomMembers>(marshal_entities::GetAllRoomMembers {});
     let nicknames_cell = client.watch_query::<marshal_entities::GetAllSessionNicknames>(
         marshal_entities::GetAllSessionNicknames {},
+    );
+    let wake_watchers_cell = client.watch_query::<marshal_entities::GetAllWakeWatchers>(
+        marshal_entities::GetAllWakeWatchers {},
     );
 
     // Mirror this session's daemon-ASSIGNED nickname to a per-session config
@@ -324,9 +453,7 @@ async fn serve() -> Result<()> {
                     } else {
                         log::info!("[marshal-shim] connected to {addr} — (re)sending session");
                         let snapshot = session_for_resend.lock().unwrap().clone();
-                        if let Err(e) = emit_session_set(&client_for_resend, &snapshot) {
-                            log::warn!("[marshal-shim] re-SET on connect failed: {e}");
-                        }
+                        emit_session_set(&client_for_resend, &snapshot, &session_for_resend);
                     }
                 }
                 ConnectionStatus::Disconnected => {
@@ -342,6 +469,36 @@ async fn serve() -> Result<()> {
     // Now it's safe to start the WS handshake.
     client.set_address(Some(daemon_address));
 
+    // Parent-death watchdog — defense in depth beside the exit-on-EOF path.
+    // Stdin EOF is the primary death signal, but it never arrives when a
+    // duplicated pipe fd survives in some other process, or when a long-lived
+    // app-server keeps holding the stdin of a finished conversation's server.
+    // Our spawner dying reparents us; once that happens no MCP client can
+    // ever reach us again, so fold into the same deregister+exit path.
+    #[cfg(unix)]
+    {
+        // A ppid of 1 at process start means the spawner is already gone (or
+        // this is a deliberately daemonized launch): reparenting is
+        // undetectable there, so the watchdog would either misfire or never
+        // fire — skip and rely on the exit-on-EOF path alone.
+        if initial_ppid > 1 {
+            let client_for_watchdog = Arc::clone(&client);
+            let session_for_watchdog = Arc::clone(&session);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    let ppid = unsafe { libc::getppid() };
+                    if ppid != initial_ppid {
+                        log::warn!(
+                            "[marshal-shim] parent {initial_ppid} exited (reparented to {ppid}); shutting down"
+                        );
+                        deregister_and_exit(&client_for_watchdog, &session_for_watchdog, is_codex);
+                    }
+                }
+            });
+        }
+    }
+
     let host = Arc::new(tools::ToolHost {
         client: Arc::clone(&client),
         pid,
@@ -352,6 +509,7 @@ async fn serve() -> Result<()> {
         rooms_cell,
         members_cell,
         nicknames_cell,
+        wake_watchers_cell,
     });
 
     // Clone: the liveness publisher below also needs the host (for the roster
@@ -364,11 +522,9 @@ async fn serve() -> Result<()> {
     // Codex gets the hook-injected <marshal_inbox> block (it has no server→model
     // push). Describe the one this agent actually gets.
     let inbound_line = if is_codex {
-        "Inbound peer messages are injected into your turn automatically as a \
-         `<marshal_inbox>` block; reply with `send_message` or `broadcast`."
+        "Inbound direct messages appear as an injected `<marshal_inbox>` block."
     } else {
-        "Inbound peer messages arrive as `notifications/claude/channel` events; \
-         reply with `send_message` or `broadcast`."
+        "Inbound direct messages arrive as `notifications/claude/channel` events."
     };
     // Identity line is harness-aware. Under Codex the shim owns no session id
     // (its `session_id` here is a placeholder), so asserting it would tell the
@@ -376,11 +532,9 @@ async fn serve() -> Result<()> {
     // block the SessionStart hook injects. Claude's shim owns the real id.
     let identity_line = if is_codex {
         format!(
-            "You are a marshal-connected session in {cwd}. Your marshal identity \
-             (session id + nickname) is in the <marshal_session> block injected at \
-             session start; pass that id as `asSession` on write tools and \
-             `?asSession=<id>` on reads — this MCP server isn't told which Codex \
-             session it serves."
+            "You are a marshal-connected Codex session in {cwd}. Use the id from \
+             <marshal_session> as `asSession` on writes and `?asSession=` on \
+             caller-relative reads."
         )
     } else {
         format!("You are marshal session {} in {cwd}.", session_id.0)
@@ -389,26 +543,18 @@ async fn serve() -> Result<()> {
         name: "marshal-shim".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         instructions: format!(
-            "{identity_line} Coordinate with sibling \
-             coding-agent sessions via the marshal daemon.\n\
+            "{identity_line} Marshal supports coordination with sibling coding-agent sessions.\n\
              \n\
-             Read state via the `marshal://` resources (whoami, roster, rooms, \n\
-             messages) and act via the marshal tools (send_message, broadcast, \n\
-             join_room, leave_room, set_status, ack_messages); each resource and \n\
-             tool documents its own usage.\n\
+             Read state via `marshal://` resources; write via Marshal tools.\n\
              \n\
-             Each session has a memorable `nickname` (e.g. `swift-falcon`) — a \
-             deterministic adjective-noun derived from its session_id, shown in \
-             its statusline and in marshal://roster. Address peers by nickname, \
-             session_id, or session_id prefix (send_message resolves any of \
-             them). To reach a HUMAN rather than one specific agent, address \
-             their operator identity — the email on their roster row, e.g. \
-             `max@lucid.rocks` (or `op:`/`human:`-prefixed) — and it routes to \
-             whichever of their agents is currently most active. The \
-             `swift-falcon` after a peer's path is its nickname, NOT a git \
-             branch or commit.\n\
+             Address peers by nickname, session id, or id prefix. Address a human \
+             by the operator email on the roster; it routes to their most-active \
+             agent. A push or inbox entry marked for your operator is addressed to \
+             a human: relay it to them; do not act on it or answer for them.\n\
+             {coordination}\n\
              \n\
              {inbound_line}",
+            coordination = marshal_entities::COORDINATION_GUIDANCE,
         ),
         tools: tools::tools_def(is_codex),
         resources: tools::resources_def(is_codex),
@@ -506,6 +652,40 @@ async fn serve() -> Result<()> {
     } else {
         session_discovery::parent_pid()
     };
+
+    // Event-driven manifest refresh. Claude rewrites ~/.claude/sessions/<pid>.json
+    // on every turn-state flip (busy↔idle) and `/rename`; an fs-watch wakes the
+    // publisher the instant it changes, so `activity` and `session_name` track in
+    // near real time rather than only on the 5s backstop tick. Watch the whole
+    // sessions dir (the file is atomically replaced on write); extra wakes from
+    // sibling sessions are cheap no-ops — the loop re-reads OURS and diffs before
+    // pushing. Codex has no manifest → no watch. Debouncer leaked for the process
+    // lifetime, matching the HEAD watcher above.
+    let manifest_wake = Arc::new(tokio::sync::Notify::new());
+    if !is_codex && let Some(dir) = session_discovery::sessions_dir() {
+        use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
+        let wake = Arc::clone(&manifest_wake);
+        match new_debouncer(
+            std::time::Duration::from_millis(150),
+            move |_r: DebounceEventResult| wake.notify_one(),
+        ) {
+            Ok(mut debouncer) => {
+                match debouncer.watcher().watch(&dir, RecursiveMode::NonRecursive) {
+                    Ok(()) => {
+                        log::info!(
+                            "[marshal-shim] watching {} for turn-state changes",
+                            dir.display()
+                        );
+                        Box::leak(Box::new(debouncer));
+                    }
+                    Err(e) => log::warn!("[marshal-shim] manifest watch failed: {e}"),
+                }
+            }
+            Err(e) => log::warn!("[marshal-shim] manifest watcher init failed: {e}"),
+        }
+    }
+    let manifest_wake_for_publish = Arc::clone(&manifest_wake);
+
     tokio::spawn(async move {
         // Under Codex the shim owns no Session, so there is nothing to publish
         // liveness for — the SessionStart / UserPromptSubmit hooks bump the
@@ -521,10 +701,21 @@ async fn serve() -> Result<()> {
         let mut pushed_activity_at: Option<i64> = None;
         let mut pushed_tool: Option<String> = None;
         let mut pushed_tool_at: Option<i64> = None;
+        // Seed from the value SET at registration so an unchanged name is
+        // never re-pushed; only an actual `/rename` dispatches a setter.
+        let mut pushed_session_name: Option<String> =
+            session_for_publish.lock().unwrap().session_name.clone();
+        let mut pushed_activity: Option<String> =
+            session_for_publish.lock().unwrap().activity.clone();
         // Consecutive ticks our own session was absent from the roster.
         let mut missing_from_roster: u32 = 0;
         loop {
-            interval.tick().await;
+            // Wake on the 5s backstop tick OR the instant the manifest changes
+            // (turn-state flip / rename), whichever comes first.
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = manifest_wake_for_publish.notified() => {}
+            }
 
             // Self-heal canonical-id drift. On a compact/clear, Claude re-mints
             // this session's id but keeps the same process + MCP shim running,
@@ -544,18 +735,13 @@ async fn serve() -> Result<()> {
                         registered.0,
                         current_canonical.0
                     );
-                    let stale = session_for_publish.lock().unwrap().clone();
-                    if let Err(e) = emit_session_del(&client_for_publish, &stale) {
-                        log::warn!("[marshal-shim] DEL of stale session failed: {e}");
-                    }
                     let refreshed = {
                         let mut sess = session_for_publish.lock().unwrap();
+                        emit_session_del(&client_for_publish, &sess);
                         sess.id = current_canonical.clone();
                         sess.clone()
                     };
-                    if let Err(e) = emit_session_set(&client_for_publish, &refreshed) {
-                        log::warn!("[marshal-shim] re-SET under new id failed: {e}");
-                    }
+                    emit_session_set(&client_for_publish, &refreshed, &session_for_publish);
                 }
             }
 
@@ -568,10 +754,13 @@ async fn serve() -> Result<()> {
             // half-broken" rather than "I'm unregistered". The roster we already
             // subscribe to is ground truth, so check it directly and re-publish.
             {
-                let me = session_for_publish.lock().unwrap().id.clone();
+                let (me, channels_enabled) = {
+                    let s = session_for_publish.lock().unwrap();
+                    (s.id.clone(), s.channels_enabled)
+                };
                 let sessions = host_for_publish.sessions_cell.get();
                 let empty = sessions.is_empty();
-                let present = sessions.iter().any(|s| s.id == me);
+                let present = registered_on_roster(&sessions, &me);
                 // Health word for the statusline. "ok" when we're on the roster (or it
                 // hasn't synced yet — the statusline's own daemon probe covers a real
                 // outage); "unregistered" when the roster is populated but we're absent
@@ -585,6 +774,13 @@ async fn serve() -> Result<()> {
                         "unregistered"
                     },
                 );
+                // Live-channel state for the statusline's `no live channel` warning —
+                // a DISTINCT signal from health/registration: a fully-registered
+                // session can still be flag-off (forked/resumed launches bypass the
+                // wrapper), which silently drops live delivery. Static per session
+                // (detected once at startup); rewritten here keyed to the CURRENT id so
+                // it follows a canonical-id reconcile.
+                write_channels(me.0.as_ref(), channels_enabled);
                 let (next, resend) = roster_miss_step(missing_from_roster, empty, present);
                 missing_from_roster = next;
                 if resend {
@@ -593,15 +789,48 @@ async fn serve() -> Result<()> {
                         me.0
                     );
                     let snapshot = session_for_publish.lock().unwrap().clone();
-                    if let Err(e) = emit_session_set(&client_for_publish, &snapshot) {
-                        log::warn!("[marshal-shim] roster self-heal re-SET failed: {e}");
-                    }
+                    emit_session_set(&client_for_publish, &snapshot, &session_for_publish);
                 }
             }
 
             // Target the CURRENT id (it may have just been reconciled above) so
             // liveness setters never write to a stale/dead session row.
             let session_id_for_publish = session_for_publish.lock().unwrap().id.clone();
+
+            // Follow mid-session manifest changes (same file the drift check
+            // above reads): the `/rename` name and the live busy/idle activity.
+            // One read, push each field only when it actually changed.
+            let manifest = parent_pid_for_publish.and_then(session_discovery::manifest_fields);
+            let current_session_name = manifest.as_ref().and_then(|m| m.name.clone());
+            let current_activity = manifest.and_then(|m| m.activity);
+            if pushed_session_name != current_session_name {
+                let arc_name = current_session_name.as_deref().map(Arc::<str>::from);
+                let _ = client_for_publish
+                    .send_command::<marshal_entities::SetSessionSessionName, ()>(
+                        &marshal_entities::SetSessionSessionName {
+                            id: session_id_for_publish.clone(),
+                            session_name: arc_name,
+                        },
+                    );
+                if let Ok(mut s) = session_for_publish.lock() {
+                    s.session_name = current_session_name.clone();
+                }
+                pushed_session_name = current_session_name;
+            }
+            if pushed_activity != current_activity {
+                let arc_activity = current_activity.as_deref().map(Arc::<str>::from);
+                let _ = client_for_publish
+                    .send_command::<marshal_entities::SetSessionActivity, ()>(
+                        &marshal_entities::SetSessionActivity {
+                            id: session_id_for_publish.clone(),
+                            activity: arc_activity,
+                        },
+                    );
+                if let Ok(mut s) = session_for_publish.lock() {
+                    s.activity = current_activity.clone();
+                }
+                pushed_activity = current_activity;
+            }
 
             let last_activity_at = activity_for_publish.last_activity_ms();
             let last_activity_at = if last_activity_at > 0 {
@@ -660,20 +889,96 @@ async fn serve() -> Result<()> {
     });
 
     let notify_rx = Mutex::new(Some(notify_rx));
-    mcp::serve_stdio(config, handler, Arc::clone(&activity), move |notifier| {
+    let client_for_acks = Arc::clone(&client);
+    let served = mcp::serve_stdio(config, handler, Arc::clone(&activity), move |notifier| {
         // Spawn a task that drains the NotifyChannel buffer and emits each
         // one onto stdout via the MCP writer. The buffer accumulated any
         // notifications that fired before MCP init.
         if let Some(mut rx) = notify_rx.lock().ok().and_then(|mut g| g.take()) {
             tokio::spawn(async move {
                 while let Some(cmd) = rx.recv().await {
-                    notifier.channel(cmd.content, cmd.meta);
+                    forward_push(&notifier, &client_for_acks, cmd);
                 }
             });
             log::info!("[marshal-shim] notification drain task started");
         }
     })
-    .await
+    .await;
+
+    // Stdin EOF: our MCP client is gone and no one will ever speak to us
+    // again. Take our roster row down now (the daemon's staleness sweep is
+    // only a lagging backstop) and exit the process.
+    if let Err(e) = &served {
+        log::warn!("[marshal-shim] MCP serve ended with error: {e}");
+    }
+    log::info!("[marshal-shim] stdin closed; deregistering and exiting");
+    deregister_and_exit(&client, &session, is_codex);
+}
+
+/// Hand a daemon push to Claude. A direct message or @mention ping is acked
+/// once it has been written and flushed to Claude's stdin: the daemon leaves
+/// a direct message unread until then (our Session sets `acks_pushes`), so
+/// one that never gets this far comes back in the next inbox pull. A failed
+/// write, or an ack that doesn't land, leaves it unread; showing it twice
+/// beats losing it. A flushed line is not proof Claude showed it (Claude may
+/// stop reading and die with it in the pipe), but MCP notifications have no
+/// ack, so this is as far as the shim can see. A mention ping is a direct message too, so acking it keeps
+/// the per-turn inbox from showing it again. Any other push is passed on
+/// without an ack.
+fn forward_push(notifier: &mcp::Notifier, client: &Arc<MykoClient>, cmd: NotifyChannel) {
+    let kind = cmd.meta.get("kind").and_then(serde_json::Value::as_str);
+    let acked_message_id = matches!(kind, Some("new_message" | "mention"))
+        .then(|| {
+            cmd.meta
+                .get("message_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .flatten()
+        .map(|id| MessageId(Arc::from(id)));
+    let Some(message_id) = acked_message_id else {
+        notifier.channel(cmd.content, cmd.meta);
+        return;
+    };
+    let written = notifier.channel_written(cmd.content, cmd.meta);
+    let client = Arc::clone(client);
+    tokio::spawn(async move {
+        if written.await.is_err() {
+            log::warn!(
+                "[marshal-shim] push {} not written to Claude; left unread",
+                message_id.0
+            );
+            return;
+        }
+        // Fire-and-forget like the liveness setters: a lost ack leaves the
+        // message unread, which the next inbox pull repairs.
+        let _ = client.send_command::<AckMessages, AckMessagesResult>(&AckMessages {
+            message_ids: vec![message_id],
+            as_session: None,
+        });
+    });
+}
+
+/// Best-effort roster deregistration followed by a hard process exit.
+///
+/// `std::process::exit` (not a plain return) is deliberate. Returning would
+/// drop the tokio runtime, whose Drop blocks on in-flight blocking-pool work
+/// (tokio's stdin reader among it), and the MykoClient's OS threads would
+/// keep reconnecting regardless — the process would outlive its session
+/// indefinitely. Orphaned shims accumulated by the hundreds on agent exec
+/// hosts until the memcg OOM killer took out unrelated services (netbird
+/// included); exiting unconditionally here is one half of that fix, the
+/// bounded writer drain in `mcp::serve` is the other.
+fn deregister_and_exit(client: &MykoClient, session: &Arc<Mutex<Session>>, is_codex: bool) -> ! {
+    // Under Codex the shim owns no Session (the SessionStart hook registers
+    // the authoritative one) — nothing to deregister.
+    if !is_codex && let Ok(guard) = session.lock() {
+        let snapshot = guard.clone();
+        emit_session_del(client, &snapshot);
+        // One beat for the client's write thread to flush the DEL frame.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::process::exit(0);
+    }
+    std::process::exit(0);
 }
 
 /// SET our Session entity. Used both on initial connect and on every
@@ -699,30 +1004,85 @@ fn roster_miss_step(misses: u32, roster_empty: bool, present: bool) -> (u32, boo
     }
 }
 
-fn emit_session_set(client: &MykoClient, session: &Session) -> Result<()> {
-    let event = MEvent::from_item(session, MEventType::SET, &Uuid::new_v4().to_string());
-    client
-        .send_event(event)
-        .map_err(|e| anyhow::anyhow!("send_event failed: {e}"))?;
-    Ok(())
+/// Whether the roster has our row and it's bound to a connection. A row with no
+/// `client_id` doesn't count: the daemon finds a caller by that binding, so every
+/// write would fail "no session on the roster" while the row looks fine. A hook
+/// that read the roster just before our SET landed can leave such a row.
+fn registered_on_roster(sessions: &[Arc<Session>], me: &SessionId) -> bool {
+    sessions
+        .iter()
+        .any(|s| &s.id == me && s.client_id.is_some())
+}
+
+fn emit_session_set(client: &MykoClient, session: &Session, current: &Arc<Mutex<Session>>) {
+    let current = Arc::clone(current);
+    let result = client.send_command::<marshal_entities::RegisterSession, ()>(
+        &marshal_entities::RegisterSession {
+            session: session.clone(),
+        },
+    );
+    let client = client.clone();
+    let session = session.clone();
+    tokio::spawn(async move {
+        match tools::await_command(result, std::time::Duration::from_secs(10)).await {
+            Ok(()) => {}
+            Err(error) if error == "Command handler not found: RegisterSession" => {
+                let current = current.lock().unwrap();
+                if current.id != session.id {
+                    return;
+                }
+                let event =
+                    MEvent::from_item(&session, MEventType::SET, &Uuid::new_v4().to_string());
+                if let Err(error) = client.send_event(event) {
+                    log::warn!("[marshal-shim] legacy registration failed: {error}");
+                }
+            }
+            Err(error) => log::warn!("[marshal-shim] registration failed: {error}"),
+        }
+    });
 }
 
 /// DEL a Session entity. Used by the canonical-id-drift reconcile to remove the
 /// stale roster row after the session id changes under us (compact/clear), so
 /// peers don't see a ghost under the old id. The daemon's cleanup sweep is a
 /// backstop if this DEL is lost.
-fn emit_session_del(client: &MykoClient, session: &Session) -> Result<()> {
-    let event = MEvent::from_item(session, MEventType::DEL, &Uuid::new_v4().to_string());
-    client
-        .send_event(event)
-        .map_err(|e| anyhow::anyhow!("send_event(DEL) failed: {e}"))?;
-    Ok(())
+fn emit_session_del(client: &MykoClient, session: &Session) {
+    // Commands execute in FIFO order on each connection; a raw DEL could
+    // overtake the preceding RegisterSession command and resurrect the row.
+    let _ = client
+        .send_command::<marshal_entities::DeleteSession, marshal_entities::DeleteSessionResult>(
+            &marshal_entities::DeleteSession {
+                id: session.id.clone(),
+            },
+        );
 }
 
 /// Try each well-known per-user config path in order; return the first
 /// non-empty trimmed line from the first readable file. Trailing newlines
 /// and surrounding whitespace are stripped so an operator can `echo URL >
 /// daemon-address` without worrying about formatting.
+/// The daemon this shim connects to, in the order described in `main`:
+/// address file, then `MARSHAL_DAEMON_ADDRESS`, then `MYKO_ADDRESS`, then
+/// localhost. The Claude/Codex hook bridge derives its hook URL from the same
+/// answer.
+pub(crate) fn daemon_address() -> String {
+    first_daemon_address(
+        read_address_from_config_file(),
+        std::env::var(ADDRESS_ENV).ok(),
+        std::env::var(ADDRESS_ENV_LEGACY).ok(),
+    )
+}
+
+fn first_daemon_address(
+    file: Option<String>,
+    env: Option<String>,
+    legacy_env: Option<String>,
+) -> String {
+    file.or(env)
+        .or(legacy_env)
+        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string())
+}
+
 pub(crate) fn read_address_from_config_file() -> Option<String> {
     for path in config_file_candidates(ADDRESS_FILE) {
         if let Ok(contents) = std::fs::read_to_string(&path) {
@@ -817,6 +1177,49 @@ pub(crate) fn read_health(session_id: &str) -> Option<(String, std::time::Durati
             .and_then(|m| m.elapsed().ok())
             .unwrap_or_default();
         return Some((status, age));
+    }
+    None
+}
+
+fn channels_file_name(session_id: &str) -> String {
+    format!("channels-{session_id}")
+}
+
+/// Write this session's live-channel state for the statusline: `on` / `off` /
+/// `unknown` (flag detected on / off / parent cmdline unreadable). Best-effort.
+/// DISTINCT from the health file — this is a static launch property (flag off =
+/// forked/resumed past the wrapper → no live delivery), not a liveness signal,
+/// so the statusline can warn on it independently of health/registration.
+pub(crate) fn write_channels(session_id: &str, enabled: Option<bool>) {
+    let word = match enabled {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "unknown",
+    };
+    let Some(path) = config_file_candidates(&channels_file_name(session_id))
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, word);
+}
+
+/// Read this session's live-channel state: `Some(false)` = flag OFF (statusline
+/// warns `no live channel`), `Some(true)` = on, `None` = unknown / no file yet
+/// (older shim) → never warn, so we don't false-alarm on an unknown state.
+pub(crate) fn read_channels(session_id: &str) -> Option<bool> {
+    for path in config_file_candidates(&channels_file_name(session_id)) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            return match contents.trim() {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            };
+        }
     }
     None
 }
@@ -927,6 +1330,28 @@ fn detect_project_basename(cwd: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Default the roster's free-form `current_task` from evidence the shim already
+/// holds at registration, so a busy session is never the unlabeled entry a peer
+/// routes a misdirected request to. Two sources, strongest first: the enclosing
+/// `pulse work` workspace (`.workspaces/<name>/…`, named for its task) and then
+/// a non-trunk git branch. Trunk names carry no routing signal and stay `None`.
+/// An explicit `set_status` always overwrites this. The workspace source is
+/// fixed for the session's life; the branch source is read once and the HEAD
+/// watcher does not re-derive it on checkout.
+fn default_current_task(cwd: &str, git_branch: Option<&str>) -> Option<String> {
+    let mut components = std::path::Path::new(cwd).components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == ".workspaces"
+            && let Some(name) = components.next()
+        {
+            return name.as_os_str().to_str().map(str::to_string);
+        }
+    }
+    git_branch
+        .filter(|branch| !matches!(*branch, "main" | "master" | "dev" | "develop" | "trunk"))
+        .map(str::to_string)
+}
+
 /// Resolve which HUMAN drives this session, as an email — the canonical id
 /// that links the same person across harnesses and machines. Layered,
 /// strongest → weakest:
@@ -1014,8 +1439,76 @@ fn detect_host() -> HostInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{ROSTER_MISS_TICKS, detect_git_branch, resolve_git_head_dir, roster_miss_step};
+
+    #[test]
+    fn the_address_file_outranks_the_env_vars() {
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            first_daemon_address(
+                some("ws://file:6155"),
+                some("ws://env:6155"),
+                some("ws://old:6155")
+            ),
+            "ws://file:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, some("ws://env:6155"), some("ws://old:6155")),
+            "ws://env:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, None, some("ws://old:6155")),
+            "ws://old:6155"
+        );
+        assert_eq!(
+            first_daemon_address(None, None, None),
+            DEFAULT_DAEMON_ADDRESS
+        );
+    }
+    use super::{
+        DEFAULT_DAEMON_ADDRESS, ROSTER_MISS_TICKS, default_current_task, detect_git_branch,
+        first_daemon_address, registered_on_roster, resolve_git_head_dir, roster_miss_step,
+    };
+    use marshal_entities::{Session, SessionId};
     use std::process::Command;
+    use std::sync::Arc;
+
+    #[test]
+    fn default_current_task_prefers_the_pulse_workspace_name() {
+        assert_eq!(
+            default_current_task("/root/pulse/.workspaces/lv-1141/marshal", Some("lv-1141")),
+            Some("lv-1141".into())
+        );
+        // The workspace wins even when the branch is trunk: it is the task the
+        // checkout was created for and it cannot go stale on checkout.
+        assert_eq!(
+            default_current_task(
+                "/root/pulse/.workspaces/uestaging-disk/pulse-deploy",
+                Some("main")
+            ),
+            Some("uestaging-disk".into())
+        );
+    }
+
+    #[test]
+    fn default_current_task_falls_back_to_a_non_trunk_branch() {
+        assert_eq!(
+            default_current_task("/root/pulse/pulse-unreal", Some("feat/rotunda-deformer")),
+            Some("feat/rotunda-deformer".into())
+        );
+        // A trailing `.workspaces` with no name after it carries nothing.
+        assert_eq!(
+            default_current_task("/root/pulse/.workspaces", Some("lv-a57b")),
+            Some("lv-a57b".into())
+        );
+    }
+
+    #[test]
+    fn default_current_task_is_none_on_trunk_or_no_evidence() {
+        for trunk in ["main", "master", "dev", "develop", "trunk"] {
+            assert_eq!(default_current_task("/repo", Some(trunk)), None, "{trunk}");
+        }
+        assert_eq!(default_current_task("/repo", None), None);
+    }
 
     #[test]
     fn roster_self_check_ignores_unsynced_and_present_rosters() {
@@ -1041,6 +1534,39 @@ mod tests {
         // The tick that completes the window fires and resets, so a persistently
         // failing SET retries once per window rather than every tick.
         assert_eq!(roster_miss_step(misses, false, false), (0, true));
+    }
+
+    #[test]
+    fn a_row_without_a_client_binding_is_not_registered() {
+        let me = SessionId(Arc::from("me"));
+        let row = |id: &str, client: Option<&str>| {
+            Arc::new(Session {
+                id: SessionId(Arc::from(id)),
+                client_id: client.map(|c| myko::entities::client::ClientId(Arc::from(c))),
+                agent_id: None,
+                pid: 0,
+                cwd: String::new(),
+                git_branch: None,
+                current_task: None,
+                session_name: None,
+                activity: None,
+                kind: None,
+                connected_at: 0,
+                last_activity_at: None,
+                last_tool: None,
+                last_tool_at: None,
+                operator: None,
+                host: None,
+                project: None,
+                channels_enabled: None,
+                acks_pushes: None,
+            })
+        };
+        assert!(registered_on_roster(&[row("me", Some("c"))], &me));
+        // The row a hook leaves behind: on the roster, but writes can't find it.
+        assert!(!registered_on_roster(&[row("me", None)], &me));
+        // Someone else's bound row doesn't stand in for ours.
+        assert!(!registered_on_roster(&[row("other", Some("c"))], &me));
     }
 
     #[test]
@@ -1122,5 +1648,80 @@ mod tests {
         assert_eq!(resolve_git_head_dir(bare.to_str().unwrap()), None);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use myko::wire::{CommandError, MykoMessage};
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[tokio::test]
+    async fn legacy_fallback_requires_exact_unknown_command_and_current_identity() {
+        for (error, drift, fallback) in [
+            ("Command handler not found: RegisterSession", false, true),
+            ("Command handler not found: RegisterSession", true, false),
+            ("registration denied", false, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = MykoClient::new();
+            client.set_address(Some(format!("ws://{}", listener.local_addr().unwrap())));
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let current: Arc<Mutex<Session>> = Arc::new(Mutex::new(
+                serde_json::from_value(
+                    serde_json::json!({"id":"old", "pid":1, "cwd":"/repo", "connectedAt":1}),
+                )
+                .unwrap(),
+            ));
+            emit_session_set(&client, &current.lock().unwrap(), &current);
+            let request = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let frame = socket.next().await.unwrap().unwrap();
+                    if let Message::Text(text) = frame
+                        && let MykoMessage::Command(command) = serde_json::from_str(&text).unwrap()
+                    {
+                        break command;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(request.command_id, "RegisterSession");
+            if drift {
+                let mut session = current.lock().unwrap();
+                emit_session_del(&client, &session);
+                session.id = SessionId(Arc::from("new"));
+            }
+            let response = MykoMessage::CommandError(CommandError::new(
+                request.command["tx"].as_str().unwrap(),
+                "RegisterSession",
+                error,
+            ));
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&response).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let event = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    let frame = socket.next().await.unwrap().unwrap();
+                    if let Message::Text(text) = frame
+                        && let MykoMessage::Event(event) = serde_json::from_str(&text).unwrap()
+                    {
+                        break event;
+                    }
+                }
+            })
+            .await;
+            assert_eq!(event.is_ok(), fallback, "error={error}, drift={drift}");
+            if let Ok(event) = event {
+                assert_eq!(event.item["id"], "old");
+            }
+            client.set_address(None);
+        }
     }
 }

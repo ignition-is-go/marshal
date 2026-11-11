@@ -9,13 +9,13 @@
 //!   every reloaded session a fresh grace window.
 //!
 //! - **Pull/hook sessions** (`client_id: None`): an HTTP-MCP agent that
-//!   registered via the `/hook/session-start` endpoint has no WS client at
-//!   all — it would be swept instantly by the client-id rule. Its liveness
-//!   is instead its `last_activity_at` (the hook bumps it every turn) plus
-//!   a long `HOOK_BACKSTOP` grace. The clean teardown path is the explicit
-//!   `/hook/session-end` DEL; this grace is only a backstop for a client
-//!   that crashed without firing SessionEnd. Because `last_activity_at` is
-//!   wall-clock and persisted, the backstop survives daemon restarts.
+//!   registered via `/hook/session-register` or `/hook/session-start` has no
+//!   WS client at all, so short-horizon elapsed time cannot distinguish a
+//!   live, idle Codex TUI from a crashed one. The explicit
+//!   `/hook/session-end` lifecycle hook owns clean removal, and the
+//!   `PULL_STALE_AFTER` activity backstop reaps rows whose every hook signal
+//!   has been silent for a day — without it, uncleanly-dead agents accrete
+//!   durable sessions without bound (lv-6731).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -24,9 +24,11 @@ use std::{
 };
 
 use chrono::Utc;
-use hyphae::Gettable;
-use marshal_entities::{AutoSource, Message, Room, RoomKind, RoomMember, Session};
-use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
+use hyphae::{Gettable, Materialize};
+use marshal_entities::{
+    AutoSource, Message, MessageRead, Room, RoomKind, RoomMember, Session, WakeWatcher,
+};
+use myko::{core::item::Eventable, server::MykoServerContext, utils::downcast_item};
 
 /// How long a WS-shim session must be without a live client before DEL. Sized
 /// to survive a WHOLE-FLEET reconnect after a daemon restart: on restart every
@@ -39,11 +41,27 @@ use myko::{core::item::Eventable, server::CellServerCtx, utils::downcast_item};
 /// it going stale).
 pub const STALE_AFTER: Duration = Duration::from_secs(60);
 
+/// Activity backstop for pull/hook sessions (`client_id: None`). They have no
+/// WS client whose loss marks them dead, and `SessionEnd` only fires on a
+/// clean exit — a crashed or discarded Codex/hook agent leaves its row
+/// forever, which is how production accumulated ~2M durable sessions
+/// (lv-6731). A pull session with no hook signal for this long is reaped.
+///
+/// Safe by construction: every prompt-submit hook idempotently re-registers
+/// the session (see `hooks::register_hook_session`), so a live TUI idle past
+/// the backstop gets its row repaired on its next prompt. The cost of a
+/// false-positive reap is small — the row comes back on the next hook, and
+/// its direct messages and read marks survive the DEL — while the cost of no backstop is
+/// unbounded store growth. Sized generously above any plausible think-time
+/// gap of a live session.
+pub const PULL_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Messages older than this are pruned by `sweep_messages`, regardless of
-/// recipient. Direct messages already cascade away with a DEL'd recipient
-/// session; this bounds the ones that DON'T — broadcasts addressed to the
-/// never-DEL'd `everyone`/`op:`/`project:` rooms, which otherwise accumulate
-/// forever (review R6/D). DELing a Message cascades its `MessageRead` rows.
+/// recipient. A direct message outlives a DEL'd recipient (it comes back
+/// under the same id), so this is the only thing that removes it. A broadcast
+/// goes with its room, but broadcasts to the never-DEL'd
+/// `everyone`/`op:`/`project:` rooms would otherwise accumulate forever
+/// (review R6/D). DELing a Message cascades its `MessageRead` rows.
 pub const MESSAGE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Run the message-retention sweep every N session-sweeper ticks. The scan is
@@ -51,20 +69,13 @@ pub const MESSAGE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 /// bounds growth without paying the scan each tick.
 const MESSAGE_SWEEP_EVERY: u64 = 100;
 
-/// How long a pull/hook session (no WS client) may go without any hook
-/// activity before the backstop DELs it. Generous: merely-idle sessions
-/// re-register on their next turn, so this only needs to be short enough
-/// to eventually reclaim sessions whose client crashed without firing
-/// `/hook/session-end`. 60 min.
-pub const HOOK_BACKSTOP: Duration = Duration::from_secs(60 * 60);
-
 /// How often the sweeper wakes up to check for stale sessions. Anything
 /// roughly under `STALE_AFTER` is fine; the trade-off is reaction latency
 /// (lower) vs. wake-ups per minute (higher).
 pub const TICK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Run the sweeper forever. Spawn this on a tokio task and forget it.
-pub async fn run_sweeper(ctx: CellServerCtx) {
+pub async fn run_sweeper(ctx: MykoServerContext) {
     let mut disconnected_since: HashMap<Arc<str>, Instant> = HashMap::new();
     let mut interval = tokio::time::interval(TICK_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -74,6 +85,7 @@ pub async fn run_sweeper(ctx: CellServerCtx) {
         interval.tick().await;
         sweep_once(&ctx, &mut disconnected_since);
         sweep_rooms(&ctx);
+        sweep_wake_watchers(&ctx);
         // Prune old messages on the first tick (boot cleanup) and every
         // MESSAGE_SWEEP_EVERY ticks thereafter — not every tick (the scan is
         // O(all messages)).
@@ -84,17 +96,48 @@ pub async fn run_sweeper(ctx: CellServerCtx) {
     }
 }
 
-/// Prune messages older than `MESSAGE_TTL`. Bounds the never-cascaded
-/// broadcasts (to `everyone`/`op:`/`project:`, which are never DEL'd) that
-/// would otherwise grow the store without limit. DELing a Message cascades its
-/// `MessageRead` rows via `belongs_to(Message)`, so read-state is cleaned too.
-fn sweep_messages(ctx: &CellServerCtx) {
+/// Remove wake watchers whose session has gone. They've already stopped counting,
+/// or soon will, so this only keeps the store from growing.
+fn sweep_wake_watchers(ctx: &MykoServerContext) {
+    let (Some(watchers), Some(sessions)) = (
+        ctx.registry.get(WakeWatcher::ENTITY_NAME_STATIC),
+        ctx.registry.get(Session::ENTITY_NAME_STATIC),
+    ) else {
+        return;
+    };
+    let live: HashSet<Arc<str>> = sessions
+        .entries()
+        .materialize()
+        .get()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    for (id, _) in watchers.entries().materialize().get() {
+        if !live.contains(&id)
+            && let Err(e) = ctx.del_by_id(WakeWatcher::ENTITY_NAME_STATIC, &id)
+        {
+            log::warn!("[cleanup] removing wake watcher {id} failed: {e}");
+        }
+    }
+}
+
+/// Prune messages older than `MESSAGE_TTL`. Direct messages don't cascade
+/// with their recipient and the auto-rooms are never DEL'd, so this is what
+/// keeps the store from growing without limit. `del_by_id` skips
+/// relationship cascades, so the pruned messages' `MessageRead` rows are
+/// swept separately (`sweep_orphan_reads`).
+fn sweep_messages(ctx: &MykoServerContext) {
+    prune_old_messages(ctx);
+    sweep_orphan_reads(ctx);
+}
+
+fn prune_old_messages(ctx: &MykoServerContext) {
     let Some(store) = ctx.registry.get(Message::ENTITY_NAME_STATIC) else {
         return;
     };
     let cutoff = Utc::now().timestamp_millis() - MESSAGE_TTL.as_millis() as i64;
     let mut to_delete: Vec<Arc<str>> = Vec::new();
-    for (id, item) in store.entries().get() {
+    for (id, item) in store.entries().materialize().get() {
         if let Some(m) = downcast_item::<Message>(&item)
             && m.sent_at < cutoff
         {
@@ -116,6 +159,52 @@ fn sweep_messages(ctx: &CellServerCtx) {
     }
 }
 
+/// DEL every `MessageRead` whose message no longer exists: the ones a prune
+/// left behind, and any orphaned another way. Read-state no longer cascades
+/// on a session DEL, so this is what bounds it.
+fn sweep_orphan_reads(ctx: &MykoServerContext) {
+    let Some(read_store) = ctx.registry.get(MessageRead::ENTITY_NAME_STATIC) else {
+        return;
+    };
+    // Reads first, then messages: a read is written after its message, so
+    // every read in this snapshot has its message in the next one, and a
+    // send landing mid-sweep never loses its read.
+    let reads = read_store.entries().materialize().get();
+    let messages: HashSet<Arc<str>> = ctx
+        .registry
+        .get(Message::ENTITY_NAME_STATIC)
+        .map(|store| {
+            store
+                .entries()
+                .materialize()
+                .get()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut to_delete: Vec<Arc<str>> = Vec::new();
+    for (id, item) in reads {
+        if let Some(read) = downcast_item::<MessageRead>(&item)
+            && !messages.contains(&read.message_id.0)
+        {
+            to_delete.push(id);
+        }
+    }
+    if to_delete.is_empty() {
+        return;
+    }
+    log::info!(
+        "[cleanup] dropping {} read mark(s) whose message is gone",
+        to_delete.len()
+    );
+    for id in to_delete {
+        if let Err(e) = ctx.del_by_id(MessageRead::ENTITY_NAME_STATIC, &id) {
+            log::warn!("[cleanup] drop read mark {} failed: {}", id, e);
+        }
+    }
+}
+
 /// GC pass: DEL auto-rooms that no longer earn their place — any `host:`
 /// room (that anchor is retired; see `auto_rooms.rs`) and any auto-room that
 /// has dropped to zero members (its anchoring sessions were all reaped, e.g.
@@ -123,7 +212,7 @@ fn sweep_messages(ctx: &CellServerCtx) {
 /// `everyone` is permanent; adhoc rooms are user-owned and left alone.
 /// DELing a Room cascades its RoomMember rows via `belongs_to(Room)`, so
 /// live memberships never orphan.
-fn sweep_rooms(ctx: &CellServerCtx) {
+fn sweep_rooms(ctx: &MykoServerContext) {
     let Some(room_store) = ctx.registry.get(Room::ENTITY_NAME_STATIC) else {
         return;
     };
@@ -133,14 +222,14 @@ fn sweep_rooms(ctx: &CellServerCtx) {
 
     // Live member count per room id.
     let mut member_counts: HashMap<Arc<str>, usize> = HashMap::new();
-    for (_id, item) in member_store.entries().get() {
+    for (_id, item) in member_store.entries().materialize().get() {
         if let Some(m) = downcast_item::<RoomMember>(&item) {
             *member_counts.entry(m.room_id.0.clone()).or_default() += 1;
         }
     }
 
     let mut to_delete: Vec<Arc<str>> = Vec::new();
-    for (id, item) in room_store.entries().get() {
+    for (id, item) in room_store.entries().materialize().get() {
         let Some(room) = downcast_item::<Room>(&item) else {
             continue;
         };
@@ -167,7 +256,7 @@ fn sweep_rooms(ctx: &CellServerCtx) {
     }
 }
 
-fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, Instant>) {
+fn sweep_once(ctx: &MykoServerContext, disconnected_since: &mut HashMap<Arc<str>, Instant>) {
     let Some(session_store) = ctx.registry.get(Session::ENTITY_NAME_STATIC) else {
         return;
     };
@@ -180,29 +269,43 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
 
     let live_client_ids: HashSet<Arc<str>> = client_store
         .entries()
+        .materialize()
         .get()
         .into_iter()
         .map(|(id, _)| id)
         .collect();
 
     let now = Instant::now();
-    let now_ms = Utc::now().timestamp_millis();
-    let backstop_ms = HOOK_BACKSTOP.as_millis() as i64;
     let mut to_delete: Vec<Arc<str>> = Vec::new();
     let mut still_disconnected: HashSet<Arc<str>> = HashSet::new();
 
-    for (id, item) in session_store.entries().get() {
+    for (id, item) in session_store.entries().materialize().get() {
         let Some(session) = downcast_item::<Session>(&item) else {
             continue;
         };
 
         match session.client_id.as_ref() {
-            // Pull/hook session: no WS client by design. Liveness is hook
-            // activity + the long backstop; the SessionEnd hook is the
-            // clean DEL path. Not subject to the WS reconnect grace.
+            // Pull/hook session: no WS client by design, so short-horizon
+            // elapsed time cannot tell a crashed client from a live idle TUI —
+            // `SessionEnd` owns the prompt lifecycle and retaining the row
+            // preserves nickname routing and unread direct messages while the
+            // Codex process remains open. But an uncleanly-dead agent never
+            // sends SessionEnd, so `PULL_STALE_AFTER` backstops it: reap when
+            // every hook signal has been silent that long. A live TUI that
+            // trips it is repaired on its next prompt (idempotent hook
+            // re-registration).
             None => {
-                let last = session.last_activity_at.unwrap_or(session.connected_at);
-                if now_ms.saturating_sub(last) >= backstop_ms {
+                let last_signal_ms = [
+                    session.last_activity_at,
+                    session.last_tool_at,
+                    Some(session.connected_at),
+                ]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(0);
+                let now_ms = Utc::now().timestamp_millis();
+                if now_ms.saturating_sub(last_signal_ms) >= PULL_STALE_AFTER.as_millis() as i64 {
                     to_delete.push(id);
                 }
             }
@@ -238,20 +341,22 @@ fn sweep_once(ctx: &CellServerCtx, disconnected_since: &mut HashMap<Arc<str>, In
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marshal_entities::{Message, MessageId, RoomId, RoomMemberId, SessionId};
+    use marshal_entities::{
+        Message, MessageId, MessageRead, MessageReadId, RoomId, RoomMemberId, SessionId,
+    };
     use myko::{
         server::Persister,
         wire::{MEvent, MEventType},
     };
-    use myko_server::{BlackholePersister, CellServer};
+    use myko_server::{BlackholePersister, MykoServer};
     use std::collections::HashSet;
     use uuid::Uuid;
 
-    fn setup() -> CellServerCtx {
+    fn setup() -> MykoServerContext {
         marshal_entities::link();
         crate::link();
         let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
-        let server = CellServer::builder()
+        let server = MykoServer::builder()
             .with_default_persister(blackhole)
             .build();
         let ctx = server.ctx();
@@ -259,7 +364,93 @@ mod tests {
         ctx
     }
 
-    fn set_room(ctx: &CellServerCtx, id: &str, kind: RoomKind) {
+    fn set_hook_session(ctx: &MykoServerContext, id: &str, last_activity_at: i64) {
+        let session = Session {
+            id: SessionId(Arc::from(id)),
+            client_id: None,
+            agent_id: None,
+            pid: 0,
+            cwd: "/repo".into(),
+            git_branch: None,
+            current_task: None,
+            session_name: None,
+            activity: None,
+            kind: None,
+            connected_at: 0,
+            last_activity_at: Some(last_activity_at),
+            last_tool: None,
+            last_tool_at: None,
+            operator: None,
+            host: None,
+            project: None,
+            channels_enabled: None,
+            acks_pushes: None,
+        };
+        let event = MEvent::from_item(&session, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![event])
+            .expect("apply hook Session SET");
+    }
+
+    fn session_ids(ctx: &MykoServerContext) -> HashSet<String> {
+        ctx.registry
+            .get(Session::ENTITY_NAME_STATIC)
+            .map(|store| {
+                store
+                    .entries()
+                    .materialize()
+                    .get()
+                    .into_iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sweep_preserves_idle_hook_sessions_within_the_backstop() {
+        let ctx = setup();
+        set_hook_session(&ctx, "idle-codex", Utc::now().timestamp_millis());
+
+        sweep_once(&ctx, &mut HashMap::new());
+
+        assert!(
+            session_ids(&ctx).contains("idle-codex"),
+            "short-horizon elapsed time cannot distinguish a live idle Codex TUI from a crash"
+        );
+    }
+
+    /// Seed a Client row so the sweeper's warm-up gate (no Client store yet ⇒
+    /// no delete decisions) sees a live snapshot, as in production.
+    fn set_client(ctx: &MykoServerContext, id: &str) {
+        let client = myko::entities::client::Client {
+            id: myko::entities::client::ClientId(Arc::from(id)),
+            server_id: myko::entities::server::ServerId(Arc::from("srv")),
+            address: None,
+            windback: None,
+        };
+        let ev = MEvent::from_item(&client, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![ev]).expect("apply Client SET");
+    }
+
+    #[test]
+    fn sweep_reaps_hook_sessions_past_the_activity_backstop() {
+        let ctx = setup();
+        set_client(&ctx, "ws-client");
+        let stale = Utc::now().timestamp_millis() - PULL_STALE_AFTER.as_millis() as i64 - 60_000;
+        set_hook_session(&ctx, "dead-codex", stale);
+        set_hook_session(&ctx, "live-codex", Utc::now().timestamp_millis());
+
+        sweep_once(&ctx, &mut HashMap::new());
+
+        let ids = session_ids(&ctx);
+        assert!(
+            !ids.contains("dead-codex"),
+            "a pull session silent past PULL_STALE_AFTER is unboundedly-retained garbage (lv-6731)"
+        );
+        assert!(ids.contains("live-codex"));
+    }
+
+    fn set_room(ctx: &MykoServerContext, id: &str, kind: RoomKind) {
         let room = Room {
             id: RoomId(Arc::from(id)),
             name: id.to_string(),
@@ -271,7 +462,7 @@ mod tests {
         ctx.apply_event_batch(vec![ev]).expect("apply Room SET");
     }
 
-    fn set_member(ctx: &CellServerCtx, room_id: &str, session_id: &str) {
+    fn set_member(ctx: &MykoServerContext, room_id: &str, session_id: &str) {
         let member = RoomMember {
             id: RoomMemberId(Arc::from(RoomMember::make_id(room_id, session_id).as_str())),
             room_id: RoomId(Arc::from(room_id)),
@@ -283,11 +474,12 @@ mod tests {
             .expect("apply RoomMember SET");
     }
 
-    fn room_ids(ctx: &CellServerCtx) -> HashSet<String> {
+    fn room_ids(ctx: &MykoServerContext) -> HashSet<String> {
         ctx.registry
             .get(Room::ENTITY_NAME_STATIC)
             .map(|s| {
                 s.entries()
+                    .materialize()
                     .get()
                     .into_iter()
                     .map(|(id, _)| id.to_string())
@@ -360,8 +552,9 @@ mod tests {
         );
     }
 
-    fn set_message(ctx: &CellServerCtx, id: &str, sent_at: i64) {
+    fn set_message(ctx: &MykoServerContext, id: &str, sent_at: i64) {
         let msg = Message {
+            response_required: false,
             id: MessageId(Arc::from(id)),
             from_session_id: SessionId(Arc::from("sender")),
             to_session_id: Some(SessionId(Arc::from("recipient"))),
@@ -374,17 +567,64 @@ mod tests {
         ctx.apply_event_batch(vec![ev]).expect("apply Message SET");
     }
 
-    fn message_ids(ctx: &CellServerCtx) -> HashSet<String> {
+    fn message_ids(ctx: &MykoServerContext) -> HashSet<String> {
         ctx.registry
             .get(Message::ENTITY_NAME_STATIC)
             .map(|s| {
                 s.entries()
+                    .materialize()
                     .get()
                     .into_iter()
                     .map(|(id, _)| id.to_string())
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn set_read(ctx: &MykoServerContext, message_id: &str, session_id: &str) {
+        let read = MessageRead {
+            id: MessageReadId(Arc::from(MessageRead::make_id(message_id, session_id))),
+            message_id: MessageId(Arc::from(message_id)),
+            session_id: SessionId(Arc::from(session_id)),
+            read_at: 1,
+        };
+        let ev = MEvent::from_item(&read, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![ev])
+            .expect("apply MessageRead SET");
+    }
+
+    fn read_ids(ctx: &MykoServerContext) -> HashSet<String> {
+        ctx.registry
+            .get(MessageRead::ENTITY_NAME_STATIC)
+            .map(|s| {
+                s.entries()
+                    .materialize()
+                    .get()
+                    .into_iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// `del_by_id` skips relationship cascades, so a pruned message's reads,
+    /// and reads whose message is gone some other way, must be swept here.
+    #[test]
+    fn sweep_messages_drops_reads_whose_message_is_gone() {
+        let ctx = setup();
+        let now = chrono::Utc::now().timestamp_millis();
+        set_message(&ctx, "old", now - MESSAGE_TTL.as_millis() as i64 - 1);
+        set_message(&ctx, "recent", now - 1_000);
+        set_read(&ctx, "old", "recipient");
+        set_read(&ctx, "recent", "recipient");
+        set_read(&ctx, "never-existed", "recipient");
+
+        sweep_messages(&ctx);
+
+        assert_eq!(
+            read_ids(&ctx),
+            HashSet::from(["recent::recipient".to_string()])
+        );
     }
 
     #[test]

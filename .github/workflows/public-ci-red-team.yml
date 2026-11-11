@@ -1,0 +1,143 @@
+name: Public CI red team
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/public-ci-fork-probe
+
+permissions:
+  contents: read
+
+jobs:
+  boundary-probes:
+    name: Sandbox boundary probes
+    runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py
+
+      - name: Identify the sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          id
+          systemd-detect-virt || true
+          cat /proc/1/cgroup
+          findmnt -T /home/runner/_work
+          grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):' /proc/self/status
+          test "$(awk '/^Seccomp:/ { print $2 }' /proc/self/status)" = 2
+          sudo -n id || true
+
+      - name: Reject host and cluster resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          forbidden_paths=(
+            /host
+            /run/containerd/containerd.sock
+            /run/k3s/containerd/containerd.sock
+            /var/run/docker.sock
+            /var/lib/kubelet
+            /etc/rancher/k3s
+            /dev/kvm
+            /dev/mem
+            /dev/vhost-vsock
+            /var/run/secrets/kubernetes.io/serviceaccount/token
+          )
+
+          for path in "${forbidden_paths[@]}"; do
+            if [[ -e "$path" ]]; then
+              echo "::error::Forbidden host or cluster resource is visible: $path"
+              exit 1
+            fi
+          done
+
+          if mount | grep -Eq ' on /(host|var/lib/kubelet|run/containerd)(/| )'; then
+            echo "::error::Host filesystem mount is visible"
+            exit 1
+          fi
+
+      - name: Reject private network reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assert_blocked() {
+            local host=$1
+            local port=$2
+            if timeout 3 bash -c "</dev/tcp/$host/$port" 2>/dev/null; then
+              echo "::error::Private endpoint is reachable: $host:$port"
+              exit 1
+            fi
+          }
+
+          assert_blocked 192.168.1.159 6443
+          assert_blocked 192.168.1.29 22
+          assert_blocked 192.168.1.29 10250
+          assert_blocked 10.43.0.1 443
+          assert_blocked 169.254.169.254 80
+          assert_blocked 100.64.0.1 443
+
+          curl --fail --silent --show-error --max-time 15 \
+            https://api.github.com/meta >/dev/null
+
+      - name: Reject cross-job persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker=/home/runner/_work/.public-ci-red-team-marker
+          test ! -e "$marker"
+          printf '%s\n' "$GITHUB_RUN_ID" > "$marker"
+
+      - name: Inventory exposed environment names
+        shell: bash
+        run: |
+          set -euo pipefail
+          env | sed 's/=.*//' | sort
+
+      - name: Verify fork pull request token boundary
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REPO_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$HEAD_REPO_IS_FORK" = true
+          test -n "$GITHUB_TOKEN"
+
+          repo_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY")
+          test "$repo_status" = 200
+
+          admin_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/permissions")
+          case "$admin_status" in
+            403|404) ;;
+            *)
+              echo "::error::Fork token unexpectedly reached an administration endpoint (HTTP $admin_status)"
+              exit 1
+              ;;
+          esac
+          echo "Fork token read check: HTTP $repo_status; administration check: HTTP $admin_status"
+
+      - name: Hold for runtime inspection
+        run: sleep 60
+
+      - name: Report runner resources
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 scripts/ci/report_resources.py

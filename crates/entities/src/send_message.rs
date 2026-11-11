@@ -11,8 +11,9 @@
 //!   4. if the recipient has a live WS client, best-effort dispatches a
 //!      `NotifyChannel` to surface it immediately (the Track-2 live path);
 //!      otherwise the recipient pulls it next turn,
-//!   5. returns the result, with `deliveredLive` reflecting whether the
-//!      best-effort push landed.
+//!   5. returns separate status for the synchronous live-channel push and
+//!      asynchronous wake boundary. The daemon cannot observe a later Codex
+//!      bridge `turn/start`, so it never claims that wake succeeded.
 //!
 //! Only an unresolvable sender or unknown recipient returns a
 //! `CommandError`; an offline recipient is success.
@@ -20,6 +21,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use myko::prelude::{EventPublishing as _, RequestScoped as _};
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
     myko_command,
@@ -28,15 +30,19 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    message::{Message, MessageId},
+    message::{CONTEXT_BODY_MAX_CHARS, Message, MessageId, context_preview},
     message_read::{MessageRead, MessageReadId},
     notify::NotifyChannel,
     session::{GetAllSessions, Session, SessionId, resolve_caller},
+    wake_watcher::{GetAllWakeWatchers, WakeWatcher},
 };
 
 #[myko_command(SendMessageResult)]
 pub struct SendMessage {
     pub to_session_id: SessionId,
+    #[serde(default)]
+    pub response_required: bool,
+
     pub body: String,
 
     /// Self-identified sender, for callers with no connection identity —
@@ -58,15 +64,79 @@ pub struct SendMessageResult {
     /// disambiguate by host+cwd in edge cases the client couldn't see).
     pub to_session_id: SessionId,
     pub sent_at: i64,
-    /// `true` only if the recipient had a live WS client AND its session can
-    /// actually render channel pushes (claude launched with
-    /// `--dangerously-load-development-channels`). `false` if the recipient is
-    /// offline OR channels-off — in both cases the message was NOT shown live
-    /// and is picked up via the next hook (inbox). Both are success — the
-    /// message is always persisted. (channels-off was previously mis-reported
-    /// as `true`, so a sender thought a dropped push had landed.)
+    /// Outcome of the synchronous `NotifyChannel` path. This says nothing
+    /// about a later wake bridge attempt.
+    #[serde(default)]
+    pub live_push: LivePushStatus,
+    /// Whether this synchronous response observed an asynchronous wake.
+    ///
+    /// A durable unread message may be noticed by a Codex bridge after this
+    /// command returns. Marshal currently has no bridge acknowledgement path,
+    /// so an inbox result is `Unobserved`, never a false claim of wake failure.
+    #[serde(default)]
+    pub wake: WakeStatus,
+    /// Compatibility alias for clients predating `live_push`.
+    ///
+    /// This is `true` exactly when `live_push == Delivered`. It describes only
+    /// the synchronous channel push; it does not describe asynchronous wake.
     #[serde(default)]
     pub delivered_live: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
+pub enum LivePushStatus {
+    /// Compatibility default when a newer client reads an older daemon result.
+    #[default]
+    Unknown,
+    /// The recipient's live channel accepted the push.
+    Delivered,
+    /// The recipient had no render-capable live channel, so no push was tried.
+    Unavailable,
+    /// A render-capable live channel was advertised, but dispatch failed.
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
+pub enum WakeStatus {
+    /// The live push landed. The durable inbox copy is marked read then, or,
+    /// for a recipient that acks its own pushes, when it acks.
+    NotNeeded,
+    /// No live push landed, but a waiter holds `/hook/wait` for the recipient,
+    /// so the waiter will hand it the message and start a turn: the roster's
+    /// `wake: waiting`. States that a path EXISTS, never that a wake happened.
+    ///
+    /// It exists because `live_push: unavailable` alone can't tell a sender
+    /// whether the recipient will wake or will only see the message at its next
+    /// turn. A live client alone doesn't count.
+    Expected,
+    /// Wake handling, if configured, happens after this response and is not
+    /// observed by the sender.
+    #[default]
+    Unobserved,
+}
+
+impl SendMessageResult {
+    /// Normalize a response from an older daemon that only populated
+    /// `delivered_live`.
+    pub fn effective_live_push(&self) -> LivePushStatus {
+        match (self.live_push, self.delivered_live) {
+            (LivePushStatus::Unknown, true) => LivePushStatus::Delivered,
+            (status, _) => status,
+        }
+    }
+
+    /// Normalize wake status across mixed daemon/client versions.
+    pub fn effective_wake(&self) -> WakeStatus {
+        if self.effective_live_push() == LivePushStatus::Delivered {
+            WakeStatus::NotNeeded
+        } else {
+            self.wake
+        }
+    }
 }
 
 impl CommandHandler for SendMessage {
@@ -94,7 +164,8 @@ impl CommandHandler for SendMessage {
 
         let now = Utc::now().timestamp_millis();
         let msg = Message {
-            id: MessageId(Arc::from(Uuid::new_v4().to_string())),
+            response_required: self.response_required,
+            id: MessageId(Arc::from(Uuid::now_v7().to_string())),
             from_session_id: sender.id.clone(),
             to_session_id: Some(recipient.id.clone()),
             to_room_id: None,
@@ -123,30 +194,70 @@ impl CommandHandler for SendMessage {
         // window before the assignment saga has run. The full id stays in `meta`
         // for exact reply routing; `from_nickname` lets an agent reply by name.
         let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
-        let delivered_live = match recipient.client_id.as_ref() {
-            Some(cid) if recipient_can_render => push_to_client(
-                cid.0.as_ref(),
-                // Concise origin ping only — no leading "marshal:" (Claude
-                // already prefixes the channel name, else it reads "marshal:
-                // marshal:") and no body (it would just be a truncated banner;
-                // the full body is in `meta.body`, the persisted Message, and
-                // the inbox).
-                format!("new message from {from_nickname}"),
-                serde_json::json!({
-                    "source": "marshal",
-                    "kind": "new_message",
-                    "from_session": sender.id.0.as_ref(),
-                    "from_nickname": from_nickname,
-                    "to_session": recipient.id.0.as_ref(),
-                    // Present when addressed to a human via their operator
-                    // identity: the receiving agent should surface it to that
-                    // operator, not treat it as ordinary peer chatter.
-                    "to_operator": to_operator,
-                    "body": self.body,
-                    "sent_at": now,
-                }),
-            ),
-            _ => false,
+        let (context_body, body_truncated) = context_preview(&msg.body, CONTEXT_BODY_MAX_CHARS);
+        let live_push = match recipient.client_id.as_ref() {
+            Some(cid) if recipient_can_render => {
+                if push_to_client(
+                    cid.0.as_ref(),
+                    // Concise origin ping only — no leading "marshal:" (Claude
+                    // already prefixes the channel name, else it reads "marshal:
+                    // marshal:") and no body (it would just be a truncated
+                    // banner). `meta.body` is a bounded model-context preview;
+                    // the persisted Message retains the complete body.
+                    direct_push_content(
+                        &from_nickname,
+                        to_operator.as_deref(),
+                        body_truncated.then_some(msg.id.0.as_ref()),
+                    ),
+                    serde_json::json!({
+                        "source": "marshal",
+                        "kind": "new_message",
+                        "message_id": msg.id.0.as_ref(),
+                        "from_session": sender.id.0.as_ref(),
+                        "from_nickname": from_nickname,
+                        "to_session": recipient.id.0.as_ref(),
+                        // Present when addressed to a human via their operator
+                        // identity: the receiving agent should surface it to that
+                        // operator, not treat it as ordinary peer chatter.
+                        "to_operator": to_operator,
+                        "response_required": self.response_required,
+                        "body": context_body,
+                        "body_truncated": body_truncated,
+                        "sent_at": now,
+                    }),
+                ) {
+                    LivePushStatus::Delivered
+                } else {
+                    LivePushStatus::Failed
+                }
+            }
+            _ => LivePushStatus::Unavailable,
+        };
+        let delivered_live = live_push == LivePushStatus::Delivered;
+        // Report a wake path only when one exists: the same rule as the
+        // roster's `wake_state`. A live push that landed needs no wake.
+        // Otherwise the message wakes the recipient only through a waiter
+        // holding `/hook/wait` (a `WakeWatcher`).
+        //
+        // A live client alone isn't a wake path. A Claude session's MCP shim
+        // without the channels flag is connected but can't wake it, and the
+        // roster calls that session `none`; reporting `expected` there told
+        // senders a session would wake when it wouldn't. Codex's MCP shim
+        // registers no session, so its rows are hook-owned and its bridge's
+        // wake leaves no trace here: those report `unobserved`, as the roster
+        // reports `none`.
+        let waiting = || {
+            ctx.exec_query(GetAllWakeWatchers {})
+                .unwrap_or_default()
+                .iter()
+                .any(|w: &Arc<WakeWatcher>| {
+                    w.id.0.as_ref() == recipient.id.0.as_ref() && w.until > now
+                })
+        };
+        let wake = match live_push {
+            LivePushStatus::Delivered => WakeStatus::NotNeeded,
+            _ if waiting() => WakeStatus::Expected,
+            _ => WakeStatus::Unobserved,
         };
 
         // Dedup the pull inbox against a landed live push. A channels-ON
@@ -156,7 +267,12 @@ impl CommandHandler for SendMessage {
         // recipient sees every direct message TWICE (once live, once in the
         // inbox). Best-effort: a failed write just falls back to that harmless
         // double-surface.
-        if delivered_live {
+        //
+        // "Delivered" here only means the push was queued on the connection,
+        // so a connection that stops being read and then dies loses it, already
+        // marked read. A recipient that acks its own pushes (`acks_pushes`)
+        // is left unread until that ack instead.
+        if delivered_live && recipient.acks_pushes != Some(true) {
             let read_id = MessageRead::make_id(msg.id.0.as_ref(), recipient.id.0.as_ref());
             if let Err(e) = ctx.emit_set(&MessageRead {
                 id: MessageReadId(Arc::from(read_id.as_str())),
@@ -172,6 +288,8 @@ impl CommandHandler for SendMessage {
             message_id: msg.id,
             to_session_id: recipient.id.clone(),
             sent_at: now,
+            live_push,
+            wake,
             delivered_live,
         })
     }
@@ -360,4 +478,63 @@ pub(crate) fn push_to_client(client_id: &str, content: String, meta: serde_json:
     let cmd = NotifyChannel { content, meta };
     let request = CommandRequest::new(cmd);
     registry.send_command_request_to(client_id, &request)
+}
+
+/// The channel banner for a direct message. Agent-addressed mail stays a
+/// concise origin ping; human-addressed mail opens with the relay-to-operator
+/// contract so the recipient agent puts it in front of the person instead of
+/// acting on it. Pure so it can be asserted without a live client registry.
+/// `truncated_id` is the message's id when its `meta.body` preview was cut,
+/// so the line the model reads says where the rest is.
+pub(crate) fn direct_push_content(
+    from_nickname: &str,
+    to_operator: Option<&str>,
+    truncated_id: Option<&str>,
+) -> String {
+    let banner = match to_operator {
+        Some(op) => format!(
+            "{} New message from {from_nickname}.",
+            crate::message::operator_relay_notice(op)
+        ),
+        None => format!("new message from {from_nickname}"),
+    };
+    with_truncated_notice(banner, truncated_id)
+}
+
+pub(crate) fn with_truncated_notice(banner: String, truncated_id: Option<&str>) -> String {
+    match truncated_id {
+        Some(id) => format!("{banner} {}", crate::message::truncated_notice(id)),
+        None => banner,
+    }
+}
+
+#[cfg(test)]
+mod push_content_tests {
+    use super::direct_push_content;
+
+    #[test]
+    fn agent_addressed_banner_is_unchanged() {
+        assert_eq!(
+            direct_push_content("fleet-wolf", None, None),
+            "new message from fleet-wolf"
+        );
+    }
+
+    #[test]
+    fn human_addressed_banner_opens_with_the_relay_contract() {
+        let content = direct_push_content("fleet-wolf", Some("max@lucid.rocks"), None);
+        assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
+        assert!(content.ends_with("New message from fleet-wolf."));
+    }
+
+    #[test]
+    fn a_cut_preview_says_where_the_full_message_is() {
+        assert_eq!(
+            direct_push_content("fleet-wolf", None, Some("m-1")),
+            "new message from fleet-wolf [truncated; full message m-1 remains in marshal://messages]"
+        );
+        let content = direct_push_content("fleet-wolf", Some("max@lucid.rocks"), Some("m-1"));
+        assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
+        assert!(content.ends_with("[truncated; full message m-1 remains in marshal://messages]"));
+    }
 }

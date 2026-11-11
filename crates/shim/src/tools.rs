@@ -49,6 +49,8 @@ pub struct ToolHost {
     /// Daemon-assigned handles, keyed by session id. Read instead of
     /// recomputing so a wordlist change never desyncs the shim from the roster.
     pub nicknames_cell: Cell<Vec<Arc<marshal_entities::SessionNickname>>, CellImmutable>,
+    /// Which sessions the daemon sees holding a wait, for the roster's `wake`.
+    pub wake_watchers_cell: Cell<Vec<Arc<marshal_entities::WakeWatcher>>, CellImmutable>,
 }
 
 /// The daemon-assigned handle for `session_id`, read from the SessionNickname
@@ -56,12 +58,38 @@ pub struct ToolHost {
 /// daemon has assigned one — they agree in the common case, and the assigned
 /// value is authoritative once present.
 fn handle_for(host: &ToolHost, session_id: &str) -> String {
-    host.nicknames_cell
-        .get()
+    handle_from(&host.nicknames_cell.get(), session_id)
+}
+
+fn handle_from(nicknames: &[Arc<marshal_entities::SessionNickname>], session_id: &str) -> String {
+    nicknames
         .iter()
         .find(|n| n.id.0.as_ref() == session_id)
         .map(|n| n.nickname.clone())
         .unwrap_or_else(|| marshal_entities::nickname(session_id))
+}
+
+/// Resolve a nickname against the exact session/nickname snapshot used by the
+/// shim's roster resource. Returning the canonical id prevents a daemon with a
+/// stale nickname view from silently routing the visible handle to another
+/// session. Non-nickname tokens remain server-resolved (exact id, operator, or
+/// id prefix).
+fn resolve_visible_nickname(
+    sessions: &[Arc<Session>],
+    nicknames: &[Arc<marshal_entities::SessionNickname>],
+    token: &str,
+) -> Result<Option<SessionId>, String> {
+    let matches: Vec<_> = sessions
+        .iter()
+        .filter(|session| handle_from(nicknames, session.id.0.as_ref()) == token)
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [session] => Ok(Some(session.id.clone())),
+        _ => Err(format!(
+            "nickname `{token}` is ambiguous in the current roster; use an exact session id"
+        )),
+    }
 }
 
 pub struct CoordHandler {
@@ -146,9 +174,13 @@ fn read_whoami(
                         json!({
                             "session_id": s.id.0.as_ref(),
                             "nickname": handle_for(host, s.id.0.as_ref()),
+                            "session_name": s.session_name,
+                            "activity": s.activity,
+                            "kind": s.kind,
                             "pid": s.pid,
                             "cwd": s.cwd,
                             "operator": s.operator,
+                            "agent_id": s.agent_id,
                             "host": s.host,
                             "harness": "codex",
                         }),
@@ -177,14 +209,25 @@ fn read_whoami(
         };
     }
     let snapshot = host.session.lock().unwrap().clone();
+    let agent_id = host
+        .sessions_cell
+        .get()
+        .iter()
+        .find(|s| s.id == snapshot.id)
+        .and_then(|s| s.agent_id.clone())
+        .or(snapshot.agent_id);
     json_resource(
         uri,
         json!({
             "session_id": snapshot.id.0.as_ref(),
             "nickname": handle_for(host, snapshot.id.0.as_ref()),
+            "session_name": snapshot.session_name,
+            "activity": snapshot.activity,
+            "kind": snapshot.kind,
             "pid": host.pid,
             "cwd": host.cwd,
             "operator": snapshot.operator,
+            "agent_id": agent_id,
             "host": snapshot.host,
         }),
     )
@@ -193,6 +236,7 @@ fn read_whoami(
 fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
     let sessions: Vec<Arc<Session>> = host.sessions_cell.get();
     let members: Vec<Arc<RoomMember>> = host.members_cell.get();
+    let watchers = host.wake_watchers_cell.get();
     let me = host.session.lock().unwrap().id.0.to_string();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let view: Vec<Value> = sessions
@@ -211,7 +255,11 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 "cwd": s.cwd,
                 "git_branch": s.git_branch,
                 "current_task": s.current_task,
+                "session_name": s.session_name,
+                "activity": s.activity,
+                "kind": s.kind,
                 "operator": s.operator,
+                "agent_id": s.agent_id,
                 "host": s.host,
                 "project": s.project,
                 "connected_at": s.connected_at,
@@ -223,6 +271,9 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 "last_tool": s.last_tool,
                 "last_tool_at": s.last_tool_at,
                 "last_seen_ms_ago": now_ms - s.last_activity_at.unwrap_or(s.connected_at),
+                // Would a message wake it? `waiting` is observed by the daemon; `channel`
+                // and `busy` are declared by the session, which can claim anything.
+                "wake": marshal_entities::wake_state(s, &watchers, now_ms).as_str(),
                 "rooms": rooms,
             })
         })
@@ -371,6 +422,16 @@ async fn set_status(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolEr
     Ok(ToolOutcome::Json(json!({ "ok": true })))
 }
 
+fn response_required(args: &Value) -> Result<bool, ToolError> {
+    match args.get("response_required") {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(ToolError::invalid_params(
+            "response_required must be a boolean",
+        )),
+    }
+}
+
 async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
     let to = arg_str(
         args,
@@ -378,11 +439,16 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
         "send_message: missing `to` (session id or nickname)",
     )?;
     let body = arg_str(args, "body", "send_message: missing `body`")?;
-    // Recipient resolution is authoritative in the daemon's SendMessage command
-    // now (so every harness shares one policy AND operator / human-via-agent
-    // addressing works from the shim too) — pass the raw token straight through.
-    let to_session_id = SessionId(std::sync::Arc::from(to.as_str()));
+    // Pin a visible nickname to the exact id from this shim's roster snapshot.
+    // Other tokens stay server-resolved so operator/human routing and id-prefix
+    // addressing retain their shared daemon policy.
+    let sessions = host.sessions_cell.get();
+    let nicknames = host.nicknames_cell.get();
+    let to_session_id = resolve_visible_nickname(&sessions, &nicknames, &to)
+        .map_err(ToolError::invalid_params)?
+        .unwrap_or_else(|| SessionId(std::sync::Arc::from(to.as_str())));
     let cmd = SendMessage {
+        response_required: response_required(args)?,
         to_session_id,
         body,
         as_session: caller(host, args)?,
@@ -393,33 +459,37 @@ async fn send_message(host: &ToolHost, args: &Value) -> Result<ToolOutcome, Tool
     let result = await_command(cell, REQUEST_TIMEOUT)
         .await
         .map_err(ToolError::invalid_params)?;
-    // The daemon persists the message to the recipient's inbox BEFORE deciding on a
-    // live push, so reaching here (no command error) means it WAS delivered. Say so
-    // explicitly: a bare `delivered_live:false` reads as a FAILURE when it only means
-    // "went to the inbox, not a live push" — that ambiguity has repeatedly triggered
-    // false "marshal is broken" alarms. `delivered_live` stays for compatibility.
-    let delivered_live = result.delivered_live;
-    Ok(ToolOutcome::Json(json!({
+    Ok(ToolOutcome::Json(send_message_output(&result)))
+}
+
+fn send_message_output(result: &SendMessageResult) -> Value {
+    // A successful command means the Message SET is durable. Keep the old
+    // `delivery` / `delivered_live` fields for compatibility, but make their
+    // narrow meaning explicit with `live_push`: they cover only the synchronous
+    // NotifyChannel path. A Codex bridge may start a turn after this command
+    // returns, so `wake=unobserved` is an observation boundary, not a failure.
+    let live_push = result.effective_live_push();
+    let wake = result.effective_wake();
+    json!({
         "message_id": result.message_id.0.as_ref(),
         "to_session_id": result.to_session_id.0.as_ref(),
         "sent_at": result.sent_at,
+        "persisted": true,
+        "live_push": live_push,
+        "wake": wake,
+        // Compatibility fields. `delivery=live` and `delivered_live=true`
+        // mean only that the live-channel push landed.
         "delivered": true,
-        "delivery": if delivered_live { "live" } else { "inbox" },
-        "delivered_live": delivered_live,
-        "note": if delivered_live {
-            "Delivered and live-pushed into the recipient's current turn."
-        } else {
-            "Delivered to the recipient's marshal inbox — they read it on their next \
-             turn. delivered_live=false is normal here (the recipient has no live \
-             channel open); it is NOT a failure."
-        },
-    })))
+        "delivery": if result.delivered_live { "live" } else { "inbox" },
+        "delivered_live": result.delivered_live,
+    })
 }
 
 async fn broadcast(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
     let to_room = arg_str(args, "to_room", "broadcast: missing `to_room` (room id)")?;
     let body = arg_str(args, "body", "broadcast: missing `body`")?;
     let cmd = BroadcastMessage {
+        response_required: response_required(args)?,
         to_room_id: RoomId(Arc::<str>::from(to_room.as_str())),
         body,
         as_session: caller(host, args)?,
@@ -430,7 +500,48 @@ async fn broadcast(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolErr
     let result = await_command(cell, REQUEST_TIMEOUT)
         .await
         .map_err(ToolError::invalid_params)?;
-    Ok(ToolOutcome::Json(json!(result)))
+    Ok(ToolOutcome::Json(broadcast_message_output(&result)))
+}
+
+const TOOL_RESULT_LIST_MAX: usize = 10;
+
+fn broadcast_message_output(result: &BroadcastMessageResult) -> Value {
+    // Large rooms must not echo one recipient row per member into the sender's
+    // model transcript. Keep totals plus bounded details for the exceptional
+    // cases the caller may need to act on.
+    let failed: Vec<Value> = result
+        .failed
+        .iter()
+        .take(TOOL_RESULT_LIST_MAX)
+        .map(|recipient| {
+            json!({
+                "session_id": recipient.session_id.0.as_ref(),
+                "reason": recipient.reason,
+            })
+        })
+        .collect();
+    let mentioned: Vec<&str> = result
+        .mentioned
+        .iter()
+        .take(TOOL_RESULT_LIST_MAX)
+        .map(|session| session.0.as_ref())
+        .collect();
+    let failed_omitted = result.failed.len().saturating_sub(failed.len());
+    let mentioned_omitted = result.mentioned.len().saturating_sub(mentioned.len());
+    json!({
+        "message_id": result.message_id.0.as_ref(),
+        "to_room_id": result.to_room_id.0.as_ref(),
+        "to_room_name": result.to_room_name,
+        "sent_at": result.sent_at,
+        "total": result.total,
+        "delivered_count": result.delivered.len(),
+        "failed_count": result.failed.len(),
+        "failed": failed,
+        "failed_omitted": failed_omitted,
+        "mentioned_count": result.mentioned.len(),
+        "mentioned": mentioned,
+        "mentioned_omitted": mentioned_omitted,
+    })
 }
 
 async fn join_room(host: &ToolHost, args: &Value) -> Result<ToolOutcome, ToolError> {
@@ -513,7 +624,7 @@ fn write_schema(is_codex: bool, mut properties: Value, required: &[&str]) -> Val
                 "asSession".into(),
                 json!({
                     "type": "string",
-                    "description": "YOUR own marshal session id — copy it from the <marshal_session> block injected at session start. Required so peers see who sent this and can reply to the right session."
+                    "description": "Your session id from <marshal_session>."
                 }),
             );
         }
@@ -537,22 +648,24 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message".into(),
-            description: "Direct send to a peer agent, or to a human via their agent. Address by nickname (the `swift-falcon` shown in their statusline / marshal://roster), a session_id, a session_id prefix, or — to reach the human rather than one specific agent — their operator identity (the email on their roster row, e.g. `max@lucid.rocks`, optionally `op:`/`human:`-prefixed), which routes to whichever of their agents is currently most active. Resolved against the live roster; an ambiguous/unknown token returns an error listing the candidates. Make the body explicit: what you need, any action you expect, and whether you want a reply/decision or are just informing (FYI) — vague or unaddressed asks get misread, ignored, or duplicated. On success `delivered` is always true; `delivery` is `live` (pushed into the recipient's active turn) or `inbox` (they read it on their next turn) — `inbox`/`delivered_live:false` is normal, NOT a failure.".into(),
+            description: "Direct messages interrupt one recipient and consume transcript context. Coordinate shared-resource access, dependencies, and interference within assigned scope. Send updates only when the recipient is waiting on the fact or must change their next action. Set response_required=true only for an unresolved question or agreement needing an answer. Keep that requirement out of the body. Answers and confirmations normally require no response. Stop once answered or agreed; reopen for changed conditions or conflicts. Batch necessary details. Address by nickname, session id/prefix, or operator email. `persisted` confirms storage; `live_push` covers synchronous delivery; `wake` may remain `unobserved` because wake happens asynchronously.".into(),
             input_schema: write_schema(is_codex,
                 json!({
-                    "to":   { "type": "string", "description": "Recipient: a nickname (e.g. `swift-falcon`), full `session_id`, session_id prefix, or an operator identity/email (e.g. `max@lucid.rocks`) to reach the human via their most-active agent — all from marshal://roster." },
-                    "body": { "type": "string", "description": "Message body." }
+                    "to":   { "type": "string", "description": "Nickname, session id/prefix, or operator email from the roster." },
+                    "body": { "type": "string", "description": "Message body." },
+                    "response_required": { "type": "boolean", "default": false, "description": "Whether this message needs an answer. Normally false for answers, results, and release notices." }
                 }),
                 &["to", "body"],
             ),
         },
         ToolDef {
             name: "broadcast".into(),
-            description: "Ambient fan-out to a room — the message is addressed to the room and surfaced there (marshal UI / `marshal://messages room=…`), NOT injected into members' turns, so it never hijacks anyone's context. To pull a specific peer in, @mention them in the body (`@swift-falcon`, or `@max@lucid.rocks` to reach a human): each resolved handle ALSO gets a real direct message (inbox + live push), even if they aren't in the room — so @mention is a genuine interrupt, not casual chat syntax: use it only for a peer you specifically need to pull in. Returns delivered + the resolved `mentioned` list; errors if the room has no other members.".into(),
+            description: "Coordinate a shared resource or dependency with affected room members. Set response_required=true only when an answer is needed, and name the agents expected to answer. Keep that requirement out of the body. Request responses only for unresolved questions or agreements; completed notices normally require no response. Send updates only when recipients are waiting on the fact or must change their next action. An @mention also creates a direct interrupt, so use one only when that peer needs to act or reply. Returns counts plus bounded failure and mention details.".into(),
             input_schema: write_schema(is_codex,
                 json!({
                     "to_room": { "type": "string", "description": "Room id from marshal://rooms — `everyone`, `op:*`, `project:*`, or any ad-hoc room id." },
-                    "body":    { "type": "string", "description": "Message body." }
+                    "body":    { "type": "string", "description": "Message body." },
+                    "response_required": { "type": "boolean", "default": false, "description": "Whether the named recipients need to answer. Defaults to false." }
                 }),
                 &["to_room", "body"],
             ),
@@ -602,7 +715,7 @@ pub fn resources_def(is_codex: bool) -> Vec<ResourceDef> {
     // caller from its WS connection, so this note is Codex-only. roster/rooms
     // need no caller and are unaffected.
     let codex_as = if is_codex {
-        " Under Codex, pass your own id as `?asSession=<id>` (from the <marshal_session> block) — without it whoami can't name you and messages is rejected."
+        " Under Codex, add `?asSession=<id>` using <marshal_session>."
     } else {
         ""
     };
@@ -730,7 +843,7 @@ fn url_decode(s: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Wait for a `send_command` Cell to settle.
-async fn await_command<R>(
+pub(crate) async fn await_command<R>(
     cell: Cell<Option<Result<R, String>>, CellImmutable>,
     timeout: Duration,
 ) -> Result<R, String>
@@ -760,5 +873,201 @@ where
             "command timed out after {} ms (daemon unresponsive?)",
             timeout.as_millis()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_identity_metadata_comes_only_from_the_authoritative_row() {
+        let mut row = (*session("canonical")).clone();
+        row.agent_id = Some("agent/\"x\nopaque".into());
+        let mut local = (*session("placeholder")).clone();
+        local.agent_id = Some("unrelated-process".into());
+        let host = ToolHost {
+            client: Arc::new(MykoClient::new()),
+            pid: 1,
+            cwd: "/repo".into(),
+            is_codex: true,
+            session: Arc::new(Mutex::new(local)),
+            sessions_cell: Cell::new(vec![Arc::new(row)]).lock(),
+            rooms_cell: Cell::new(vec![]).lock(),
+            members_cell: Cell::new(vec![]).lock(),
+            nicknames_cell: Cell::new(vec![]).lock(),
+            wake_watchers_cell: Cell::new(vec![]).lock(),
+        };
+        for (query, expected) in [
+            ("asSession=canonical", Some("agent/\"x\nopaque")),
+            ("asSession=missing", None),
+            ("", None),
+        ] {
+            let parsed = ParsedUri::parse(&format!("marshal://whoami?{query}")).unwrap();
+            let resource = read_whoami(&host, "marshal://whoami", &parsed.query);
+            let content: Value = serde_json::from_str(&resource.text).unwrap();
+            assert_eq!(content["agent_id"].as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn response_requirement_defaults_and_rejects_non_booleans() {
+        assert!(!response_required(&json!({})).unwrap());
+        assert!(response_required(&json!({"response_required": true})).unwrap());
+        assert!(!response_required(&json!({"response_required": false})).unwrap());
+        assert!(response_required(&json!({"response_required": "true"})).is_err());
+    }
+
+    use marshal_entities::{
+        DeliveredRecipient, FailedRecipient, LivePushStatus, SessionNickname, SessionNicknameId,
+        WakeStatus,
+    };
+
+    fn session(id: &str) -> Arc<Session> {
+        Arc::new(Session {
+            id: SessionId(Arc::from(id)),
+            client_id: None,
+            agent_id: None,
+            pid: 0,
+            cwd: "/repo".into(),
+            git_branch: None,
+            current_task: None,
+            session_name: None,
+            activity: None,
+            kind: None,
+            connected_at: 0,
+            last_activity_at: None,
+            last_tool: None,
+            last_tool_at: None,
+            operator: None,
+            host: None,
+            project: None,
+            channels_enabled: None,
+            acks_pushes: None,
+        })
+    }
+
+    #[test]
+    fn visible_nickname_pins_the_roster_session_id() {
+        let sessions = vec![session("stale-daemon-target"), session("visible-target")];
+        let nicknames = vec![
+            Arc::new(SessionNickname {
+                id: SessionNicknameId(Arc::from("stale-daemon-target")),
+                nickname: "arctic-oryx".into(),
+            }),
+            Arc::new(SessionNickname {
+                id: SessionNicknameId(Arc::from("visible-target")),
+                nickname: "coastal-iguana".into(),
+            }),
+        ];
+
+        assert_eq!(
+            resolve_visible_nickname(&sessions, &nicknames, "coastal-iguana").unwrap(),
+            Some(SessionId(Arc::from("visible-target")))
+        );
+        assert_eq!(
+            resolve_visible_nickname(&sessions, &nicknames, "max@lucid.rocks").unwrap(),
+            None,
+            "operator tokens must remain server-resolved"
+        );
+    }
+
+    #[test]
+    fn ambiguous_visible_nickname_refuses_to_route() {
+        let sessions = vec![session("one"), session("two")];
+        let nicknames = vec![
+            Arc::new(SessionNickname {
+                id: SessionNicknameId(Arc::from("one")),
+                nickname: "same-handle".into(),
+            }),
+            Arc::new(SessionNickname {
+                id: SessionNicknameId(Arc::from("two")),
+                nickname: "same-handle".into(),
+            }),
+        ];
+
+        let error = resolve_visible_nickname(&sessions, &nicknames, "same-handle").unwrap_err();
+        assert!(error.contains("ambiguous"));
+    }
+
+    fn result(
+        live_push: LivePushStatus,
+        wake: WakeStatus,
+        delivered_live: bool,
+    ) -> SendMessageResult {
+        SendMessageResult {
+            message_id: MessageId(Arc::from("message-1")),
+            to_session_id: SessionId(Arc::from("recipient-1")),
+            sent_at: 123,
+            live_push,
+            wake,
+            delivered_live,
+        }
+    }
+
+    #[test]
+    fn inbox_send_does_not_claim_wake_failure_or_future_delivery() {
+        let output = send_message_output(&result(
+            LivePushStatus::Unavailable,
+            WakeStatus::Unobserved,
+            false,
+        ));
+
+        assert_eq!(output["persisted"], true);
+        assert_eq!(output["live_push"], "unavailable");
+        assert_eq!(output["wake"], "unobserved");
+        assert_eq!(output["delivered_live"], false);
+        assert!(output.get("note").is_none());
+    }
+
+    #[test]
+    fn live_send_reports_wake_as_not_needed() {
+        let output = send_message_output(&result(
+            LivePushStatus::Delivered,
+            WakeStatus::NotNeeded,
+            true,
+        ));
+
+        assert_eq!(output["persisted"], true);
+        assert_eq!(output["live_push"], "delivered");
+        assert_eq!(output["wake"], "not_needed");
+        assert_eq!(output["delivered_live"], true);
+    }
+
+    #[test]
+    fn broadcast_output_bounds_recipient_details() {
+        let delivered = (0..15)
+            .map(|index| DeliveredRecipient {
+                session_id: SessionId(Arc::from(format!("delivered-{index}"))),
+            })
+            .collect();
+        let failed = (0..15)
+            .map(|index| FailedRecipient {
+                session_id: SessionId(Arc::from(format!("failed-{index}"))),
+                reason: "gone".into(),
+            })
+            .collect();
+        let mentioned = (0..15)
+            .map(|index| SessionId(Arc::from(format!("mentioned-{index}"))))
+            .collect();
+        let output = broadcast_message_output(&BroadcastMessageResult {
+            message_id: MessageId(Arc::from("message-1")),
+            to_room_id: RoomId(Arc::from("everyone")),
+            to_room_name: "Everyone".into(),
+            sent_at: 123,
+            total: 30,
+            delivered,
+            failed,
+            mentioned,
+        });
+
+        assert_eq!(output["delivered_count"], 15);
+        assert_eq!(output["failed_count"], 15);
+        assert_eq!(output["failed"].as_array().unwrap().len(), 10);
+        assert_eq!(output["failed_omitted"], 5);
+        assert_eq!(output["mentioned_count"], 15);
+        assert_eq!(output["mentioned"].as_array().unwrap().len(), 10);
+        assert_eq!(output["mentioned_omitted"], 5);
+        assert!(output.get("delivered").is_none());
     }
 }

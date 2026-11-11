@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use myko::prelude::{EventPublishing as _, RequestScoped as _};
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
     myko_command,
@@ -26,7 +27,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    message::{Message, MessageId},
+    message::{CONTEXT_BODY_MAX_CHARS, Message, MessageId, context_preview},
+    message_read::{MessageRead, MessageReadId},
     room::{GetAllRooms, Room, RoomId},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
@@ -35,6 +37,9 @@ use crate::{
 #[myko_command(BroadcastMessageResult)]
 pub struct BroadcastMessage {
     pub to_room_id: RoomId,
+    #[serde(default)]
+    pub response_required: bool,
+
     pub body: String,
 
     /// Self-identified sender for connectionless paths (HTTP-MCP agents).
@@ -133,7 +138,8 @@ impl CommandHandler for BroadcastMessage {
         // attempted.
         let now = Utc::now().timestamp_millis();
         let msg = Message {
-            id: MessageId(Arc::from(Uuid::new_v4().to_string())),
+            response_required: self.response_required,
+            id: MessageId(Arc::from(Uuid::now_v7().to_string())),
             from_session_id: sender.id.clone(),
             to_session_id: None,
             to_room_id: Some(room.id.clone()),
@@ -208,7 +214,8 @@ impl CommandHandler for BroadcastMessage {
             // human @mention (`@max@lucid.rocks`) carries `to_operator` so it's
             // surfaced to the person, same as a direct human-addressed send.
             let ping = Message {
-                id: MessageId(Arc::from(Uuid::new_v4().to_string())),
+                response_required: self.response_required,
+                id: MessageId(Arc::from(Uuid::now_v7().to_string())),
                 from_session_id: sender.id.clone(),
                 to_session_id: Some(target.id.clone()),
                 to_room_id: None,
@@ -217,26 +224,50 @@ impl CommandHandler for BroadcastMessage {
                 sent_at: now,
             };
             ctx.emit_set(&ping)?;
+            let (context_body, body_truncated) =
+                context_preview(&ping.body, CONTEXT_BODY_MAX_CHARS);
             // Best-effort live push, honest about render capability (same rule
             // as SendMessage: a flag-off recipient is inbox-only).
             if target.channels_enabled != Some(false)
                 && let Some(cid) = target.client_id.as_ref()
             {
-                crate::send_message::push_to_client(
+                let pushed = crate::send_message::push_to_client(
                     cid.0.as_ref(),
-                    format!("{from_nickname} mentioned you in {}", room.name),
+                    mention_push_content(
+                        &from_nickname,
+                        &room.name,
+                        to_operator.as_deref(),
+                        body_truncated.then_some(ping.id.0.as_ref()),
+                    ),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "mention",
+                        "message_id": ping.id.0.as_ref(),
                         "from_session": sender.id.0.as_ref(),
                         "from_nickname": from_nickname,
                         "to_session": target.id.0.as_ref(),
                         "to_operator": to_operator,
                         "room": room.id.0.as_ref(),
-                        "body": self.body,
+                        "response_required": self.response_required,
+                        "body": context_body,
+                        "body_truncated": body_truncated,
                         "sent_at": now,
                     }),
                 );
+                // Same dedup as SendMessage: a pushed ping is marked read, so
+                // the per-turn inbox (which reads unread direct messages, and
+                // the ping is one) doesn't show it a second time.
+                if pushed && target.acks_pushes != Some(true) {
+                    let read_id = MessageRead::make_id(ping.id.0.as_ref(), target.id.0.as_ref());
+                    if let Err(e) = ctx.emit_set(&MessageRead {
+                        id: MessageReadId(Arc::from(read_id.as_str())),
+                        message_id: ping.id.clone(),
+                        session_id: target.id.clone(),
+                        read_at: now,
+                    }) {
+                        log::warn!("[broadcast] mention inbox dedup write failed: {e:?}");
+                    }
+                }
             }
             mentioned.push(target.id.clone());
         }
@@ -332,5 +363,52 @@ mod tests {
         assert!(parse_mentions("no mentions here").is_empty());
         assert!(parse_mentions("look @ this").is_empty());
         assert!(parse_mentions("").is_empty());
+    }
+}
+
+/// The channel banner for an `@mention` ping. Same split as a direct send: an
+/// agent mention stays a concise ping; a human mention (`@max@lucid.rocks`)
+/// opens with the relay-to-operator contract.
+pub(crate) fn mention_push_content(
+    from_nickname: &str,
+    room_name: &str,
+    to_operator: Option<&str>,
+    truncated_id: Option<&str>,
+) -> String {
+    let banner = match to_operator {
+        Some(op) => format!(
+            "{} {from_nickname} mentioned you in {room_name}.",
+            crate::message::operator_relay_notice(op)
+        ),
+        None => format!("{from_nickname} mentioned you in {room_name}"),
+    };
+    crate::send_message::with_truncated_notice(banner, truncated_id)
+}
+
+#[cfg(test)]
+mod push_content_tests {
+    use super::mention_push_content;
+
+    #[test]
+    fn agent_mention_banner_is_unchanged() {
+        assert_eq!(
+            mention_push_content("fleet-wolf", "everyone", None, None),
+            "fleet-wolf mentioned you in everyone"
+        );
+    }
+
+    #[test]
+    fn human_mention_banner_opens_with_the_relay_contract() {
+        let content = mention_push_content("fleet-wolf", "everyone", Some("max@lucid.rocks"), None);
+        assert!(content.starts_with("For operator (max@lucid.rocks): relay to them;"));
+        assert!(content.ends_with("fleet-wolf mentioned you in everyone."));
+    }
+
+    #[test]
+    fn a_cut_preview_says_where_the_full_mention_is() {
+        assert_eq!(
+            mention_push_content("fleet-wolf", "everyone", None, Some("m-1")),
+            "fleet-wolf mentioned you in everyone [truncated; full message m-1 remains in marshal://messages]"
+        );
     }
 }

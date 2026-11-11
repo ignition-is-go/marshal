@@ -23,6 +23,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { MarshalDaemon } from "../src/daemon.js";
+import type { NotifyChannelMeta } from "../src/entities.js";
+import { MarshalPlugin } from "../src/index.js";
 import type { Identity } from "../src/identity.js";
 
 function resolveDaemonBin(): string | null {
@@ -159,27 +161,33 @@ suite("marshal-opencode ↔ real marshal-daemon", () => {
     expect(a?.project).toBe("marshal-opencode");
   }, 20_000);
 
-  test("a sent message lands in the recipient's inbox, then acks", async () => {
+  test("a sent message reports live push separately and does not duplicate into the inbox", async () => {
+    const seen: NotifyChannelMeta[] = [];
+    daemonB.onNotify((meta) => seen.push(meta));
+
     const res = await daemonA.sendMessage(A, B, "hello from alice");
     expect(res.messageId).toBeString();
     expect(res.toSessionId).toBe(B);
-    // SendMessageResult.deliveredLive — assert the field exists with its real
-    // type so a Rust-side rename/retype of the result is caught here.
-    expect(typeof res.deliveredLive).toBe("boolean");
+    // The result separates synchronous live push from asynchronous wake.
+    expect(res.livePush).toBe("delivered");
+    expect(res.wake).toBe("not_needed");
+    // Compatibility alias remains while older plugin consumers migrate.
+    expect(res.deliveredLive).toBe(true);
+    expect(
+      await waitFor(() => seen.some((meta) => meta.body === "hello from alice"), 5_000),
+    ).toBe(true);
 
     // The sender is labeled by its daemon-ASSIGNED handle now (the plugin reads
     // it from the roster, it doesn't recompute). Wait for the assignment to
-    // reach our cache, then assert a real adjective-noun handle shows.
+    // reach our cache, then assert the push carried that handle.
     await waitFor(() => daemonB.nicknameFor(A) !== A, 5000);
     const aHandle = daemonB.nicknameFor(A);
-    const inbox = await daemonB.drainInbox(B);
-    expect(inbox).toContain("hello from alice");
     expect(aHandle).toContain("-");
-    expect(inbox).toContain(aHandle);
+    expect(seen.find((meta) => meta.body === "hello from alice")?.from_nickname).toBe(aHandle);
 
-    // Acked on first drain → second drain is empty.
-    const again = await daemonB.drainInbox(B);
-    expect(again).toBeNull();
+    // A delivered live push marks the durable copy read, preventing a second
+    // delivery when the next user turn drains the inbox.
+    expect(await daemonB.drainInbox(B)).toBeNull();
   }, 20_000);
 
   test("inbound message pushes a real-time NotifyChannel to the recipient", async () => {
@@ -218,9 +226,75 @@ suite("marshal-opencode ↔ real marshal-daemon", () => {
     expect(res!.total).toBeGreaterThanOrEqual(1);
     expect(res!.delivered.length).toBeGreaterThanOrEqual(1);
 
-    const inboxB = await daemonB.drainInbox(B);
-    expect(inboxB).toContain("hello everyone");
+    // Room broadcasts are ambient history, not direct inbox messages.
+    expect(await daemonB.drainInbox(B)).toBeNull();
   }, 20_000);
+
+  test("a live push leaves other unread messages for the next turn", async () => {
+    const C = "ses_itest_oc";
+    const previousAddress = process.env.MARSHAL_DAEMON_ADDRESS;
+    let crashed: ReturnType<typeof Bun.spawn> | undefined;
+    process.env.MARSHAL_DAEMON_ADDRESS = address;
+    const prompts: string[] = [];
+    // Only what the plugin calls on the opencode client.
+    const client = {
+      app: { log: async () => {} },
+      tui: { showToast: async () => {} },
+      session: {
+        prompt: async (req: { body: { parts: { text: string }[] } }) => {
+          prompts.push(req.body.parts.map((part) => part.text).join(""));
+        },
+      },
+    };
+    try {
+      // C's opencode dies without deregistering, so the daemon keeps its row
+      // through the reconnect grace and bob's message waits unread.
+      crashed = Bun.spawn(
+        [
+          process.execPath,
+          "-e",
+          `const { MarshalDaemon } = await import(${JSON.stringify(join(import.meta.dir, "..", "src", "daemon.ts"))});
+           const d = new MarshalDaemon({ address: ${JSON.stringify(address)}, cwd: "/tmp/itest-oc",
+             identity: { operator: "carol", host: { name: "itest", os: "linux", arch: "x64" } } });
+           d.start();
+           d.registerSession(${JSON.stringify(C)});
+           setInterval(() => {}, 1000);`,
+        ],
+        { stdout: "ignore", stderr: "ignore" },
+      );
+      expect(await waitFor(async () => (await daemonB.roster_snapshot()).some((s) => s.id === C), 10_000)).toBe(true);
+      crashed.kill("SIGKILL");
+      await crashed.exited;
+      expect(
+        await waitFor(async () => (await daemonB.sendMessage(B, C, "sent while you were away")).livePush !== "delivered", 10_000, 500),
+      ).toBe(true);
+
+      // C comes back and alice's message is pushed live and prompted. The fake
+      // prompt doesn't run chat.message the way opencode's does, so bob's
+      // message stands in for one that turns unread while the push turn runs.
+      const second = await MarshalPlugin({ client, $: Bun.$, directory: "/tmp/itest-oc", worktree: "" } as never);
+      await second.event!({ event: { type: "session.created", properties: { info: { id: C } } } } as never);
+      try {
+        expect(
+          await waitFor(async () => (await daemonA.sendMessage(A, C, "pushed live")).livePush === "delivered", 10_000, 500),
+        ).toBe(true);
+        expect(await waitFor(() => prompts.some((text) => text.includes("pushed live")), 5_000)).toBe(true);
+        await sleep(1_000);
+        expect(prompts.some((text) => text.includes("sent while you were away"))).toBe(false);
+
+        // The next user turn still delivers bob's message.
+        const output = { message: { sessionID: C, id: "msg_itest" }, parts: [] as { text: string }[] };
+        await second["chat.message"]!({ sessionID: C } as never, output as never);
+        expect(output.parts.map((part) => part.text).join("")).toContain("sent while you were away");
+      } finally {
+        await second.dispose!();
+      }
+    } finally {
+      crashed?.kill("SIGKILL");
+      if (previousAddress === undefined) delete process.env.MARSHAL_DAEMON_ADDRESS;
+      else process.env.MARSHAL_DAEMON_ADDRESS = previousAddress;
+    }
+  }, 40_000);
 
   test("set_status surfaces on the roster", async () => {
     await daemonA.setStatus(A, "running the integration test");

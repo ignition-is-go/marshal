@@ -59,6 +59,8 @@ pub fn SessionDetail() -> impl IntoView {
 
         let handle = nick.of(&sid);
         let short = nick::short_id(&sid);
+        // The operator's `/rename` name, shown under the hero when set.
+        let sname = session.session_name.clone().filter(|s| !s.is_empty());
 
         let names = room_names.get();
         let my_rooms: Vec<String> = members
@@ -94,14 +96,17 @@ pub fn SessionDetail() -> impl IntoView {
                     <span class="sd-nick">{handle}</span>
                     <span class="sid">{short}</span>
                 </div>
+                {sname.map(|n| view! { <div class="sd-name">{n}</div> })}
 
                 <div class="sd-kv">
                     {kv("operator", session.operator.clone().unwrap_or_else(|| "—".into()))}
                     {kv("host", host_line(&session))}
+                    {kv("kind", session.kind.clone().unwrap_or_else(|| "—".into()))}
                     {kv("project", session.project.clone().unwrap_or_else(|| "—".into()))}
                     {kv("branch", session.git_branch.clone().unwrap_or_else(|| "—".into()))}
                     {kv("cwd", session.cwd.clone())}
                     {kv("pid", session.pid.to_string())}
+                    {kv("activity", session.activity.clone().unwrap_or_else(|| "—".into()))}
                     {kv("status", session.current_task.clone().unwrap_or_else(|| "—".into()))}
                     {kv_age("connected", session.connected_at, now)}
                     {kv_fresh("last active", session.last_activity_at, now)}
@@ -250,6 +255,7 @@ const DETAIL_CSS: &str = r#"
 .sd { display: flex; flex-direction: column; gap: 18px; }
 .sd-hero { display: flex; align-items: baseline; gap: 10px; }
 .sd-nick { font-family: var(--font-mono); font-weight: 700; font-size: 20px; color: var(--color-primary); }
+.sd-name { font-family: var(--font-mono); font-size: 13px; color: var(--color-text-primary); margin-top: -8px; word-break: break-word; }
 .sd-kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
 .sd-kv .kv { display: contents; }
 .sd-kv .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--color-text-secondary); font-family: var(--font-mono); align-self: baseline; padding-top: 2px; }

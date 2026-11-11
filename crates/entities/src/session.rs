@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
 use myko::{
     command::{CommandContext, CommandError},
     entities::client::ClientId,
@@ -22,6 +23,8 @@ pub struct HostInfo {
     /// `std::env::consts::ARCH` — `"x86_64"`, `"aarch64"`, etc.
     pub arch: String,
 }
+
+myko::impl_filterable_opaque!(HostInfo);
 
 #[cfg(test)]
 mod tests {
@@ -46,6 +49,8 @@ mod tests {
         assert_eq!(s.last_tool_at, None);
         assert_eq!(s.operator, None);
         assert_eq!(s.host, None);
+        assert_eq!(s.agent_id, None);
+        assert!(serde_json::to_value(s).unwrap().get("agentId").is_none());
     }
 
     #[test]
@@ -53,10 +58,14 @@ mod tests {
         let s = Session {
             id: SessionId(Arc::from("sess-002")),
             client_id: None,
+            agent_id: None,
             pid: 4321,
             cwd: "/home/x".into(),
             git_branch: None,
             current_task: None,
+            session_name: None,
+            activity: None,
+            kind: None,
             connected_at: 1_700_000_000_000_i64,
             last_activity_at: Some(1_700_000_005_000_i64),
             last_tool: Some("send_message".into()),
@@ -65,6 +74,7 @@ mod tests {
             host: None,
             project: None,
             channels_enabled: None,
+            acks_pushes: None,
         };
         let json = serde_json::to_value(&s).unwrap();
         // camelCase on the wire (matches the rest of the codebase).
@@ -81,10 +91,14 @@ mod tests {
         let s = Session {
             id: SessionId(Arc::from("sess-003")),
             client_id: None,
+            agent_id: Some("agent/\"x\nopaque".into()),
             pid: 1,
             cwd: "/repo".into(),
             git_branch: None,
             current_task: None,
+            session_name: Some("auth refactor".into()),
+            activity: Some("busy".into()),
+            kind: Some("interactive".into()),
             connected_at: 1_700_000_000_000_i64,
             last_activity_at: None,
             last_tool: None,
@@ -97,15 +111,24 @@ mod tests {
                 arch: "x86_64".into(),
             }),
             channels_enabled: None,
+            acks_pushes: None,
         };
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["operator"], "trevor");
+        assert_eq!(json["agentId"], "agent/\"x\nopaque");
         assert_eq!(json["host"]["name"], "laptop");
         assert_eq!(json["host"]["os"], "linux");
         assert_eq!(json["host"]["arch"], "x86_64");
+        // Human session name + live activity/kind serialize camelCase.
+        assert_eq!(json["sessionName"], "auth refactor");
+        assert_eq!(json["activity"], "busy");
+        assert_eq!(json["kind"], "interactive");
         let back: Session = serde_json::from_value(json).unwrap();
         assert_eq!(back.operator.as_deref(), Some("trevor"));
         assert_eq!(back.host.as_ref().map(|h| h.name.as_str()), Some("laptop"));
+        assert_eq!(back.session_name.as_deref(), Some("auth refactor"));
+        assert_eq!(back.activity.as_deref(), Some("busy"));
+        assert_eq!(back.kind.as_deref(), Some("interactive"));
     }
 }
 
@@ -121,6 +144,10 @@ pub struct Session {
     #[myko_client_id]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<ClientId>,
+
+    /// Self-reported embedding-agent correlation metadata, never an address or credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 
     /// OS process id of the connecting client.
     pub pid: u32,
@@ -141,6 +168,38 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[myko_setter]
     pub current_task: Option<String>,
+
+    /// Human-facing session name. For Claude Code this is the operator's
+    /// `/rename` value (Claude's auto-generated title until they rename),
+    /// read by the shim from Claude's per-PID manifest
+    /// `~/.claude/sessions/<pid>.json` (`name`) and refreshed when it
+    /// changes mid-session. Distinct from `nickname` — the daemon-assigned
+    /// stable handle peers ADDRESS: this is what the human *called* the
+    /// session, so the roster is legible for cross-repo targeting ("which
+    /// agent is doing X"). `None` for harnesses with no such manifest
+    /// (Codex) or Claude builds predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[myko_setter]
+    pub session_name: Option<String>,
+
+    /// Live activity / turn-state, from Claude's per-PID manifest `status`:
+    /// `"busy"` (processing a turn), `"idle"` (awaiting input), or `"shell"`
+    /// (in a shell command). A truer "is this agent working right now" signal
+    /// than `last_activity_at`, which only moves on MCP tool calls — an agent
+    /// can be `busy` for minutes without touching marshal. The shim pushes it
+    /// event-driven (an fs-watch on the manifest), so the roster tracks
+    /// turn-state in near real time. `None` for harnesses with no such
+    /// manifest (Codex) or older Claude builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[myko_setter]
+    pub activity: Option<String>,
+
+    /// Session kind, from the manifest `kind`: `"interactive"` (a human at a
+    /// terminal) or `"bg"` (a background / headless agent). Set once at
+    /// registration — it doesn't change over a session's life, so no setter.
+    /// `None` when unknown (no manifest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 
     /// Wall-clock millis since unix epoch when the session connected.
     pub connected_at: i64,
@@ -207,6 +266,18 @@ pub struct Session {
     /// the inbox (delivered_live = false) rather than claimed as live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels_enabled: Option<bool>,
+
+    /// Whether this session's client acks each live push itself, once it has
+    /// passed it on (the Claude shim: once it has flushed it to Claude's
+    /// stdin). When set, `SendMessage` leaves a pushed message unread until
+    /// that ack instead of marking it read as soon as the push is handed to
+    /// the connection, so a push lost before the client gets it (a connection
+    /// that stops being read and then dies) comes back in the next inbox
+    /// pull. What happens after the client's ack is past the daemon's view.
+    /// `None` = a client that doesn't ack pushes; the daemon marks them read
+    /// for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acks_pushes: Option<bool>,
 }
 
 /// Resolve the session a write command is acting *as*.
@@ -256,14 +327,18 @@ pub fn resolve_caller(
     })?;
     sessions
         .iter()
-        .find(|s| s.client_id.as_ref() == Some(&client_id))
+        .find(|s| {
+            s.client_id
+                .as_ref()
+                .is_some_and(|id| id.0.as_ref() == client_id)
+        })
         .cloned()
         .ok_or_else(|| {
             caller_err(
                 ctx,
                 &format!(
                     "caller (client {}) has no session on the roster — re-SET your Session and retry",
-                    client_id.0.as_ref(),
+                    client_id,
                 ),
             )
         })
@@ -275,4 +350,47 @@ fn caller_err(ctx: &CommandContext, message: &str) -> CommandError {
         command_id: ctx.command_id.to_string(),
         message: message.to_string(),
     }
+}
+
+#[myko::myko_command]
+pub struct RegisterSession {
+    pub session: Session,
+}
+
+impl myko::command::CommandHandler for RegisterSession {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _ctx: CommandContext) -> Result<(), CommandError> {
+        unreachable!("RegisterSession is server-only")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(mut self, ctx: CommandContext) -> Result<(), CommandError> {
+        self.session.client_id = ctx.client_id().map(|id| ClientId(Arc::from(id)));
+        let id = self.session.id.clone();
+        update_registered_session(&ctx, &id, |_| self.session)
+    }
+}
+
+/// Serialize hook and shim registration because both replace the same Session row.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn update_registered_session(
+    ctx: &CommandContext,
+    id: &SessionId,
+    update: impl FnOnce(Option<&Session>) -> Session,
+) -> Result<(), CommandError> {
+    static REGISTRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = REGISTRATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
+    let prior = sessions.iter().find(|s| &s.id == id).map(Arc::as_ref);
+    let mut session = update(prior);
+    session.agent_id = session
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| prior.and_then(|s| s.agent_id.clone()));
+    ctx.emit_set(&session)
 }

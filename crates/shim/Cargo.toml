@@ -1,12 +1,15 @@
 [package]
 name = "marshal-shim"
-version = "0.40.0"
+version = "0.58.1"
 edition.workspace = true
 license.workspace = true
 description = "Stdio MCP shim that bridges Claude Code sessions to the marshal coordination daemon."
 repository = "https://github.com/ignition-is-go/marshal"
 keywords = ["marshal", "agent", "mcp", "claude", "myko"]
 categories = ["network-programming", "command-line-utilities"]
+# claude_hook.rs reads the plugin's hooks.json from outside the crate, so it
+# runs in the workspace only and stays out of the published package.
+exclude = ["tests/claude_hook.rs"]
 
 [[bin]]
 name = "marshal-shim"
@@ -33,6 +36,8 @@ marshal-entities = { workspace = true }
 gethostname = "1"
 # Event-driven git-branch refresh: OS fs-watch on the repo's HEAD (no polling).
 notify-debouncer-mini = { workspace = true }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -46,3 +51,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+myko-server = { workspace = true }
+socket2 = "0.6"
+tempfile = "3"

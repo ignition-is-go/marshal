@@ -26,9 +26,11 @@ mod read_messages;
 mod room;
 mod room_member;
 mod room_tools;
+mod sandbox;
 mod send_message;
 mod session;
 mod session_nickname;
+mod wake_watcher;
 
 pub use ack_messages::*;
 pub use broadcast_message::*;
@@ -40,9 +42,11 @@ pub use read_messages::*;
 pub use room::*;
 pub use room_member::*;
 pub use room_tools::*;
+pub use sandbox::*;
 pub use send_message::*;
 pub use session::*;
 pub use session_nickname::*;
+pub use wake_watcher::*;
 
 /// Force-link this crate so the `inventory`-based item registration in the
 /// generated `myko_item` code is pulled into a binary that doesn't otherwise
@@ -52,13 +56,16 @@ pub fn link() {}
 // Register the hand-written wire structs/enums for TypeScript export. The
 // `#[myko_item]`/`#[myko_command]` macros register the entities, commands, and
 // their `Args` types automatically, but NOT a command's hand-written result
-// type or plain helper structs — those need an explicit `register_ts_export!`
+// type or plain helper structs — those need an explicit `register_typegen_type!`
 // (the same call the macros emit internally). Without this the daemon's
 // `typegen` would emit `index.ts` imports for these types but never write their
-// files. `register_ts_export!` is a no-op unless `ts-export` is on, so this
+// files. `register_typegen_type!` is a no-op unless `ts-export` is on, so this
 // costs nothing in normal builds.
-myko::register_ts_export!(
+myko::register_typegen_type!(
     HostInfo,
+    SandboxArtifact,
+    SandboxStatus,
+    SandboxTimelineEvent,
     SendMessageResult,
     BroadcastMessageResult,
     DeliveredRecipient,
@@ -70,4 +77,6 @@ myko::register_ts_export!(
     MessageView,
     RoomKind,
     AutoSource,
+    LivePushStatus,
+    WakeStatus,
 );

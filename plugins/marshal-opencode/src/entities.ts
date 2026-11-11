@@ -50,6 +50,7 @@ export interface HostInfo {
 /** The `Session` item payload SET onto the roster. `clientId` is omitted —
  *  the server populates it from the live WS connection. */
 export interface SessionItem {
+  agentId?: string;
   id: string;
   pid: number;
   cwd: string;
@@ -64,12 +65,12 @@ export interface SessionItem {
 
 // ── Write commands ───────────────────────────────────────────────────────
 
-export function sendMessage(asSession: string, toSessionId: string, body: string): MarshalCommand<SendMessageResult> {
-  return { commandId: "SendMessage", command: { toSessionId, body, asSession } };
+export function sendMessage(asSession: string, toSessionId: string, body: string, responseRequired = false): MarshalCommand<SendMessageResult> {
+  return { commandId: "SendMessage", command: { toSessionId, body, responseRequired, asSession } };
 }
 
-export function broadcastMessage(asSession: string, toRoomId: string, body: string): MarshalCommand<BroadcastMessageResult> {
-  return { commandId: "BroadcastMessage", command: { toRoomId, body, asSession } };
+export function broadcastMessage(asSession: string, toRoomId: string, body: string, responseRequired = false): MarshalCommand<BroadcastMessageResult> {
+  return { commandId: "BroadcastMessage", command: { toRoomId, body, responseRequired, asSession } };
 }
 
 export function joinRoom(asSession: string, name: string, description?: string): MarshalCommand<JoinRoomResult> {
@@ -156,6 +157,11 @@ export interface SendMessageResult {
   messageId: string;
   toSessionId: string;
   sentAt: number;
+  /** Optional only for compatibility with daemons older than v0.45.0. */
+  livePush?: "unknown" | "delivered" | "unavailable" | "failed";
+  /** Optional only for compatibility with daemons older than v0.45.0. */
+  wake?: "not_needed" | "unobserved";
+  /** Compatibility alias for livePush === "delivered"; not wake status. */
   deliveredLive: boolean;
 }
 
@@ -191,6 +197,7 @@ export interface MessageView {
   fromSessionId: string;
   toSessionId?: string;
   toRoomId?: string;
+  responseRequired?: boolean;
   body: string;
   sentAt: number;
   readByMe: boolean;
@@ -223,10 +230,14 @@ export const NOTIFY_CHANNEL_COMMAND_ID = "NotifyChannel";
 export interface NotifyChannelMeta {
   source?: string;
   kind?: string;
+  message_id?: string;
   from_session?: string;
   from_nickname?: string;
   to_session?: string;
+  response_required?: boolean;
   body?: string;
+  /** True when `body` is a preview the daemon cut short. */
+  body_truncated?: boolean;
   sent_at?: number;
 }
 

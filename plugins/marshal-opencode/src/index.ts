@@ -24,6 +24,7 @@ import type { Event } from "@opencode-ai/sdk";
 
 import { MarshalDaemon } from "./daemon.js";
 import { resolveIdentity } from "./identity.js";
+import { pushText } from "./push.js";
 
 const DEFAULT_ADDRESS = "ws://localhost:6155";
 
@@ -60,7 +61,11 @@ function eventSessionId(event: Event): string | undefined {
   return undefined;
 }
 
-export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) => {
+export const MarshalPlugin: Plugin = async (input) => {
+  const { client, $, directory, worktree } = input;
+  const ui = (input as typeof input & {
+    ui?: { invalidate(input: { surface: "sidebar" | "statusline" }): void };
+  }).ui;
   const cwd = worktree || directory || process.cwd();
   const address = process.env.MARSHAL_DAEMON_ADDRESS || process.env.MYKO_ADDRESS || DEFAULT_ADDRESS;
   const identity = await resolveIdentity($, cwd);
@@ -74,26 +79,37 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
   // way Claude Code's channel push does: surface the message and run a turn
   // immediately, rather than waiting for the next user prompt. A toast gives an
   // out-of-band cue; `session.prompt` injects the clean `new message from …`
-  // notification as a turn so the agent processes it now. drainInbox acks the
-  // message, so the chat.message fallback below won't re-deliver it.
+  // notification as a turn so the agent processes it now.
   daemon.onNotify(async (meta) => {
     const who = meta.from_nickname ?? meta.from_session ?? "a sibling session";
+    daemon.recordCommunication(meta.to_session ?? "", meta.from_session);
     void client.tui
       .showToast({ body: { message: `marshal: new message from ${who}`, variant: "info" } })
       .catch(() => {});
     const sid = meta.to_session;
     if (!sid) return;
     log(`marshal: inbound push for session ${sid}`);
-    const inbox = await daemon.drainInbox(sid);
-    if (!inbox) {
-      log(`marshal: inbound push for ${sid} but inbox drained empty`);
+    // NotifyChannel already carries the body. The daemon marks a delivered
+    // direct push read; anything else unread (an @mention push, a message whose
+    // push failed) is surfaced by chat.message, which also runs for this
+    // prompt. Don't drain after the prompt: by then the drain can only find
+    // messages that turned unread during the turn, and it would ack them
+    // without showing them.
+    const text = meta.body ? pushText(who, meta) : await daemon.drainInbox(sid);
+    if (!text) {
+      log(`marshal: inbound push for ${sid} had no body and inbox was empty`);
       return;
     }
-    log(`marshal: auto-advancing ${sid} (${inbox.length} chars)`);
+    log(`marshal: auto-advancing ${sid} (${text.length} chars)`);
     await client.session
-      .prompt({ path: { id: sid }, body: { parts: [{ type: "text", text: inbox }] } })
+      .prompt({ path: { id: sid }, body: { parts: [{ type: "text", text }] } })
       .then(() => log(`marshal: auto-advanced session ${sid}`))
       .catch((e: unknown) => log(`marshal: auto-advance prompt failed: ${String(e)}`));
+  });
+  daemon.onRosterChanged(() => ui?.invalidate({ surface: "sidebar" }));
+  daemon.onConnectionChanged(() => {
+    ui?.invalidate({ surface: "sidebar" });
+    ui?.invalidate({ surface: "statusline" });
   });
 
   daemon.start();
@@ -140,8 +156,8 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
     // Offline fallback: messages that arrived while this session had no live
     // connection (delivered_live=false) aren't auto-advanced by the push above,
     // so we drain them on the next user turn and append the clean notification
-    // as a VISIBLE text part. Live messages are already acked by the push
-    // handler, so this only fires for genuinely-missed ones.
+    // as a VISIBLE text part. The daemon marks a delivered direct push read,
+    // so this only picks up messages that weren't pushed, and @mentions.
     "chat.message": async (input, output) => {
       const sid = input.sessionID ?? output.message.sessionID ?? lastActiveSession;
       if (!sid) return;
@@ -167,11 +183,14 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
         args: {
           to: tool.schema.string().describe("recipient session id"),
           body: tool.schema.string().describe("message text"),
+          response_required: tool.schema.boolean().optional().describe("Whether this message needs an answer; defaults to false. Keep it out of the body."),
         },
         async execute(args, ctx) {
           daemon.registerSession(ctx.sessionID);
-          const r = await daemon.sendMessage(ctx.sessionID, args.to, args.body);
-          return `sent (message ${r.messageId}; delivered_live=${r.deliveredLive})`;
+          const r = await daemon.sendMessage(ctx.sessionID, args.to, args.body, args.response_required);
+          const livePush = r.livePush ?? (r.deliveredLive ? "delivered" : "unknown");
+          const wake = r.wake ?? (r.deliveredLive ? "not_needed" : "unobserved");
+          return `sent (message ${r.messageId}; persisted=true; live_push=${livePush}; wake=${wake})`;
         },
       }),
 
@@ -182,10 +201,11 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
         args: {
           room: tool.schema.string().describe("room id/name"),
           body: tool.schema.string().describe("message text"),
+          response_required: tool.schema.boolean().optional().describe("Whether this message needs an answer; defaults to false. Keep it out of the body."),
         },
         async execute(args, ctx) {
           daemon.registerSession(ctx.sessionID);
-          const r = await daemon.broadcast(ctx.sessionID, args.room, args.body);
+          const r = await daemon.broadcast(ctx.sessionID, args.room, args.body, args.response_required);
           return `broadcast to ${r.toRoomName}: delivered ${r.delivered.length}/${r.total}`;
         },
       }),
@@ -238,6 +258,7 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
             "",
             `nickname:  ${nick}`,
             `operator:  ${identity.operator}`,
+            `agent_id:  ${JSON.stringify(identity.agentId ?? null)}`,
             `host:      ${host}`,
             `project:   ${identity.project ?? "(none)"}`,
             `branch:    ${identity.gitBranch ?? "(none)"}`,
@@ -262,7 +283,7 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
             const branch = s.gitBranch ? ` @${s.gitBranch}` : "";
             const op = s.operator ? ` (${s.operator})` : "";
             const task = s.currentTask ? ` — ${s.currentTask}` : "";
-            return `- ${host}:${dir}${branch}${op} [${s.id}]${task}`;
+            return `- ${host}:${dir}${branch}${op} [${s.id}]${s.agentId ? ` agent_id=${JSON.stringify(s.agentId)}` : ""}${task}`;
           });
           return rows.join("\n");
         },
@@ -310,7 +331,43 @@ export const MarshalPlugin: Plugin = async ({ client, $, directory, worktree }) 
     },
   };
 
-  return hooks;
+  // sidebar + statusline hooks — served by the ignition-is-go/opencode fork via
+  // GET /experimental/sidebar|statusline (see plugins/marshal-opencode README).
+  // Stock @opencode-ai/plugin types don't carry these hooks yet, so merge them
+  // in via Object.assign + a downcast instead of the Hooks object literal (which
+  // would trip the excess-property check against the un-forked types).
+  type Status = "success" | "warning" | "error" | "info";
+  const sidebar = () => {
+    const connected = daemon.isConnected();
+    const current = daemon.currentNickname() ?? "(starting)";
+    const recent = daemon
+      .recentCollaborators()
+      .slice(0, 3);
+    const blocks = [
+      { type: "row" as const, label: "nickname", value: current, status: "success" as Status },
+      { type: "row" as const, label: "status", value: connected ? "online" : "offline", status: connected ? "success" as Status : "error" as Status },
+      { type: "separator" as const },
+      {
+        type: "section" as const,
+        title: "Recent collaboration",
+        blocks: recent.map((session) => ({
+          type: "row" as const,
+          label: daemon.nicknameForUi(session.id),
+          value: `${session.project ?? session.cwd.split(/[/\\]/).filter(Boolean).pop() ?? "?"} (${session.operator ?? "?"})`,
+          status: "info" as Status,
+        })),
+      },
+    ];
+    return [{ id: "marshal", title: "marshal", items: [], blocks }];
+  };
+
+  const statusline = () => {
+    const connected = daemon.isConnected();
+    if (!connected) return [{ text: "marshal:offline", status: "error" as Status }];
+    return [{ text: `marshal:${daemon.rosterSync().length}`, status: "success" as Status }];
+  };
+
+  return Object.assign(hooks, { sidebar, statusline }) as Hooks;
 };
 
 export default MarshalPlugin;

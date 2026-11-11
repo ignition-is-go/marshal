@@ -1,6 +1,8 @@
-//! End-to-end test of the `/hook/*` HTTP listener — the flag-independent
-//! inbox-delivery path. A stored message MUST surface in the
-//! `<marshal_inbox>` block returned by `POST /hook/prompt-submit`.
+//! End-to-end test of the `/hook/*` HTTP listener — registration plus the
+//! flag-independent inbox-delivery path. Eager registration MUST create the
+//! session without consuming context, and a stored message MUST subsequently
+//! surface in the `<marshal_inbox>` block returned by
+//! `POST /hook/prompt-submit`.
 //!
 //! This guards the daemon side of the path whose *deploy* misconfiguration
 //! (hook listener on the wrong port / bound to loopback) silently broke
@@ -14,15 +16,18 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use marshal_entities::{SendMessage, Session, SessionId};
+use marshal_entities::{
+    GetAllMessageReads, GetAllMessages, GetAllSessions, Message, MessageRead, SendMessage, Session,
+    SessionId,
+};
 use myko::{
     command::{CommandContext, CommandHandler},
     entities::client::ClientId,
     request::RequestContext,
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
     wire::{MEvent, MEventType},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use uuid::Uuid;
 
 fn pick_free_port() -> u16 {
@@ -36,10 +41,14 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
         client_id: client_id.map(|c| ClientId(Arc::from(c))),
+        agent_id: None,
         pid: 0,
         cwd: "/repo".into(),
         git_branch: None,
         current_task: None,
+        session_name: None,
+        activity: None,
+        kind: None,
         connected_at: 100,
         last_activity_at: None,
         last_tool: None,
@@ -48,16 +57,17 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
         host: None,
         project: None,
         channels_enabled: None,
+        acks_pushes: None,
     }
 }
 
-fn set_session(ctx: &CellServerCtx, s: &Session) {
+fn set_session(ctx: &MykoServerContext, s: &Session) {
     let event = MEvent::from_item(s, MEventType::SET, &Uuid::new_v4().to_string());
     ctx.apply_event_batch(vec![event])
         .expect("apply Session SET");
 }
 
-fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
+fn cmd_ctx(ctx: &MykoServerContext, caller_client_id: Option<&str>) -> CommandContext {
     let req = RequestContext::new(
         Arc::<str>::from(Uuid::new_v4().to_string().as_str()),
         caller_client_id.map(Arc::<str>::from),
@@ -107,23 +117,16 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     daemon::link();
 
     let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
-    let server = CellServer::builder()
+    let server = MykoServer::builder()
         .with_default_persister(blackhole)
         .build();
     let ctx = server.ctx();
-    let server: &'static CellServer = Box::leak(Box::new(server));
+    let server: &'static MykoServer = Box::leak(Box::new(server));
     let _ = server;
 
-    // sender + recipient; store a message for the recipient via the real command.
+    // Seed the sender; the recipient is created through the real eager
+    // registration route below.
     set_session(&ctx, &session("sender", Some("c-sender")));
-    set_session(&ctx, &session("recipient", None));
-    SendMessage {
-        to_session_id: SessionId(Arc::from("recipient")),
-        body: "HOOK-E2E-PROBE-marker".into(),
-        as_session: None,
-    }
-    .execute(cmd_ctx(&ctx, Some("c-sender")))
-    .expect("send persists");
 
     // bring up the real /hook/* HTTP listener on a free port, sharing ctx.
     let port = pick_free_port();
@@ -140,6 +143,76 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     });
     wait_listening(addr);
 
+    // App-server lifecycle discovery creates the hook-owned session before
+    // any user prompt. Registration has no model turn to receive context, so
+    // its response identifies the reserved session without surfacing inbox.
+    let registration = http_post(
+        addr,
+        "/hook/session-register?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    let registration: serde_json::Value =
+        serde_json::from_str(&registration).expect("registration identity JSON");
+    assert_eq!(registration["session_id"], "recipient");
+    assert!(
+        registration["nickname"]
+            .as_str()
+            .is_some_and(|n| !n.is_empty())
+    );
+
+    // Reproduce a still-running Codex TUI whose hook-owned row was removed by
+    // an older daemon's idle-session backstop. Its next prompt must recreate
+    // the same canonical row in place, without restarting the TUI or changing
+    // its session id.
+    let deleted = MEvent::from_item(
+        &session("recipient", None),
+        MEventType::DEL,
+        &Uuid::new_v4().to_string(),
+    );
+    ctx.apply_event_batch(vec![deleted])
+        .expect("delete recipient session");
+    let repaired = http_post(
+        addr,
+        "/hook/prompt-submit?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert_eq!(repaired, "", "repair without inbox must inject no context");
+    let sessions: Vec<Arc<Session>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllSessions {})
+        .expect("query repaired sessions");
+    let recipient = sessions
+        .iter()
+        .find(|session| session.id.0.as_ref() == "recipient")
+        .expect("prompt-submit must recreate a missing session row");
+    assert_eq!(recipient.cwd, "/work/repo");
+    assert_eq!(recipient.operator.as_deref(), Some("test-op"));
+    assert_eq!(
+        recipient.host.as_ref().map(|host| host.name.as_str()),
+        Some("test-host")
+    );
+
+    // The successful send proves the registration route created a routable
+    // Session row. Register it again after the message is stored to prove a
+    // refresh cannot surface or acknowledge that unread message.
+    SendMessage {
+        response_required: true,
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "HOOK-E2E-PROBE-marker".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists to eagerly registered recipient");
+    let refresh = http_post(
+        addr,
+        "/hook/session-register?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    let refresh: serde_json::Value = serde_json::from_str(&refresh).expect("refresh identity JSON");
+    assert_eq!(
+        refresh, registration,
+        "registration must keep its reserved identity"
+    );
+
     // the recipient's prompt-submit hook must surface the stored message.
     let body = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
     assert!(
@@ -149,6 +222,11 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     assert!(
         body.contains("<marshal_inbox"),
         "expected a <marshal_inbox> block; got: {body:?}"
+    );
+
+    assert!(
+        body.contains("response_required=true"),
+        "missing envelope metadata: {body}"
     );
 
     // At-least-once contract: the listener acks the surfaced message only
@@ -163,6 +241,156 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         "message re-surfaced after a successful hook write — the post-write ack didn't run; got: {body2:?}"
     );
 
+    let stored: Vec<Arc<Message>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessages {})
+        .expect("query acknowledged message");
+    let acknowledged = stored
+        .iter()
+        .find(|message| message.body == "HOOK-E2E-PROBE-marker")
+        .expect("acknowledged Message must remain stored")
+        .clone();
+    let reads: Vec<Arc<MessageRead>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessageReads {})
+        .expect("query message reads");
+    assert!(
+        reads.iter().any(|read| {
+            read.message_id == acknowledged.id
+                && read.session_id == SessionId(Arc::from("recipient"))
+        }),
+        "successful hook write must persist its recipient read receipt"
+    );
+
+    SendMessage {
+        response_required: false,
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "HOOK-E2E-QUEUED-marker".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists unread message before session end");
+
+    // Codex resumes a thread under the same session id after the terminal has
+    // emitted SessionEnd. Messages and read receipts outlive that ephemeral
+    // presence row, so ending the session must neither lose unread inbox nor
+    // turn acknowledged history back into unread inbox.
+    let ended = http_post(addr, "/hook/session-end", r#"{"session_id":"recipient"}"#);
+    assert_eq!(ended, "");
+    let after_end: Vec<Arc<Message>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessages {})
+        .expect("query messages after session end");
+    assert!(
+        after_end
+            .iter()
+            .any(|message| message.id == acknowledged.id),
+        "session end must retain acknowledged direct messages"
+    );
+    assert!(
+        after_end
+            .iter()
+            .any(|message| message.body == "HOOK-E2E-QUEUED-marker"),
+        "session end must retain unread direct messages"
+    );
+    let reads_after_end: Vec<Arc<MessageRead>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessageReads {})
+        .expect("query message reads after session end");
+    assert!(
+        reads_after_end
+            .iter()
+            .any(|read| read.message_id == acknowledged.id),
+        "session end must retain read receipts for durable messages"
+    );
+    let resumed = http_post(
+        addr,
+        "/hook/session-register?host=test-host&operator=test-op&harness=codex",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    let resumed: serde_json::Value =
+        serde_json::from_str(&resumed).expect("resumed registration identity JSON");
+    assert_eq!(resumed["session_id"], "recipient");
+    let after_resume = http_post(
+        addr,
+        "/hook/prompt-submit",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert!(
+        !after_resume.contains("HOOK-E2E-PROBE-marker"),
+        "acknowledged message replayed after same-id session resume; got: {after_resume:?}"
+    );
+    assert!(
+        after_resume.contains("HOOK-E2E-QUEUED-marker"),
+        "unread message queued before session end did not surface after resume; got: {after_resume:?}"
+    );
+
+    SendMessage {
+        response_required: false,
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "HOOK-E2E-NEW-marker".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists new message after resume");
+    let new_after_resume = http_post(
+        addr,
+        "/hook/prompt-submit",
+        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
+    );
+    assert!(
+        new_after_resume.contains("HOOK-E2E-NEW-marker"),
+        "new unread message did not surface after resume; got: {new_after_resume:?}"
+    );
+
+    let deleted = MEvent::from_item(
+        acknowledged.as_ref(),
+        MEventType::DEL,
+        &Uuid::new_v4().to_string(),
+    );
+    ctx.apply_event_batch(vec![deleted])
+        .expect("delete acknowledged Message");
+    let reads: Vec<Arc<MessageRead>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessageReads {})
+        .expect("query message reads after Message deletion");
+    assert!(
+        reads.iter().all(|read| read.message_id != acknowledged.id),
+        "deleting a Message must cascade-delete its read receipts"
+    );
+
+    // Automatic delivery carries a bounded, UTF-8-safe preview. The complete
+    // durable Message remains queryable even after the preview is acknowledged.
+    let long_body = format!("LONG-{}-TAIL", "é".repeat(3_000));
+    SendMessage {
+        response_required: false,
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: long_body.clone(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send persists long message");
+    let stored: Vec<Arc<Message>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessages {})
+        .expect("query durable messages");
+    assert!(
+        stored.iter().any(|message| message.body == long_body),
+        "durable Message must retain the complete body"
+    );
+
+    let bounded = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
+    assert!(bounded.contains("LONG-"));
+    assert!(!bounded.contains("-TAIL"), "hook leaked the complete body");
+    assert!(
+        bounded.contains("[truncated; full message")
+            && bounded.contains("marshal://messages?inbox=true&since="),
+        "hook did not identify the bounded preview: {bounded:?}"
+    );
+    assert!(
+        bounded.chars().count() < 3_000,
+        "automatic inbox context exceeded its per-message bound"
+    );
+    let after_bounded = http_post(addr, "/hook/prompt-submit", r#"{"session_id":"recipient"}"#);
+    assert!(
+        !after_bounded.contains("LONG-"),
+        "bounded preview re-surfaced after successful hook write"
+    );
+
     // a wrong /hook path must 404 (the misroute that caused the outage).
     let mut s = TcpStream::connect(addr).unwrap();
     s.write_all(
@@ -175,4 +403,80 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         raw.starts_with("HTTP/1.1 404"),
         "unknown hook path must 404; got: {raw:?}"
     );
+}
+
+#[test]
+fn registration_preserves_metadata_across_hook_and_shim_writers() {
+    marshal_entities::link();
+    daemon::link();
+    let server = MykoServer::builder()
+        .with_default_persister(Arc::new(BlackholePersister))
+        .build();
+    let ctx = Arc::new(server.ctx());
+    let hook = |agent: Option<&str>| {
+        let mut body = serde_json::json!({"session_id":"metadata", "cwd":"/repo"});
+        if let Some(agent) = agent {
+            body["agent_id"] = agent.into();
+        }
+        daemon::hooks::dispatch(
+            "/hook/session-register",
+            "harness=codex",
+            body.to_string().as_bytes(),
+            &ctx,
+        )
+        .unwrap();
+    };
+    let register = || {
+        marshal_entities::RegisterSession {
+            session: session("metadata", Some("spoofed")),
+        }
+        .execute(cmd_ctx(&ctx, Some("transport")))
+        .unwrap();
+    };
+    let row = || {
+        cmd_ctx(&ctx, None)
+            .exec_query(GetAllSessions {})
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id.0.as_ref() == "metadata")
+            .unwrap()
+    };
+
+    hook(Some("  agent/\"x\nopaque  "));
+    register();
+    assert_eq!(row().agent_id.as_deref(), Some("agent/\"x\nopaque"));
+    assert_eq!(row().client_id.as_ref().unwrap().0.as_ref(), "transport");
+    hook(None);
+    hook(Some(" \t "));
+    assert_eq!(row().agent_id.as_deref(), Some("agent/\"x\nopaque"));
+    hook(Some("replacement"));
+    assert_eq!(row().agent_id.as_deref(), Some("replacement"));
+    assert_eq!(row().client_id.as_ref().unwrap().0.as_ref(), "transport");
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..100 {
+                register();
+            }
+        });
+        scope.spawn(|| {
+            for _ in 0..100 {
+                hook(Some("concurrent"));
+            }
+        });
+    });
+    assert_eq!(row().agent_id.as_deref(), Some("concurrent"));
+    assert_eq!(row().client_id.as_ref().unwrap().0.as_ref(), "transport");
+
+    daemon::hooks::dispatch(
+        "/hook/session-end",
+        "",
+        br#"{"session_id":"metadata"}"#,
+        &ctx,
+    )
+    .unwrap();
+    register();
+    assert_eq!(row().agent_id, None);
+    hook(Some("recreated"));
+    assert_eq!(row().agent_id.as_deref(), Some("recreated"));
 }

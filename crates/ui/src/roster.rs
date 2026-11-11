@@ -31,8 +31,8 @@ pub fn RosterPanel() -> impl IntoView {
 
     let filter = RwSignal::new(String::new());
 
-    // Filter on nickname / operator / host / project / branch / cwd. Reads the
-    // nickname map, so it re-runs as assignments arrive.
+    // Filter on session name / nickname / operator / host / project / branch /
+    // cwd. Reads the nickname map, so it re-runs as assignments arrive.
     let visible = Memo::new(move |_| {
         let q = filter.get().to_lowercase();
         let mut v: Vec<Arc<Session>> = sessions
@@ -43,8 +43,11 @@ pub fn RosterPanel() -> impl IntoView {
                     return true;
                 }
                 let hay = format!(
-                    "{} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {} {} {}",
                     nick.of(s.id.0.as_ref()),
+                    s.session_name.clone().unwrap_or_default(),
+                    s.activity.clone().unwrap_or_default(),
+                    s.kind.clone().unwrap_or_default(),
                     s.operator.clone().unwrap_or_default(),
                     s.host.as_ref().map(|h| h.name.clone()).unwrap_or_default(),
                     s.project.clone().unwrap_or_default(),
@@ -92,7 +95,7 @@ pub fn RosterPanel() -> impl IntoView {
         }}
 
         <div class="roster-search">
-            <SearchField value=filter placeholder="filter by nickname · operator · host · project" />
+            <SearchField value=filter placeholder="filter by name · nickname · operator · host · project" />
         </div>
 
         // ── the table, grouped by host ─────────────────────────────────────────
@@ -154,6 +157,13 @@ pub fn RosterPanel() -> impl IntoView {
 fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, focus: Focus) -> impl IntoView {
     let id = session.id.0.to_string();
     let sid = nick::short_id(&id);
+    // The operator's `/rename` name for this session, when set — the human
+    // label peers target on; nickname stays the address handle.
+    let sname = session.session_name.clone().filter(|s| !s.is_empty());
+    // Live turn-state (busy/idle/shell) → a coloured presence dot, and whether
+    // this is a background/headless agent.
+    let (act_cls, act_title) = activity_indicator(session.activity.as_deref());
+    let is_bg = session.kind.as_deref() == Some("bg");
     let seen_ms = last_seen_ms(&session);
     let seen_abs = time::abs_time(seen_ms);
 
@@ -202,9 +212,12 @@ fn RosterRow(session: Arc<Session>, now: Now, nick: Nicknames, focus: Focus) -> 
     view! {
         <tr class=row_class on:click=move |_| focus.toggle_session(click_id.clone())>
             <td class="c-name">
+                <span class=act_cls title=act_title></span>
                 <span class="nick">{handle}</span>
                 <span class="sid">{sid}</span>
+                {is_bg.then(|| view! { <span class="kind-badge" title="background / headless agent">"bg"</span> })}
                 {move || (is_console && online.get()).then(|| view! { <span class="you-badge">"you"</span> })}
+                {sname.map(|n| { let t = n.clone(); view! { <span class="sname" title=t>{n}</span> } })}
             </td>
             <td class=op_dim>{op_str}</td>
             <td class=proj_dim>{proj_str}</td>
@@ -233,11 +246,25 @@ fn opt_status(v: &Option<String>) -> (&'static str, String) {
     }
 }
 
+/// The live turn-state dot → (`class`, hover title). `busy` = actively working
+/// (pulses), `shell` = in a shell command, `idle` = awaiting input, absent =
+/// unknown (harness without a manifest / older build).
+fn activity_indicator(a: Option<&str>) -> (&'static str, &'static str) {
+    match a {
+        Some("busy") => ("act-dot act-busy", "working"),
+        Some("shell") => ("act-dot act-shell", "in shell"),
+        Some("idle") => ("act-dot act-idle", "idle"),
+        Some(_) => ("act-dot act-idle", "active"),
+        None => ("act-dot act-none", "unknown"),
+    }
+}
+
 const ROSTER_CSS: &str = r#"
 .roster-search { margin-bottom: 12px; max-width: 420px; }
 .roster-t td.c-name { min-width: 140px; }
 .roster-t td.c-name .nick { display: inline-block; }
 .roster-t td.c-name .sid { display: inline-block; margin-left: 8px; }
+.roster-t td.c-name .sname { display: block; margin-top: 3px; font-size: 11px; color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .roster-t .roster-row { cursor: pointer; }
 .roster-t .roster-row.selected td { background: color-mix(in oklch, var(--color-primary) 15%, transparent); }
 .roster-t .roster-row.selected .c-name { box-shadow: inset 3px 0 0 var(--color-primary); }
@@ -248,4 +275,12 @@ const ROSTER_CSS: &str = r#"
 .roster-t td.c-status { max-width: 240px; }
 .roster-t td.c-status .ellip { display: block; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .roster-t .you-badge { margin-left: 8px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-base-100); background: var(--color-primary); padding: 1px 5px; border-radius: 3px; }
+/* live turn-state dot: green (pulsing) = working, amber = shell, dim = idle. */
+.roster-t td.c-name .act-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; vertical-align: middle; }
+.roster-t td.c-name .act-busy { background: var(--color-success); animation: act-pulse 1.6s ease-in-out infinite; }
+.roster-t td.c-name .act-shell { background: var(--color-warning); }
+.roster-t td.c-name .act-idle { background: var(--color-text-secondary); opacity: 0.35; }
+.roster-t td.c-name .act-none { background: transparent; box-shadow: inset 0 0 0 1px var(--color-border); }
+@keyframes act-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.roster-t .kind-badge { margin-left: 8px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-secondary); border: 1px solid var(--color-border); padding: 0 4px; border-radius: 3px; }
 "#;

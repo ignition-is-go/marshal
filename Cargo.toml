@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/entities", "crates/daemon", "crates/shim", "crates/tui", "crates/ui"]
 
 [workspace.package]
-version = "0.40.0"
+version = "0.49.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
@@ -17,15 +17,18 @@ log = "0.4"
 env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 notify-debouncer-mini = "0.7"
+futures-util = "0.3"
+tokio-tungstenite = "0.29"
 
 # Myko stack — pulled from crates.io. Stock (no fork patch): ships the
 # HTTP MCP router (POST /myko/mcp request/response + SSE) and the
 # `mcp::filter` tool-visibility allowlist the pull model relies on.
-myko = "4.24.2"
-myko-macros = "4.24.2"
-myko-server = "4.24.2"
-myko-leptos = "4.24.2"
-hyphae = "^1.0.0"
+# Keep the core and code-generating macros on the same release.
+myko = "=6.11.5"
+myko-macros = "=6.11.5"
+myko-server = "=6.11.5"
+myko-leptos = "=6.11.5"
+hyphae = "3.1.2"
 
 # Local crates. `version` is required so `cargo publish` accepts the
 # path dep — flux stamps both this and `workspace.package.version` to
@@ -34,4 +37,4 @@ hyphae = "^1.0.0"
 # the cross-crate publish graph on the dep key, not the `package =`
 # alias). Source code uses `use marshal_entities::...` — the auto
 # dash→underscore conversion Rust applies to crate names.
-marshal-entities = { path = "crates/entities", version = "0.40.0" }
+marshal-entities = { path = "crates/entities", version = "0.58.1" }

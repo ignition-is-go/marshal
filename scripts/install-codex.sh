@@ -38,7 +38,7 @@ case "$os" in
     Darwin)
         case "$arch" in
             arm64) target="aarch64-apple-darwin" ;;
-            x86_64) target="x86_64-apple-darwin" ;;
+            x86_64) echo "unsupported macOS arch: $arch" >&2; exit 1 ;;
             *) echo "unsupported macOS arch: $arch" >&2; exit 1 ;;
         esac
         ;;

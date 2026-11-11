@@ -19,23 +19,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hyphae::Gettable;
+use hyphae::{Gettable, Materialize};
 use marshal_entities::{
-    GetAllSessions, Message, NotifyChannel, SendMessage, SendMessageResult, Session, SessionId,
+    AckMessages, AckMessagesResult, GetAllSessions, LivePushStatus, Message, MessageId,
+    MessageRead, NotifyChannel, SendMessage, SendMessageResult, Session, SessionId, WakeStatus,
 };
 use myko::{
     client::{ConnectionStatus, MykoClient, MykoProtocol},
     core::item::Eventable,
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
     wire::{MEvent, MEventType},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use uuid::Uuid;
 
 const POLL_TIMEOUT: Duration = Duration::from_secs(8);
 
 struct ServerHandle {
-    ctx: CellServerCtx,
+    ctx: MykoServerContext,
     shutdown: Option<std::sync::mpsc::Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -59,7 +60,7 @@ fn pick_free_port() -> u16 {
 }
 
 fn spawn_server(bind: SocketAddr) -> ServerHandle {
-    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<CellServerCtx>(1);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<MykoServerContext>(1);
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
     let join = thread::spawn(move || {
@@ -70,7 +71,7 @@ fn spawn_server(bind: SocketAddr) -> ServerHandle {
         rt.block_on(async move {
             let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
             let server = Arc::new(
-                CellServer::builder()
+                MykoServer::builder()
                     .with_bind_addr(bind)
                     .with_default_persister(blackhole)
                     .build(),
@@ -110,12 +111,16 @@ fn wait_for(label: &str, mut f: impl FnMut() -> bool) {
 
 fn make_session(id: &str) -> Session {
     Session {
+        agent_id: None,
         id: SessionId(Arc::from(id)),
         client_id: None, // server auto-populates
         pid: 0,
         cwd: "/repo".into(),
         git_branch: None,
         current_task: None,
+        session_name: None,
+        activity: None,
+        kind: None,
         connected_at: chrono::Utc::now().timestamp_millis(),
         last_activity_at: None,
         last_tool: None,
@@ -124,6 +129,7 @@ fn make_session(id: &str) -> Session {
         host: None,
         project: None,
         channels_enabled: None,
+        acks_pushes: None,
     }
 }
 
@@ -132,11 +138,151 @@ fn send_session_set(client: &MykoClient, session: &Session) {
     client.send_event(event).expect("send_event");
 }
 
-fn message_count(ctx: &CellServerCtx) -> usize {
+fn message_count(ctx: &MykoServerContext) -> usize {
     ctx.registry
         .get(Message::ENTITY_NAME_STATIC)
-        .map(|store| store.entries().get().len())
+        .map(|store| store.entries().materialize().get().len())
         .unwrap_or(0)
+}
+
+fn read_count(ctx: &MykoServerContext) -> usize {
+    ctx.registry
+        .get(MessageRead::ENTITY_NAME_STATIC)
+        .map(|store| store.entries().materialize().get().len())
+        .unwrap_or(0)
+}
+
+/// Connects sender A (`sess-alpha`) and recipient B (`bravo`) and waits until
+/// both are on the roster with a client bound. Returns both clients and the
+/// slot B's pushes land in.
+fn connect_pair(
+    addr: &str,
+    bravo: &Session,
+) -> (MykoClient, MykoClient, Arc<Mutex<Option<NotifyChannel>>>) {
+    let client_a = MykoClient::new();
+    client_a.set_protocol(MykoProtocol::JSON);
+    let client_b = MykoClient::new();
+    client_b.set_protocol(MykoProtocol::JSON);
+
+    let received: Arc<Mutex<Option<NotifyChannel>>> = Arc::new(Mutex::new(None));
+    let received_for_handler = Arc::clone(&received);
+    let notify_guard = client_b.on_command::<NotifyChannel, _>(move |cmd, _responder| {
+        *received_for_handler.lock().expect("notify mutex") = Some(cmd);
+    });
+    Box::leak(Box::new(notify_guard));
+
+    let b_sessions = client_b.watch_query::<GetAllSessions>(GetAllSessions {});
+    let a_sessions = client_a.watch_query::<GetAllSessions>(GetAllSessions {});
+    Box::leak(Box::new(b_sessions));
+
+    client_a.set_address(Some(addr.to_string()));
+    client_b.set_address(Some(addr.to_string()));
+    for (label, client) in [("A connected", &client_a), ("B connected", &client_b)] {
+        let s = client.connection_status();
+        wait_for(label, move || {
+            matches!(s.get(), ConnectionStatus::Connected(_))
+        });
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    send_session_set(&client_a, &make_session("sess-alpha"));
+    send_session_set(&client_b, bravo);
+    let bravo_id = bravo.id.clone();
+    wait_for("both sessions visible with client_ids", move || {
+        let s = a_sessions.get();
+        let a = s.iter().find(|x| x.id.0.as_ref() == "sess-alpha");
+        let b = s.iter().find(|x| x.id == bravo_id);
+        matches!((a, b), (Some(a), Some(b)) if a.client_id.is_some() && b.client_id.is_some())
+    });
+    (client_a, client_b, received)
+}
+
+fn send_and_wait(client: &MykoClient, to: &str, body: &str) -> SendMessageResult {
+    let cmd = SendMessage {
+        response_required: false,
+        to_session_id: SessionId(Arc::from(to)),
+        body: body.into(),
+        as_session: None,
+    };
+    let cell = client.send_command::<SendMessage, SendMessageResult>(&cmd);
+    let waiting = cell.clone();
+    wait_for("send_command response", move || {
+        matches!(waiting.get(), Some(Ok(_)))
+    });
+    cell.get().expect("response").expect("ok")
+}
+
+/// A client that doesn't ack pushes has its pushed message marked read by the
+/// daemon, so its next inbox pull doesn't show it a second time.
+#[test]
+fn a_push_is_marked_read_for_a_session_that_does_not_ack_pushes() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    marshal_entities::link();
+    daemon::link();
+    let port = pick_free_port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let server = spawn_server(bind);
+
+    let (client_a, _client_b, received) =
+        connect_pair(&format!("ws://{bind}"), &make_session("sess-bravo"));
+    let result = send_and_wait(&client_a, "sess-bravo", "pushed");
+    assert_eq!(result.live_push, LivePushStatus::Delivered);
+    wait_for("B received the push", move || {
+        received.lock().expect("notify mutex").is_some()
+    });
+    let ctx = server.ctx.clone();
+    wait_for("the push is marked read", move || read_count(&ctx) == 1);
+
+    server.shutdown();
+}
+
+/// A client that acks pushes itself keeps a pushed message unread until it
+/// says it has shown it. A push lost on the way (the connection stopped being
+/// read, then died) stays unread for the next pull instead of being marked
+/// read unseen.
+#[test]
+fn a_session_that_acks_pushes_keeps_a_push_unread_until_it_acks() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    marshal_entities::link();
+    daemon::link();
+    let port = pick_free_port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let server = spawn_server(bind);
+
+    let mut bravo = make_session("sess-bravo-acks");
+    bravo.acks_pushes = Some(true);
+    let (client_a, client_b, received) = connect_pair(&format!("ws://{bind}"), &bravo);
+    let result = send_and_wait(&client_a, "sess-bravo-acks", "pushed");
+    assert_eq!(result.live_push, LivePushStatus::Delivered);
+    assert!(result.delivered_live);
+    {
+        let received = Arc::clone(&received);
+        wait_for("B received the push", move || {
+            received.lock().expect("notify mutex").is_some()
+        });
+    }
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        read_count(&server.ctx),
+        0,
+        "a push to a session that acks pushes must stay unread until it acks"
+    );
+
+    let push = received.lock().unwrap().take().expect("push");
+    let message_id = push
+        .meta
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .expect("push names its message");
+    let ack = client_b.send_command::<AckMessages, AckMessagesResult>(&AckMessages {
+        message_ids: vec![MessageId(Arc::from(message_id))],
+        as_session: None,
+    });
+    wait_for("B's ack response", move || matches!(ack.get(), Some(Ok(_))));
+    let ctx = server.ctx.clone();
+    wait_for("the ack marks it read", move || read_count(&ctx) == 1);
+
+    server.shutdown();
 }
 
 #[test]
@@ -215,6 +361,7 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
 
     // A sends to B by session id.
     let cmd = SendMessage {
+        response_required: true,
         to_session_id: SessionId(Arc::from("sess-bravo")),
         body: "hello bravo".into(),
         as_session: None, // WS path: sender resolved from the connection
@@ -231,6 +378,9 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     }
     let result = response_cell.get().expect("got response").expect("ok");
     assert_eq!(result.to_session_id.0.as_ref(), "sess-bravo");
+    assert_eq!(result.live_push, LivePushStatus::Delivered);
+    assert_eq!(result.wake, WakeStatus::NotNeeded);
+    assert!(result.delivered_live);
 
     // The NotifyChannel push should have landed on B before the response
     // returned (handler emits both inline). Don't wait long — if it isn't
@@ -243,8 +393,8 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
     }
     let push = received.lock().unwrap().take().expect("push");
     // The channel banner is a concise origin ping by the sender's nickname —
-    // NOT the body (which would just be a truncated banner). The full body
-    // travels in meta.body (and the persisted Message / inbox).
+    // NOT the body (which would just be a truncated banner). A bounded preview
+    // travels in meta.body; the persisted Message / inbox retains the full body.
     assert_eq!(
         push.content,
         format!(
@@ -264,6 +414,15 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         Some(&serde_json::json!("hello bravo"))
     );
     assert_eq!(
+        push.meta.get("body_truncated"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(
+        push.meta.get("response_required"),
+        Some(&serde_json::json!(true))
+    );
+    assert!(push.meta.get("message_id").is_some());
+    assert_eq!(
         push.meta.get("kind"),
         Some(&serde_json::json!("new_message"))
     );
@@ -276,8 +435,8 @@ fn send_message_delivers_then_persists_when_recipient_is_live() {
         Some(&serde_json::json!(marshal_entities::nickname("sess-alpha")))
     );
 
-    // And the server persisted exactly one Message — only after the push
-    // succeeded.
+    // And the server persisted exactly one Message. Persistence happens before
+    // the best-effort push so a failed push cannot lose the message.
     assert_eq!(
         message_count(&server.ctx),
         1,
@@ -352,6 +511,7 @@ fn live_client_with_channels_off_is_not_delivered_live() {
     }
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("sess-bravo-off")),
         body: "to a flag-off live client".into(),
         as_session: None,
@@ -370,6 +530,15 @@ fn live_client_with_channels_off_is_not_delivered_live() {
         !result.delivered_live,
         "channels-off recipient must report delivered_live=false (queued to inbox), not a phantom live delivery"
     );
+    assert_eq!(result.live_push, LivePushStatus::Unavailable);
+    // A live client alone isn't a wake path: a Claude session's MCP shim
+    // without the channels flag is connected but can't wake the session, and
+    // the roster calls it `wake: none`. Only a waiter makes it `expected`.
+    assert_eq!(
+        result.wake,
+        WakeStatus::Unobserved,
+        "a connected channels-off recipient with no waiter has no wake path"
+    );
     // No push should have been emitted (it'd be dropped anyway).
     thread::sleep(Duration::from_millis(200));
     assert!(
@@ -381,6 +550,127 @@ fn live_client_with_channels_off_is_not_delivered_live() {
         message_count(&server.ctx),
         1,
         "message must persist for inbox pull even when not delivered live",
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn human_addressed_push_content_carries_the_relay_contract() {
+    // A message addressed to a HUMAN (by operator identity) lands on that
+    // operator's most-active agent. The hook (pull) path already frames such
+    // mail as "for your operator: relay it"; the live push must say the same
+    // in `content`, because Claude Code wraps every channel push as untrusted
+    // peer input — the right stance for agent mail, the wrong one for a
+    // request meant for a person. Without the contract in `content`, an
+    // approval request for the human gets handled by the agent instead.
+    let _ = env_logger::builder().is_test(true).try_init();
+    marshal_entities::link();
+    daemon::link();
+
+    let port = pick_free_port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let addr = format!("ws://{bind}");
+    let server = spawn_server(bind);
+
+    let client_a = MykoClient::new();
+    client_a.set_protocol(MykoProtocol::JSON);
+    let client_b = MykoClient::new();
+    client_b.set_protocol(MykoProtocol::JSON);
+
+    let received: Arc<Mutex<Option<NotifyChannel>>> = Arc::new(Mutex::new(None));
+    let received_for_handler = Arc::clone(&received);
+    let notify_guard = client_b.on_command::<NotifyChannel, _>(move |cmd, _responder| {
+        *received_for_handler.lock().expect("notify mutex") = Some(cmd);
+    });
+    Box::leak(Box::new(notify_guard));
+
+    let _b_sessions = client_b.watch_query::<GetAllSessions>(GetAllSessions {});
+    let _a_sessions = client_a.watch_query::<GetAllSessions>(GetAllSessions {});
+
+    client_a.set_address(Some(addr.clone()));
+    client_b.set_address(Some(addr.clone()));
+    {
+        let s = client_a.connection_status();
+        wait_for("A connected", move || {
+            matches!(s.get(), ConnectionStatus::Connected(_))
+        });
+    }
+    {
+        let s = client_b.connection_status();
+        wait_for("B connected", move || {
+            matches!(s.get(), ConnectionStatus::Connected(_))
+        });
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    // B is one of max's agents. A addresses the PERSON, not the session.
+    let mut max_agent = make_session("sess-max");
+    max_agent.operator = Some("max@lucid.rocks".into());
+    max_agent.last_activity_at = Some(chrono::Utc::now().timestamp_millis());
+    send_session_set(&client_a, &make_session("sess-alpha"));
+    send_session_set(&client_b, &max_agent);
+    {
+        let cell = _a_sessions.clone();
+        wait_for("both sessions visible to A with client_ids", move || {
+            let sessions = cell.get();
+            let a = sessions.iter().find(|s| s.id.0.as_ref() == "sess-alpha");
+            let b = sessions.iter().find(|s| s.id.0.as_ref() == "sess-max");
+            matches!((a, b), (Some(a), Some(b)) if a.client_id.is_some() && b.client_id.is_some())
+        });
+    }
+
+    let cmd = SendMessage {
+        response_required: false,
+        to_session_id: SessionId(Arc::from("max@lucid.rocks")),
+        body: "please approve PR #527".into(),
+        as_session: None,
+    };
+    let response_cell = client_a.send_command::<SendMessage, SendMessageResult>(&cmd);
+    {
+        let cell = response_cell.clone();
+        wait_for("A's send_command response", move || {
+            matches!(cell.get(), Some(Ok(_)))
+        });
+    }
+    let result = response_cell.get().expect("got response").expect("ok");
+    assert_eq!(result.to_session_id.0.as_ref(), "sess-max");
+    assert_eq!(result.live_push, LivePushStatus::Delivered);
+
+    {
+        let received = Arc::clone(&received);
+        wait_for("B received NotifyChannel", move || {
+            received.lock().expect("notify mutex").is_some()
+        });
+    }
+    let push = received.lock().unwrap().take().expect("push");
+
+    // meta already carried the signal before this change; the defect is that
+    // `content` — the line the model actually reads — did not.
+    assert_eq!(
+        push.meta.get("to_operator"),
+        Some(&serde_json::json!("max@lucid.rocks")),
+    );
+    assert!(
+        push.content.contains("For operator (max@lucid.rocks)"),
+        "human-addressed push content must open with the relay-to-operator contract, got: {}",
+        push.content,
+    );
+    assert!(
+        push.content.contains("relay"),
+        "content must tell the agent to relay, not act, got: {}",
+        push.content,
+    );
+    assert!(
+        push.content
+            .contains(&marshal_entities::nickname("sess-alpha")),
+        "content must still name the sender, got: {}",
+        push.content,
+    );
+    assert!(
+        !push.content.contains("please approve"),
+        "content must NOT carry the body, got: {}",
+        push.content,
     );
 
     server.shutdown();

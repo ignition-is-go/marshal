@@ -16,29 +16,32 @@
 
 use std::sync::Arc;
 
-use hyphae::Gettable;
-use marshal_entities::{Message, SendMessage, Session, SessionId};
+use hyphae::{Gettable, Materialize};
+use marshal_entities::{
+    LivePushStatus, Message, SendMessage, SendMessageResult, Session, SessionId, WakeStatus,
+    WakeWatcher, WakeWatcherId,
+};
 use myko::{
     command::{CommandContext, CommandHandler},
     core::item::Eventable,
     entities::client::ClientId,
     request::RequestContext,
-    server::{CellServerCtx, Persister},
+    server::{MykoServerContext, Persister},
     wire::{MEvent, MEventType},
 };
-use myko_server::{BlackholePersister, CellServer};
+use myko_server::{BlackholePersister, MykoServer};
 use uuid::Uuid;
 
-fn setup() -> CellServerCtx {
+fn setup() -> MykoServerContext {
     marshal_entities::link();
     daemon::link();
 
     let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
-    let server = CellServer::builder()
+    let server = MykoServer::builder()
         .with_default_persister(blackhole)
         .build();
     let ctx = server.ctx();
-    let server: &'static CellServer = Box::leak(Box::new(server));
+    let server: &'static MykoServer = Box::leak(Box::new(server));
     let _ = server;
     ctx
 }
@@ -47,10 +50,14 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
         client_id: client_id.map(|c| ClientId(Arc::from(c))),
+        agent_id: None,
         pid: 0,
         cwd: "/repo".into(),
         git_branch: None,
         current_task: None,
+        session_name: None,
+        activity: None,
+        kind: None,
         connected_at: 100,
         last_activity_at: None,
         last_tool: None,
@@ -59,10 +66,11 @@ fn session(id: &str, client_id: Option<&str>) -> Session {
         host: None,
         project: None,
         channels_enabled: None,
+        acks_pushes: None,
     }
 }
 
-fn set_session(ctx: &CellServerCtx, s: &Session) {
+fn set_session(ctx: &MykoServerContext, s: &Session) {
     let event = MEvent::from_item(s, MEventType::SET, &Uuid::new_v4().to_string());
     ctx.apply_event_batch(vec![event])
         .expect("apply Session SET");
@@ -71,7 +79,7 @@ fn set_session(ctx: &CellServerCtx, s: &Session) {
 /// Build a CommandContext as if the WS server had just dispatched a
 /// command from the given client connection (`None` = no connection
 /// identity, the HTTP-MCP / hook path).
-fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContext {
+fn cmd_ctx(ctx: &MykoServerContext, caller_client_id: Option<&str>) -> CommandContext {
     let req = RequestContext::new(
         Arc::<str>::from(Uuid::new_v4().to_string().as_str()),
         caller_client_id.map(Arc::<str>::from),
@@ -86,19 +94,19 @@ fn cmd_ctx(ctx: &CellServerCtx, caller_client_id: Option<&str>) -> CommandContex
     )
 }
 
-fn message_count(ctx: &CellServerCtx) -> usize {
+fn message_count(ctx: &MykoServerContext) -> usize {
     ctx.registry
         .get(Message::ENTITY_NAME_STATIC)
-        .map(|store| store.entries().get().len())
+        .map(|store| store.entries().materialize().get().len())
         .unwrap_or(0)
 }
 
-fn only_message(ctx: &CellServerCtx) -> Message {
+fn only_message(ctx: &MykoServerContext) -> Message {
     let store = ctx
         .registry
         .get(Message::ENTITY_NAME_STATIC)
         .expect("Message store exists");
-    let entries = store.entries().get();
+    let entries = store.entries().materialize().get();
     assert_eq!(entries.len(), 1, "expected exactly one Message");
     myko::utils::downcast_item::<Message>(&entries.into_iter().next().unwrap().1)
         .expect("entry is a Message")
@@ -113,6 +121,7 @@ fn offline_recipient_succeeds_and_persists_for_pull() {
     set_session(&ctx, &session("recipient", None));
 
     let cmd = SendMessage {
+        response_required: true,
         to_session_id: SessionId(Arc::from("recipient")),
         body: "hi".into(),
         as_session: None,
@@ -125,8 +134,74 @@ fn offline_recipient_succeeds_and_persists_for_pull() {
         !result.delivered_live,
         "no live client → not delivered live"
     );
+    assert_eq!(result.live_push, LivePushStatus::Unavailable);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
     assert_eq!(message_count(&ctx), 1, "message must persist for pull");
     assert_eq!(only_message(&ctx).body, "hi");
+    assert!(only_message(&ctx).response_required);
+    let read = marshal_entities::ReadMessages {
+        as_session: Some(SessionId(Arc::from("recipient"))),
+        ..serde_json::from_value(serde_json::json!({})).unwrap()
+    }
+    .execute(cmd_ctx(&ctx, None))
+    .expect("read persisted requirement");
+    assert!(read.messages[0].response_required);
+    assert_eq!(read.messages[0].body, "hi");
+}
+
+/// A waiter holding `/hook/wait` for `id`, as the hook listener records it.
+fn set_waiter(ctx: &MykoServerContext, id: &str) {
+    let watcher = WakeWatcher {
+        id: WakeWatcherId(Arc::from(id)),
+        until: chrono::Utc::now().timestamp_millis() + 60_000,
+    };
+    let ev = MEvent::from_item(&watcher, MEventType::SET, &Uuid::new_v4().to_string());
+    ctx.apply_event_batch(vec![ev])
+        .expect("apply WakeWatcher SET");
+}
+
+fn send_to_recipient(ctx: &MykoServerContext) -> SendMessageResult {
+    SendMessage {
+        response_required: false,
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "hi".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(ctx, Some("c-sender")))
+    .expect("send")
+}
+
+#[test]
+fn a_connected_channels_off_recipient_without_a_waiter_has_no_wake_path() {
+    // A Claude session's MCP shim without the channels flag is connected but
+    // can't wake the session, and the roster says `wake: none`.
+    let ctx = setup();
+    set_session(&ctx, &session("sender", Some("c-sender")));
+    let mut recipient = session("recipient", Some("c-recipient"));
+    recipient.channels_enabled = Some(false);
+    set_session(&ctx, &recipient);
+
+    let result = send_to_recipient(&ctx);
+    assert_eq!(result.live_push, LivePushStatus::Unavailable);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
+    assert_eq!(message_count(&ctx), 1);
+}
+
+#[test]
+fn a_recipient_with_a_waiter_expects_a_wake() {
+    // Connected without channels, or a pull row: either way a waiter holding
+    // `/hook/wait` will hand it the message.
+    for client in [Some("c-recipient"), None] {
+        let ctx = setup();
+        set_session(&ctx, &session("sender", Some("c-sender")));
+        let mut recipient = session("recipient", client);
+        recipient.channels_enabled = Some(false);
+        set_session(&ctx, &recipient);
+        set_waiter(&ctx, "recipient");
+
+        let result = send_to_recipient(&ctx);
+        assert_eq!(result.wake, WakeStatus::Expected, "client {client:?}");
+    }
 }
 
 #[test]
@@ -139,6 +214,7 @@ fn stale_binding_succeeds_and_persists() {
     set_session(&ctx, &session("recipient", Some("c-stale")));
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("recipient")),
         body: "hi".into(),
         as_session: None,
@@ -148,6 +224,8 @@ fn stale_binding_succeeds_and_persists() {
         .expect("stale binding is not a hard failure under the pull model");
 
     assert!(!result.delivered_live);
+    assert_eq!(result.live_push, LivePushStatus::Failed);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
     assert_eq!(message_count(&ctx), 1);
 }
 
@@ -161,6 +239,7 @@ fn self_identified_sender_via_as_session_succeeds() {
     set_session(&ctx, &session("recipient", None));
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("recipient")),
         body: "from http".into(),
         as_session: Some(SessionId(Arc::from("sender"))),
@@ -170,9 +249,38 @@ fn self_identified_sender_via_as_session_succeeds() {
         .expect("self-identified send succeeds");
 
     assert!(!result.delivered_live);
+    assert_eq!(result.live_push, LivePushStatus::Unavailable);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
     let msg = only_message(&ctx);
     assert_eq!(msg.from_session_id, SessionId(Arc::from("sender")));
     assert_eq!(msg.body, "from http");
+}
+
+#[test]
+fn legacy_result_deserializes_with_explicit_unknown_status() {
+    let result: SendMessageResult = serde_json::from_value(serde_json::json!({
+        "messageId": "legacy-message",
+        "toSessionId": "recipient",
+        "sentAt": 123,
+        "deliveredLive": false
+    }))
+    .expect("new client must read an older daemon result");
+
+    assert_eq!(result.live_push, LivePushStatus::Unknown);
+    assert_eq!(result.wake, WakeStatus::Unobserved);
+    assert!(!result.delivered_live);
+    assert_eq!(result.effective_live_push(), LivePushStatus::Unknown);
+    assert_eq!(result.effective_wake(), WakeStatus::Unobserved);
+
+    let live_result: SendMessageResult = serde_json::from_value(serde_json::json!({
+        "messageId": "legacy-live-message",
+        "toSessionId": "recipient",
+        "sentAt": 124,
+        "deliveredLive": true
+    }))
+    .expect("new client must normalize an older live result");
+    assert_eq!(live_result.effective_live_push(), LivePushStatus::Delivered);
+    assert_eq!(live_result.effective_wake(), WakeStatus::NotNeeded);
 }
 
 #[test]
@@ -181,6 +289,7 @@ fn unknown_recipient_errors_and_does_not_persist() {
     set_session(&ctx, &session("sender", Some("c-sender")));
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("does-not-exist")),
         body: "?".into(),
         as_session: None,
@@ -209,6 +318,7 @@ fn nickname_resolves_server_side() {
 
     let nick = marshal_entities::nickname("recipient-xyz");
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from(nick.as_str())),
         body: "hi".into(),
         as_session: None,
@@ -234,6 +344,25 @@ fn nickname_resolves_server_side() {
 }
 
 #[test]
+fn direct_message_ids_are_uuid_v7() {
+    let ctx = setup();
+    set_session(&ctx, &session("sender", Some("c-sender")));
+    set_session(&ctx, &session("recipient", None));
+
+    let result = SendMessage {
+        response_required: false,
+        to_session_id: SessionId(Arc::from("recipient")),
+        body: "hi".into(),
+        as_session: None,
+    }
+    .execute(cmd_ctx(&ctx, Some("c-sender")))
+    .expect("send succeeds");
+
+    let id = Uuid::parse_str(result.message_id.0.as_ref()).expect("message id is a UUID");
+    assert_eq!(id.get_version_num(), 7);
+}
+
+#[test]
 fn operator_token_routes_to_the_humans_most_recently_active_agent() {
     // Human-via-agent routing: address the PERSON by their operator identity
     // and the daemon picks which of their agents currently has the floor —
@@ -251,6 +380,7 @@ fn operator_token_routes_to_the_humans_most_recently_active_agent() {
     set_session(&ctx, &active);
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("max@lucid.rocks")),
         body: "your call on the redeploy".into(),
         as_session: None,
@@ -293,6 +423,7 @@ fn operator_routing_prefers_a_live_agent_and_accepts_the_op_prefix() {
     set_session(&ctx, &live);
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("op:max@lucid.rocks")),
         body: "ping".into(),
         as_session: None,
@@ -315,6 +446,7 @@ fn caller_without_session_errors() {
     set_session(&ctx, &session("recipient", Some("c-recipient")));
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("recipient")),
         body: "?".into(),
         as_session: None,
@@ -338,6 +470,7 @@ fn unidentified_caller_errors() {
     set_session(&ctx, &session("recipient", None));
 
     let cmd = SendMessage {
+        response_required: false,
         to_session_id: SessionId(Arc::from("recipient")),
         body: "?".into(),
         as_session: None,
