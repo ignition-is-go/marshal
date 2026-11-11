@@ -17,8 +17,8 @@ use crossterm::{
 };
 use hyphae::{Signal, Watchable};
 use marshal_entities::{
-    GetAllMessages, GetAllRoomMembers, GetAllRooms, GetAllSessions, Message, Room, RoomKind,
-    RoomMember, Session,
+    GetAllMessages, GetAllRoomMembers, GetAllRooms, GetAllSessionNicknames, GetAllSessions,
+    Message, Room, RoomKind, RoomMember, Session, SessionNickname,
 };
 use myko::{
     client::{ConnectionStatus, MykoClient},
@@ -32,7 +32,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell as RowCell, Paragraph, Row, Table},
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     io,
     sync::{Arc, Mutex},
@@ -41,6 +41,7 @@ use std::{
 
 const FRAME_POLL: Duration = Duration::from_millis(150);
 const RECENT_LIMIT: usize = 50;
+const ACTIVE_WINDOW_MS: i64 = 60_000;
 const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
 /// Env var that overrides the daemon WebSocket URL. Same name the shim
 /// uses, so a single `export MARSHAL_DAEMON_ADDRESS=...` configures
@@ -71,10 +72,14 @@ struct StateInner {
     messages: Vec<Arc<Message>>,
     rooms: Vec<Arc<Room>>,
     members: Vec<Arc<RoomMember>>,
-    /// Live `Client` entity ids, used to render per-session connected /
-    /// disconnected status. A session whose `client_id` is not in this
-    /// set has lost its WS connection (or the daemon was just restarted
-    /// and its shim hasn't reconnected yet).
+    /// Daemon-assigned `session_id → nickname` map (the sticky
+    /// `SessionNickname` store). Read-only here — the TUI never
+    /// recomputes handles, same contract as the web dashboard's
+    /// `nick.rs`. Sessions missing from the map (assignment saga
+    /// hasn't run yet) fall back to their short id.
+    nicknames: HashMap<String, String>,
+    /// Live WebSocket clients. Hook-only sessions have no persistent client;
+    /// their recent activity is a separate presence signal.
     live_clients: HashSet<String>,
     connected: bool,
     last_event: Option<String>,
@@ -104,6 +109,123 @@ impl State {
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
+}
+
+/// How the Agents pane clusters its rows. Cycled with `g` (btop-style:
+/// one key walks the ring), held by the render loop — it's pure view
+/// state, not daemon data, so it lives outside `StateInner`.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum GroupMode {
+    /// Flat list, no grouping — the default.
+    #[default]
+    None,
+    /// Cluster by `operator@host` (the same identity pair auto-rooms
+    /// key on).
+    Identity,
+    /// Cluster by `Session.project` (the basename anchoring the
+    /// `project:` auto-room). Sessions outside any project fall into
+    /// a `(no project)` bucket.
+    Project,
+    /// Cluster by working directory.
+    Cwd,
+    /// Cluster by room membership. A session in several rooms appears
+    /// under each; `everyone` is skipped (it holds every session, so
+    /// it groups nothing).
+    Room,
+}
+
+impl GroupMode {
+    fn next(self) -> Self {
+        match self {
+            GroupMode::None => GroupMode::Identity,
+            GroupMode::Identity => GroupMode::Project,
+            GroupMode::Project => GroupMode::Cwd,
+            GroupMode::Cwd => GroupMode::Room,
+            GroupMode::Room => GroupMode::None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            GroupMode::None => "none",
+            GroupMode::Identity => "identity",
+            GroupMode::Project => "project",
+            GroupMode::Cwd => "cwd",
+            GroupMode::Room => "room",
+        }
+    }
+}
+
+/// Scroll offsets are independent for each pane and clamped on every render,
+/// including when the terminal resizes or the subscribed data shrinks.
+#[derive(Default)]
+struct PaneScroll {
+    offset: usize,
+    page_size: usize,
+    max_offset: usize,
+    focused: bool,
+}
+
+impl PaneScroll {
+    fn update(&mut self, max_offset: usize, page_size: usize) {
+        self.max_offset = max_offset;
+        self.page_size = page_size.max(1);
+        self.offset = self.offset.min(max_offset);
+    }
+
+    fn title(&self) -> String {
+        if self.max_offset > 0 {
+            format!(" [{} / {}] ", self.offset + 1, self.max_offset + 1)
+        } else {
+            String::new()
+        }
+    }
+
+    fn border_style(&self) -> Style {
+        Style::default().fg(if self.focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        })
+    }
+}
+
+#[derive(Default)]
+struct ViewState {
+    group_mode: GroupMode,
+    live_only: bool,
+    focus: usize, // agents, rooms, messages
+    panes: [PaneScroll; 3],
+}
+
+impl ViewState {
+    fn key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Tab => self.focus = (self.focus + 1) % 3,
+            KeyCode::BackTab => self.focus = (self.focus + 2) % 3,
+            KeyCode::Char('g') => {
+                self.group_mode = self.group_mode.next();
+                self.panes[0].offset = 0;
+            }
+            KeyCode::Char('f') => {
+                self.live_only = !self.live_only;
+                self.panes[0].offset = 0;
+            }
+            key => {
+                let pane = &mut self.panes[self.focus];
+                pane.offset = match key {
+                    KeyCode::Up => pane.offset.saturating_sub(1),
+                    KeyCode::Down => pane.offset.saturating_add(1),
+                    KeyCode::PageUp => pane.offset.saturating_sub(pane.page_size),
+                    KeyCode::PageDown => pane.offset.saturating_add(pane.page_size),
+                    KeyCode::Home => 0,
+                    KeyCode::End => pane.max_offset,
+                    _ => pane.offset,
+                }
+                .min(pane.max_offset);
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -196,6 +318,20 @@ async fn main() -> Result<()> {
     rooms_cell.own(rooms_guard);
     Box::leak(Box::new(rooms_cell));
 
+    let nicknames_cell = client.watch_query::<GetAllSessionNicknames>(GetAllSessionNicknames {});
+    let nicknames_state = state.clone();
+    let nicknames_guard = nicknames_cell.subscribe(move |signal| {
+        if let Signal::Value(value) = signal {
+            let map: HashMap<String, String> = (**value)
+                .iter()
+                .map(|n: &Arc<SessionNickname>| (n.id.0.as_ref().to_string(), n.nickname.clone()))
+                .collect();
+            nicknames_state.update(|s| s.nicknames = map);
+        }
+    });
+    nicknames_cell.own(nicknames_guard);
+    Box::leak(Box::new(nicknames_cell));
+
     let members_cell = client.watch_query::<GetAllRoomMembers>(GetAllRoomMembers {});
     let members_state = state.clone();
     let members_guard = members_cell.subscribe(move |signal| {
@@ -245,9 +381,10 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
     let result = (|| -> Result<()> {
+        let mut view = ViewState::default();
         loop {
             let snap = state.snapshot();
-            terminal.draw(|frame| draw(&snap, frame.area(), frame))?;
+            terminal.draw(|frame| draw(&snap, &mut view, frame.area(), frame))?;
             if event::poll(FRAME_POLL)?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
@@ -258,7 +395,7 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
                     }
-                    _ => {}
+                    _ => view.key(key.code),
                 }
             }
         }
@@ -271,7 +408,7 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
     result
 }
 
-fn draw(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+fn draw(snap: &StateInner, view: &mut ViewState, area: Rect, frame: &mut ratatui::Frame) {
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
@@ -283,14 +420,25 @@ fn draw(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         ])
         .split(area);
 
+    for (i, pane) in view.panes.iter_mut().enumerate() {
+        pane.focused = i == view.focus;
+    }
     draw_header(snap, chunks[0], frame);
-    draw_agents(snap, chunks[1], frame);
-    draw_rooms(snap, chunks[2], frame);
-    draw_messages(snap, chunks[3], frame);
-    draw_status(snap, chunks[4], frame);
+    draw_agents(
+        snap,
+        view.group_mode,
+        view.live_only,
+        &mut view.panes[0],
+        chunks[1],
+        frame,
+    );
+    draw_rooms(snap, &mut view.panes[1], chunks[2], frame);
+    draw_messages(snap, &mut view.panes[2], chunks[3], frame);
+    draw_status(snap, view.group_mode, view.live_only, chunks[4], frame);
 }
 
 fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+    let now = now_ms();
     let dot = if snap.connected { "●" } else { "○" };
     let dot_style = if snap.connected {
         Style::default().fg(Color::Green)
@@ -300,12 +448,7 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let live = snap
         .sessions
         .iter()
-        .filter(|s| {
-            s.client_id
-                .as_ref()
-                .map(|cid| snap.live_clients.contains(cid.0.as_ref()))
-                .unwrap_or(false)
-        })
+        .filter(|s| session_is_present(snap, s, now))
         .count();
     let line = Line::from(vec![
         Span::styled(dot, dot_style),
@@ -315,7 +458,10 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(format!("({live} live)"), Style::default().fg(Color::Green)),
+        Span::styled(
+            format!("({live} live/active)"),
+            Style::default().fg(Color::Green),
+        ),
         Span::raw("  "),
         Span::styled(
             format!("{} rooms", snap.rooms.len()),
@@ -331,11 +477,31 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     frame.render_widget(p, area);
 }
 
-fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
-    let now = now_ms();
+/// Shared column layout for the Agents pane — one definition so the
+/// flat table, the grouped sub-tables, and the standalone header row
+/// all align.
+const AGENT_COLUMNS: [Constraint; 9] = [
+    Constraint::Length(8),  // presence
+    Constraint::Length(19), // name (assigned nickname)
+    Constraint::Length(10), // id (session_id[:8])
+    Constraint::Length(22), // identity (operator@host)
+    // cwd / branch / rooms split residual width 1 : 1 : 2 —
+    // rooms tends to grow fastest as ad-hoc memberships
+    // accumulate, so it gets twice the share of any spare
+    // terminal width. Each gets at least 8 chars before the
+    // weighted split kicks in so a tiny terminal still shows
+    // something readable.
+    Constraint::Fill(1),    // cwd
+    Constraint::Fill(1),    // branch
+    Constraint::Fill(2),    // rooms
+    Constraint::Length(20), // activity
+    Constraint::Length(8),  // uptime
+];
 
-    let header = Row::new(vec![
-        RowCell::from("conn"),
+fn agents_header() -> Row<'static> {
+    Row::new(vec![
+        RowCell::from("status"),
+        RowCell::from("name"),
         RowCell::from("id"),
         RowCell::from("identity"),
         RowCell::from("cwd"),
@@ -348,70 +514,229 @@ fn draw_agents(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
-    );
+    )
+}
 
-    let rows: Vec<Row> = snap
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Presence {
+    Live,
+    Active,
+    Idle,
+}
+
+fn session_presence(snap: &StateInner, s: &Session, now: i64) -> Presence {
+    if s.client_id
+        .as_ref()
+        .is_some_and(|cid| snap.live_clients.contains(cid.0.as_ref()))
+    {
+        Presence::Live
+    } else if s.last_activity_at.is_some_and(|at| {
+        // Future timestamps must not keep a clock-skewed session active.
+        (0..=ACTIVE_WINDOW_MS).contains(&now.saturating_sub(at))
+    }) {
+        Presence::Active
+    } else {
+        Presence::Idle
+    }
+}
+
+/// The live filter includes connected clients and recently observed hook activity.
+fn session_is_present(snap: &StateInner, s: &Session, now: i64) -> bool {
+    session_presence(snap, s, now) != Presence::Idle
+}
+
+fn session_row(snap: &StateInner, s: &Session, now: i64) -> Row<'static> {
+    let conn_cell = match session_presence(snap, s, now) {
+        Presence::Live => RowCell::from("● live").style(Style::default().fg(Color::Green)),
+        Presence::Active => RowCell::from("● active").style(Style::default().fg(Color::Cyan)),
+        Presence::Idle => RowCell::from("○ idle").style(Style::default().fg(Color::DarkGray)),
+    };
+    let activity_cell = build_activity_cell(s, now);
+    let identity = format_identity(s);
+    let rooms_summary = format_member_rooms(s, &snap.members);
+    let short_id: String = s.id.0.chars().take(8).collect();
+    Row::new(vec![
+        conn_cell,
+        RowCell::from(session_label(&snap.nicknames, s.id.0.as_ref())).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        RowCell::from(short_id).style(Style::default().fg(Color::DarkGray)),
+        RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
+        RowCell::from(short_cwd(&s.cwd)).style(Style::default().fg(Color::Gray)),
+        RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
+        RowCell::from(rooms_summary).style(Style::default().fg(Color::Magenta)),
+        activity_cell,
+        RowCell::from(format_duration(now - s.connected_at))
+            .style(Style::default().fg(Color::DarkGray)),
+    ])
+}
+
+/// Bucket sessions by the active group key. Labels sort
+/// lexicographically, except the `(no …)` fallback buckets, which
+/// always sink to the bottom. Room mode lists a session once per
+/// room it's in — membership is many-to-many, so duplication is the
+/// honest rendering.
+fn group_sessions(
+    snap: &StateInner,
+    mode: GroupMode,
+    live_only: bool,
+    now: i64,
+) -> Vec<(String, Vec<&Arc<Session>>)> {
+    let mut groups: BTreeMap<String, Vec<&Arc<Session>>> = BTreeMap::new();
+    for s in snap
         .sessions
         .iter()
-        .map(|s| {
-            let live = s
-                .client_id
-                .as_ref()
-                .map(|cid| snap.live_clients.contains(cid.0.as_ref()))
-                .unwrap_or(false);
-            let conn_cell = if live {
-                RowCell::from("● live").style(Style::default().fg(Color::Green))
-            } else {
-                RowCell::from("○ off ").style(Style::default().fg(Color::DarkGray))
-            };
-            let activity_cell = build_activity_cell(s, now);
-            let identity = format_identity(s);
-            let rooms_summary = format_member_rooms(s, &snap.members);
-            let short_id: String = s.id.0.chars().take(8).collect();
-            Row::new(vec![
-                conn_cell,
-                RowCell::from(short_id).style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                RowCell::from(identity).style(Style::default().fg(Color::Cyan)),
-                RowCell::from(short_cwd(&s.cwd)).style(Style::default().fg(Color::Gray)),
-                RowCell::from(s.git_branch.clone().unwrap_or_else(|| "—".into())),
-                RowCell::from(rooms_summary).style(Style::default().fg(Color::Magenta)),
-                activity_cell,
-                RowCell::from(format_duration(now - s.connected_at))
-                    .style(Style::default().fg(Color::DarkGray)),
-            ])
-        })
-        .collect();
+        .filter(|s| !live_only || session_is_present(snap, s, now))
+    {
+        match mode {
+            GroupMode::None => groups.entry(String::new()).or_default().push(s),
+            GroupMode::Identity => groups.entry(format_identity(s)).or_default().push(s),
+            GroupMode::Project => {
+                let key = s
+                    .project
+                    .clone()
+                    .unwrap_or_else(|| "(no project)".to_string());
+                groups.entry(key).or_default().push(s);
+            }
+            GroupMode::Cwd => groups.entry(short_cwd(&s.cwd)).or_default().push(s),
+            GroupMode::Room => {
+                let rooms: Vec<&str> = snap
+                    .members
+                    .iter()
+                    .filter(|m| m.session_id == s.id)
+                    .map(|m| m.room_id.0.as_ref())
+                    .filter(|id| *id != "everyone")
+                    .collect();
+                if rooms.is_empty() {
+                    groups.entry("(no room)".to_string()).or_default().push(s);
+                } else {
+                    for r in rooms {
+                        groups.entry(format!("#{r}")).or_default().push(s);
+                    }
+                }
+            }
+        }
+    }
+    let mut out: Vec<_> = groups.into_iter().collect();
+    // Stable sort: fallback buckets last, alphabetical order preserved
+    // within each partition.
+    out.sort_by_key(|(label, _)| label.starts_with('('));
+    out
+}
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(7),  // conn
-            Constraint::Length(10), // id (session_id[:8])
-            Constraint::Length(22), // identity (operator@host)
-            // cwd / branch / rooms split residual width 1 : 1 : 2 —
-            // rooms tends to grow fastest as ad-hoc memberships
-            // accumulate, so it gets twice the share of any spare
-            // terminal width. Each gets at least 8 chars before the
-            // weighted split kicks in so a tiny terminal still shows
-            // something readable.
-            Constraint::Fill(1),    // cwd
-            Constraint::Fill(1),    // branch
-            Constraint::Fill(2),    // rooms
-            Constraint::Length(20), // activity
-            Constraint::Length(8),  // uptime
-        ],
-    )
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Agents ({}) ", snap.sessions.len())),
-    );
-    frame.render_widget(table, area);
+fn draw_agents(
+    snap: &StateInner,
+    mode: GroupMode,
+    live_only: bool,
+    scroll: &mut PaneScroll,
+    area: Rect,
+    frame: &mut ratatui::Frame,
+) {
+    let now = now_ms();
+    let count = snap
+        .sessions
+        .iter()
+        .filter(|s| !live_only || session_is_present(snap, s, now))
+        .count();
+    let filter = if live_only { " · live" } else { "" };
+    let title = if mode == GroupMode::None {
+        format!(" Agents ({count}){filter} ")
+    } else {
+        format!(" Agents ({count}) · by {}{filter} ", mode.label())
+    };
+    let interior_height = area.height.saturating_sub(2);
+    let capacity = usize::from(interior_height.saturating_sub(u16::from(interior_height > 1)));
+    // Group labels consume variable space, so the last session is a valid
+    // starting position. Flat tables can clamp to a full final page.
+    let groups = group_sessions(snap, mode, live_only, now);
+    let total = groups
+        .iter()
+        .map(|(_, members)| members.len())
+        .sum::<usize>();
+    let max_offset = if mode == GroupMode::None {
+        total.saturating_sub(capacity.max(1))
+    } else if total + groups.len() <= capacity {
+        0
+    } else {
+        total.saturating_sub(1)
+    };
+    scroll.update(max_offset, capacity);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(scroll.border_style())
+        .title(format!("{title}{}", scroll.title()));
+
+    if mode == GroupMode::None {
+        let rows: Vec<Row> = snap
+            .sessions
+            .iter()
+            .filter(|s| !live_only || session_is_present(snap, s, now))
+            .skip(scroll.offset)
+            .map(|s| session_row(snap, s, now))
+            .collect();
+        let table = Table::new(rows, AGENT_COLUMNS)
+            .header(agents_header())
+            .block(block);
+        frame.render_widget(table, area);
+        return;
+    }
+
+    // Spend rows in display order instead of letting equal-priority layout
+    // constraints shrink member tables to zero. A label is only rendered
+    // when at least one of its members also fits. In a one-line interior,
+    // prefer a session over the column header.
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut y = inner.y;
+    let mut remaining = inner.height;
+    if remaining > 1 {
+        frame.render_widget(
+            Table::new(Vec::<Row>::new(), AGENT_COLUMNS).header(agents_header()),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y += 1;
+        remaining -= 1;
+    }
+    let mut skip = scroll.offset;
+    let mut rendered_members = 0;
+    for (label, members) in groups {
+        if skip >= members.len() {
+            skip -= members.len();
+            continue;
+        }
+        let group_size = members.len();
+        let members = &members[skip..];
+        skip = 0;
+        if remaining == 0 {
+            break;
+        }
+        if remaining > 1 {
+            let label_line = Paragraph::new(Line::from(Span::styled(
+                format!("▾ {label} ({group_size})"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            frame.render_widget(label_line, Rect::new(inner.x, y, inner.width, 1));
+            y += 1;
+            remaining -= 1;
+        }
+        let visible = members.len().min(usize::from(remaining)) as u16;
+        let rows = members
+            .iter()
+            .take(usize::from(visible))
+            .map(|s| session_row(snap, s, now));
+        frame.render_widget(
+            Table::new(rows, AGENT_COLUMNS),
+            Rect::new(inner.x, y, inner.width, visible),
+        );
+        y += visible;
+        remaining -= visible;
+        rendered_members += usize::from(visible);
+    }
+    scroll.page_size = rendered_members.max(1);
 }
 
 /// Replace the user's home directory in `cwd` with `~` so the column
@@ -428,7 +753,7 @@ fn short_cwd(cwd: &str) -> String {
     cwd.to_string()
 }
 
-fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+fn draw_rooms(snap: &StateInner, scroll: &mut PaneScroll, area: Rect, frame: &mut ratatui::Frame) {
     let header = Row::new(vec![
         RowCell::from("kind"),
         RowCell::from("room"),
@@ -453,8 +778,11 @@ fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
         (auto_rank, everyone_first, r.id.0.as_ref().to_string())
     });
 
+    let capacity = usize::from(area.height.saturating_sub(3));
+    scroll.update(sorted.len().saturating_sub(capacity.max(1)), capacity);
     let rows: Vec<Row> = sorted
         .iter()
+        .skip(scroll.offset)
         .map(|r| {
             let count = snap.members.iter().filter(|m| m.room_id == r.id).count();
             let kind_label = match &r.kind {
@@ -489,7 +817,8 @@ fn draw_rooms(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Rooms ({}) ", snap.rooms.len())),
+            .border_style(scroll.border_style())
+            .title(format!(" Rooms ({}) {}", snap.rooms.len(), scroll.title())),
     );
     frame.render_widget(table, area);
 }
@@ -523,19 +852,39 @@ fn format_member_rooms(s: &Session, members: &[Arc<RoomMember>]) -> String {
     ids.join(", ")
 }
 
-/// Eight-char short form of a session_id, used as the display label in
-/// the messages pane. Session_id is the sole stored identity; readable
-/// labels are composed at view time.
+/// Eight-char short form of a session_id, used as the fallback label
+/// wherever no nickname assignment has landed yet. Session_id is the
+/// sole stored identity; readable labels are composed at view time.
 fn short_sid(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+/// A session's display label: its daemon-assigned nickname, or the
+/// short id in the window before the assignment saga has run.
+fn session_label(nicknames: &HashMap<String, String>, session_id: &str) -> String {
+    nicknames
+        .get(session_id)
+        .cloned()
+        .unwrap_or_else(|| short_sid(session_id))
+}
+
+fn draw_messages(
+    snap: &StateInner,
+    scroll: &mut PaneScroll,
+    area: Rect,
+    frame: &mut ratatui::Frame,
+) {
     let now = now_ms();
 
+    let capacity = usize::from(area.height.saturating_sub(2));
+    scroll.update(
+        snap.messages.len().saturating_sub(capacity.max(1)),
+        capacity,
+    );
     let lines: Vec<Line> = snap
         .messages
         .iter()
+        .skip(scroll.offset)
         .map(|m| {
             // Broadcasts (to_room_id set) render with a `#` prefix on the
             // recipient and a brighter arrow so the eye picks them out
@@ -546,7 +895,7 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             let recipient_label = if let Some(rid) = m.to_room_id.as_ref() {
                 format!("#{}", short_sid(rid.0.as_ref()))
             } else if let Some(sid) = m.to_session_id.as_ref() {
-                short_sid(sid.0.as_ref())
+                session_label(&snap.nicknames, sid.0.as_ref())
             } else {
                 "?".to_string()
             };
@@ -565,7 +914,10 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    format!("{:>8}", short_sid(m.from_session_id.0.as_ref())),
+                    format!(
+                        "{:>18}",
+                        session_label(&snap.nicknames, m.from_session_id.0.as_ref())
+                    ),
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
@@ -578,7 +930,7 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
                         Style::default().fg(Color::Cyan)
                     },
                 ),
-                Span::styled(format!("{:<14}  ", recipient_label), recipient_style),
+                Span::styled(format!("{:<18}  ", recipient_label), recipient_style),
                 Span::raw(m.body.replace('\n', " ⏎ ")),
             ])
         })
@@ -587,12 +939,23 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let p = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Recent messages ({}) ", snap.messages.len())),
+            .border_style(scroll.border_style())
+            .title(format!(
+                " Recent messages ({}) {}",
+                snap.messages.len(),
+                scroll.title()
+            )),
     );
     frame.render_widget(p, area);
 }
 
-fn draw_status(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+fn draw_status(
+    snap: &StateInner,
+    mode: GroupMode,
+    live_only: bool,
+    area: Rect,
+    frame: &mut ratatui::Frame,
+) {
     let last = snap
         .last_event
         .clone()
@@ -600,7 +963,20 @@ fn draw_status(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let p = Paragraph::new(Line::from(vec![
         Span::styled(last, Style::default().fg(Color::DarkGray)),
         Span::raw("    "),
-        Span::styled("q quit", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("g group: {}", mode.label()),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("f filter: {}", if live_only { "live" } else { "all" }),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            "Tab pane  ↑↓/PgUp/PgDn scroll  Home/End  q quit",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
     frame.render_widget(p, area);
 }
@@ -669,5 +1045,342 @@ fn format_duration(diff_ms: i64) -> String {
         format!("{}h", s / 3600)
     } else {
         format!("{}d", s / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marshal_entities::{RoomId, RoomMemberId, SessionId};
+    use ratatui::backend::TestBackend;
+
+    fn fixture() -> StateInner {
+        let mut snap = StateInner::default();
+        for i in 0..6 {
+            let id = format!("session{i}");
+            snap.nicknames.insert(id.clone(), format!("agent-{i}"));
+            snap.sessions.push(Arc::new(Session {
+                id: SessionId(id.clone().into()),
+                client_id: None,
+                pid: 1,
+                cwd: format!("/repo/{i}"),
+                git_branch: None,
+                current_task: None,
+                connected_at: 0,
+                last_activity_at: None,
+                last_tool: None,
+                last_tool_at: None,
+                operator: Some(format!("operator{i}")),
+                host: None,
+                project: Some(format!("project{i}")),
+                channels_enabled: None,
+                acks_pushes: None,
+                agent_id: None,
+                session_name: None,
+                activity: None,
+                kind: None,
+            }));
+            for room in ["everyone".to_string(), format!("room{i}")] {
+                snap.members.push(Arc::new(RoomMember {
+                    id: RoomMemberId(RoomMember::make_id(&room, &id).into()),
+                    room_id: RoomId(room.into()),
+                    session_id: SessionId(id.clone().into()),
+                    joined_at: 0,
+                }));
+            }
+        }
+        snap.members.push(Arc::new(RoomMember {
+            id: RoomMemberId(RoomMember::make_id("room1", "session0").into()),
+            room_id: RoomId("room1".into()),
+            session_id: SessionId("session0".into()),
+            joined_at: 0,
+        }));
+        snap
+    }
+
+    fn render(snap: &StateInner, mode: GroupMode, height: u16) -> String {
+        render_filtered(snap, mode, height, false)
+    }
+
+    fn render_filtered(snap: &StateInner, mode: GroupMode, height: u16, live_only: bool) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(160, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_agents(
+                    snap,
+                    mode,
+                    live_only,
+                    &mut PaneScroll::default(),
+                    frame.area(),
+                    frame,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..160)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn small_grouped_pane_keeps_header_and_session_rows() {
+        let snap = fixture();
+        for mode in [
+            GroupMode::Identity,
+            GroupMode::Project,
+            GroupMode::Cwd,
+            GroupMode::Room,
+        ] {
+            let screen = render(&snap, mode, 8); // six interior lines
+            assert!(
+                screen.contains("status") && screen.contains("name"),
+                "{screen}"
+            );
+            assert!(
+                screen.contains("agent-0") && screen.contains("session0"),
+                "{screen}"
+            );
+            assert!(screen.contains("agent-1"), "{screen}");
+            assert!(!screen.contains("agent-5"), "{screen}");
+        }
+    }
+
+    #[test]
+    fn room_render_repeats_members_and_skips_everyone() {
+        let screen = render(&fixture(), GroupMode::Room, 8);
+        assert!(screen.contains("▾ #room0 (1)"), "{screen}");
+        assert!(screen.contains("▾ #room1 (2)"), "{screen}");
+        assert_eq!(screen.matches("agent-0").count(), 2, "{screen}");
+        assert!(!screen.contains("#everyone"), "{screen}");
+    }
+
+    #[test]
+    fn live_filter_uses_connected_clients_in_every_group_mode() {
+        let mut snap = fixture();
+        Arc::make_mut(&mut snap.sessions[0]).client_id =
+            Some(myko::entities::client::ClientId("connected".into()));
+        Arc::make_mut(&mut snap.sessions[1]).client_id =
+            Some(myko::entities::client::ClientId("disconnected".into()));
+        snap.live_clients.insert("connected".into());
+        for mode in [
+            GroupMode::None,
+            GroupMode::Identity,
+            GroupMode::Project,
+            GroupMode::Cwd,
+            GroupMode::Room,
+        ] {
+            let live = render_filtered(&snap, mode, 24, true);
+            assert!(
+                live.contains("agent-0") && live.contains("· live"),
+                "{live}"
+            );
+            assert!(
+                !live.contains("agent-1") && !live.contains("agent-2"),
+                "{live}"
+            );
+            let all = render_filtered(&snap, mode, 24, false);
+            assert!(all.contains("agent-1") && all.contains("agent-2"), "{all}");
+        }
+        snap.live_clients.clear();
+        let empty = render_filtered(&snap, GroupMode::Room, 8, true);
+        assert!(empty.contains("Agents (0)"), "{empty}");
+        assert!(
+            !empty.contains("agent-0") && !empty.contains("▾"),
+            "{empty}"
+        );
+    }
+
+    #[test]
+    fn recent_hook_activity_counts_as_live_without_a_websocket() {
+        let mut snap = fixture();
+        let now = now_ms();
+        Arc::make_mut(&mut snap.sessions[0]).last_activity_at = Some(now - 20_000);
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], now),
+            Presence::Active
+        );
+        for mode in [
+            GroupMode::None,
+            GroupMode::Identity,
+            GroupMode::Project,
+            GroupMode::Cwd,
+            GroupMode::Room,
+        ] {
+            let screen = render_filtered(&snap, mode, 24, true);
+            assert!(
+                screen.contains("agent-0") && screen.contains("● active"),
+                "{screen}"
+            );
+            assert!(!screen.contains("agent-1"), "{screen}");
+        }
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], now + 40_000),
+            Presence::Active
+        );
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], now + 40_001),
+            Presence::Idle
+        );
+        Arc::make_mut(&mut snap.sessions[0]).last_activity_at = Some(now + 1);
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], now),
+            Presence::Idle
+        );
+    }
+
+    fn render_pane(
+        snap: &StateInner,
+        pane: usize,
+        mode: GroupMode,
+        scroll: &mut PaneScroll,
+        height: u16,
+    ) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(160, height)).unwrap();
+        terminal
+            .draw(|frame| match pane {
+                0 => draw_agents(snap, mode, false, scroll, frame.area(), frame),
+                1 => draw_rooms(snap, scroll, frame.area(), frame),
+                _ => draw_messages(snap, scroll, frame.area(), frame),
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn every_overflow_agent_is_reachable_in_every_group_mode() {
+        let snap = fixture();
+        for mode in [
+            GroupMode::None,
+            GroupMode::Identity,
+            GroupMode::Project,
+            GroupMode::Cwd,
+            GroupMode::Room,
+        ] {
+            let mut scroll = PaneScroll::default();
+            let first = render_pane(&snap, 0, mode, &mut scroll, 6);
+            assert!(
+                first.contains("agent-0") && !first.contains("agent-5"),
+                "{first}"
+            );
+            let mut screens = String::new();
+            for offset in 0..=scroll.max_offset {
+                scroll.offset = offset;
+                screens.push_str(&render_pane(&snap, 0, mode, &mut scroll, 6));
+            }
+            for i in 0..6 {
+                assert!(screens.contains(&format!("agent-{i}")));
+            }
+            scroll.offset = usize::MAX;
+            let end = render_pane(&snap, 0, mode, &mut scroll, 6);
+            assert!(end.contains("agent-5"), "{end}");
+            if mode == GroupMode::Room {
+                assert!(end.contains("#room5"), "{end}");
+            }
+            render_pane(&StateInner::default(), 0, mode, &mut scroll, 6);
+            assert_eq!(scroll.offset, 0);
+        }
+    }
+
+    #[test]
+    fn rooms_and_messages_scroll_to_last_row_and_clamp_after_resize() {
+        use marshal_entities::MessageId;
+        let mut snap = fixture();
+        for i in 0..8 {
+            snap.rooms.push(Arc::new(Room {
+                id: RoomId(format!("room-{i}").into()),
+                name: format!("room-name-{i}"),
+                description: None,
+                kind: RoomKind::Adhoc,
+                created_at: 0,
+            }));
+            snap.messages.push(Arc::new(Message {
+                id: MessageId(format!("message-{i}").into()),
+                from_session_id: SessionId("session0".into()),
+                to_session_id: Some(SessionId("session1".into())),
+                to_room_id: None,
+                to_operator: None,
+                response_required: false,
+                body: format!("message-body-{i}"),
+                sent_at: 0,
+            }));
+        }
+        for (pane, first_label, last_label) in [
+            (1, "room-name-0", "room-name-7"),
+            (2, "message-body-0", "message-body-7"),
+        ] {
+            let mut scroll = PaneScroll::default();
+            let first = render_pane(&snap, pane, GroupMode::None, &mut scroll, 6);
+            assert!(
+                first.contains(first_label) && !first.contains(last_label),
+                "{first}"
+            );
+            scroll.offset = scroll.max_offset;
+            let last = render_pane(&snap, pane, GroupMode::None, &mut scroll, 6);
+            assert!(
+                last.contains(last_label) && !last.contains(first_label),
+                "{last}"
+            );
+            let expanded = render_pane(&snap, pane, GroupMode::None, &mut scroll, 16);
+            assert_eq!(scroll.offset, 0);
+            assert!(
+                expanded.contains(first_label) && expanded.contains(last_label),
+                "{expanded}"
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_scrolls_only_focused_pane_and_resets_agent_view_changes() {
+        let mut view = ViewState::default();
+        for pane in &mut view.panes {
+            pane.update(20, 5);
+        }
+        view.key(KeyCode::Down);
+        assert_eq!(view.panes[0].offset, 1);
+        view.key(KeyCode::Tab);
+        view.key(KeyCode::PageDown);
+        assert_eq!(view.panes[1].offset, 5);
+        assert_eq!(view.panes[0].offset, 1);
+        view.key(KeyCode::End);
+        assert_eq!(view.panes[1].offset, 20);
+        view.key(KeyCode::Down);
+        assert_eq!(view.panes[1].offset, 20);
+        view.key(KeyCode::PageUp);
+        assert_eq!(view.panes[1].offset, 15);
+        view.key(KeyCode::Home);
+        view.key(KeyCode::Up);
+        assert_eq!(view.panes[1].offset, 0);
+        view.key(KeyCode::BackTab);
+        view.key(KeyCode::Char('g'));
+        assert_eq!(view.panes[0].offset, 0);
+        view.key(KeyCode::Down);
+        view.key(KeyCode::Char('f'));
+        assert_eq!(view.panes[0].offset, 0);
+        view.key(KeyCode::BackTab);
+        assert_eq!(view.focus, 2);
+    }
+
+    #[test]
+    fn tiny_grouped_pane_prioritizes_sessions() {
+        let snap = fixture();
+        for height in 3..=4 {
+            let screen = render(&snap, GroupMode::Project, height);
+            assert!(screen.contains("agent-0"), "{screen}");
+            assert!(!screen.contains("▾"), "{screen}");
+        }
+        for height in 0..=2 {
+            render(&snap, GroupMode::Project, height);
+        }
     }
 }
