@@ -87,6 +87,13 @@ try {
   if (process.env.MARSHAL_VERIFY_OAUTH) {
     await check('standard MCP OAuth discovery, consent, exchange, refresh and logout use shared Myko', async () => {
       const resource = origin + '/myko/mcp';
+      const discovery = await fetch(resource, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})});
+      assert.equal(discovery.status,200);
+      const tools = await discovery.json();
+      assert.ok(tools.result.tools.some(tool => tool.name === 'execute'));
+      const challenge = await fetch(resource, {method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+      assert.equal(challenge.status,401);
+      assert.match(challenge.headers.get('www-authenticate'), /resource_metadata/);
       const metadata = await (await fetch(origin + '/.well-known/oauth-authorization-server/myko/oauth')).json();
       assert.equal(metadata.issuer, origin + '/myko/oauth');
       const redirect = origin + '/oauth-callback';
