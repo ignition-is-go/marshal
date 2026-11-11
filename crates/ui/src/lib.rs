@@ -17,10 +17,15 @@
 use leptos::prelude::*;
 use leptos_meta::{Title, provide_meta_context};
 use mullion::{
-    ActivityDef, ActivityIcon, ActivityId, ActivityNode, Category, CategoryId, MullionRoot,
-    PaneEvent, PaneId, PaneNode,
+    ActivityDef, ActivityIcon, ActivityId, ActivityNode, MullionRoot, PaneEvent, PaneId, PaneNode,
+    SplitDirection,
 };
 use pulse_leptos_ui::{BaseStyle, PULSE_MULLION_CLASS, PulseMullionStyle, Status, StatusVariant};
+use pulse_multi_user_leptos::{
+    ProfileMenu,
+    auth::{AuthContext, AuthGate, myko_transport::provide_authenticated_myko, provide_auth},
+    room::{ParticipantStack, RoomContext, provide_presence_room},
+};
 use serde::{Deserialize, Serialize};
 use styleable::Styleable;
 
@@ -35,10 +40,6 @@ mod sandbox;
 mod sandbox_run;
 mod session_detail;
 mod time;
-
-/// The marshal daemon's myko WS port (co-located with the daemon; see
-/// `daemon_address`). Groups with the daemon's :6155 and the hook :6156.
-const DAEMON_PORT: u16 = 6155;
 
 /// The global focus — a lens shared across every pane. Selecting a session (a
 /// roster row) or a room (a rooms card) focuses the whole workspace on it: the
@@ -85,31 +86,15 @@ pub fn use_focus() -> Focus {
     use_context::<Focus>().expect("Focus provided at root")
 }
 
-/// The daemon WS address to dial. marshal-01 serves both this bundle and the
-/// daemon, so in the browser we connect back to the host that served the page
-/// on the daemon's port — keeping the built bundle independent of which host it
-/// lands on. Falls back to the dev default under `trunk serve` (localhost).
+/// Browser traffic always stays on the protected operator origin.
 fn daemon_address() -> String {
-    let location = web_sys::window().map(|w| w.location());
-    let host = location
-        .as_ref()
-        .and_then(|location| location.hostname().ok())
-        .unwrap_or_default();
-    if !host.is_empty() && host != "localhost" && host != "127.0.0.1" {
-        // The HTTPS operator domain terminates TLS in Caddy, which proxies
-        // /myko back to the daemon. Keep the browser connection same-origin
-        // to avoid mixed content; plain HTTP and local development use :6155.
-        let (scheme, port) = match location
-            .and_then(|location| location.protocol().ok())
-            .as_deref()
-        {
-            Some("https:") => ("wss", 443),
-            _ => ("ws", DAEMON_PORT),
-        };
-        format!("{scheme}://{host}:{port}")
+    let location = web_sys::window().expect("browser window").location();
+    let scheme = if location.protocol().unwrap_or_default() == "https:" {
+        "wss"
     } else {
-        format!("localhost:{DAEMON_PORT}")
-    }
+        "ws"
+    };
+    format!("{scheme}://{}/myko", location.host().unwrap_or_default())
 }
 
 #[component]
@@ -120,6 +105,19 @@ pub fn App() -> impl IntoView {
     let base_css = BaseStyle::default().css();
     let mullion_css = PulseMullionStyle.css();
 
+    let auth = provide_auth("/auth/user".into());
+    view! {
+        <Title text="marshal"/>
+        <style>{base_css}</style>
+        <style>{mullion_css}</style>
+        <AuthGate auth=auth>
+            <AuthenticatedApp auth=auth />
+        </AuthGate>
+    }
+}
+
+#[component]
+fn AuthenticatedApp(auth: AuthContext) -> impl IntoView {
     // One shared 1 Hz clock for the whole console — drives every freshness age.
     time::provide_now();
 
@@ -127,8 +125,21 @@ pub fn App() -> impl IntoView {
     // (must follow provide_myko — it opens a live query). Cross-panel selection
     // is a single shared signal.
     let address = daemon_address();
-    myko_leptos::provide_myko(&address);
+    if let Err(error) = provide_authenticated_myko(&address) {
+        return view! { <p role="alert">{error}</p> }.into_any();
+    }
+    let room = provide_presence_room(
+        Signal::derive(|| Some("marshal".to_owned())),
+        auth.credential,
+    );
     let connected = myko_leptos::use_connection_status();
+    Effect::new(move |previous: Option<bool>| {
+        let current = connected.get();
+        if previous == Some(true) && !current {
+            auth.refresh();
+        }
+        current
+    });
     nick::provide_nicknames();
     console::provide_console();
     provide_context(Focus {
@@ -138,11 +149,7 @@ pub fn App() -> impl IntoView {
     notify::provide_notifications();
 
     view! {
-        <Title text="marshal"/>
-        <style>{base_css}</style>
-        <style>{mullion_css}</style>
         <div class="app-shell">
-            <Header connected=connected.into() addr=address.clone() />
             <main class=format!("app-main {PULSE_MULLION_CLASS}")>
                 <MullionRoot
                     initial_tree=load_layout()
@@ -158,16 +165,13 @@ pub fn App() -> impl IntoView {
                     app_icon=ActivityIcon::Svg(ICON_APP.to_string())
                 />
             </main>
-            // Overlays live OUTSIDE the flex flow. NotificationWidget is
-            // `position:relative; height:100%` (an overlay layer by design), so
-            // it must be pinned in a fixed anchor or it fills the column and
-            // starves the panes to zero height. CommandK's scrim is already fixed.
-            <div class="notif-anchor"><notify::NotificationBell /></div>
+            <StatusFooter connected=connected.into() auth=auth room=room />
             <palette::CommandK />
         </div>
 
         <style>{SHELL_CSS}</style>
     }
+    .into_any()
 }
 
 /// Per-pane data. Every view is self-contained (each pulls its own live queries
@@ -176,79 +180,67 @@ pub fn App() -> impl IntoView {
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 struct Slot;
 
-/// Console views, registered as activities under one category. Each
+/// Console views, registered as a flat list of activities. Each
 /// renders inside a `pane-scroll` wrapper because the pane content area clips
 /// overflow — the view scrolls within its pane. `render` is a non-capturing fn
 /// (the panel component pulls its own context), so no closure state is needed.
 fn items() -> Vec<ActivityNode<Slot>> {
-    vec![ActivityNode::category(Category {
-        id: CategoryId::new("views"),
-        name: "Views".into(),
-        icon: ActivityIcon::Svg(ICON_APP.to_string()),
-        color: "var(--color-primary)".into(),
-        children: vec![
-            ActivityNode::activity(ActivityDef::new(
-                ActivityId::new("roster"),
-                "Roster",
-                ActivityIcon::Svg(ICON_USERS.to_string()),
-                |_| true,
-                |_p, _d| {
-                    view! { <div class="pane-scroll"><roster::RosterPanel /></div> }.into_any()
-                },
-            )),
-            ActivityNode::activity(ActivityDef::new(
-                ActivityId::new("messages"),
-                "Messages",
-                ActivityIcon::Svg(ICON_CHAT.to_string()),
-                |_| true,
-                |_p, _d| {
-                    view! { <div class="pane-scroll"><messages::MessagesPanel /></div> }.into_any()
-                },
-            )),
-            ActivityNode::activity(ActivityDef::new(
-                ActivityId::new("rooms"),
-                "Rooms",
-                ActivityIcon::Svg(ICON_HASH.to_string()),
-                |_| true,
-                |_p, _d| view! { <div class="pane-scroll"><rooms::RoomsPanel /></div> }.into_any(),
-            )),
-            ActivityNode::activity(ActivityDef::new(
-                ActivityId::new("session"),
-                "Session",
-                ActivityIcon::Svg(ICON_ID.to_string()),
-                |_| true,
-                |_p, _d| {
-                    view! { <div class="pane-scroll"><session_detail::SessionDetail /></div> }
-                        .into_any()
-                },
-            )),
-            ActivityNode::activity(ActivityDef::new(
-                ActivityId::new("sandbox"),
-                "Zoo",
-                ActivityIcon::Svg(ICON_FLASK.to_string()),
-                |_| true,
-                |_p, _d| {
-                    view! { <div class="pane-scroll"><sandbox::SandboxPanel /></div> }.into_any()
-                },
-            )),
-            ActivityNode::activity(ActivityDef::new(
-                ActivityId::new("console"),
-                "Console",
-                ActivityIcon::Svg(ICON_SEND.to_string()),
-                |_| true,
-                |_p, _d| {
-                    view! { <div class="pane-scroll"><console::ConsolePanel /></div> }.into_any()
-                },
-            )),
-        ],
-    })]
+    vec![
+        ActivityNode::activity(ActivityDef::new(
+            ActivityId::new("roster"),
+            "Roster",
+            ActivityIcon::Svg(ICON_USERS.to_string()),
+            |_| true,
+            |_p, _d| view! { <div class="pane-scroll"><roster::RosterPanel /></div> }.into_any(),
+        )),
+        ActivityNode::activity(ActivityDef::new(
+            ActivityId::new("messages"),
+            "Messages",
+            ActivityIcon::Svg(ICON_CHAT.to_string()),
+            |_| true,
+            |_p, _d| {
+                view! { <div class="pane-scroll"><messages::MessagesPanel /></div> }.into_any()
+            },
+        )),
+        ActivityNode::activity(ActivityDef::new(
+            ActivityId::new("rooms"),
+            "Rooms",
+            ActivityIcon::Svg(ICON_HASH.to_string()),
+            |_| true,
+            |_p, _d| view! { <div class="pane-scroll"><rooms::RoomsPanel /></div> }.into_any(),
+        )),
+        ActivityNode::activity(ActivityDef::new(
+            ActivityId::new("session"),
+            "Session",
+            ActivityIcon::Svg(ICON_ID.to_string()),
+            |_| true,
+            |_p, _d| {
+                view! { <div class="pane-scroll"><session_detail::SessionDetail /></div> }
+                    .into_any()
+            },
+        )),
+        ActivityNode::activity(ActivityDef::new(
+            ActivityId::new("sandbox"),
+            "Zoo",
+            ActivityIcon::Svg(ICON_FLASK.to_string()),
+            |_| true,
+            |_p, _d| view! { <div class="pane-scroll"><sandbox::SandboxPanel /></div> }.into_any(),
+        )),
+        ActivityNode::activity(ActivityDef::new(
+            ActivityId::new("console"),
+            "Console",
+            ActivityIcon::Svg(ICON_SEND.to_string()),
+            |_| true,
+            |_p, _d| view! { <div class="pane-scroll"><console::ConsolePanel /></div> }.into_any(),
+        )),
+    ]
 }
 
 /// localStorage key for the persisted pane layout.
 const LAYOUT_KEY: &str = "marshal-ui-layout";
 /// Bump when `default_layout()` changes — a persisted layout with an older
 /// version is discarded so the new default reaches everyone once.
-const LAYOUT_VERSION: u32 = 3;
+const LAYOUT_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct StoredLayout {
@@ -296,13 +288,26 @@ fn save_layout(tree: &PaneNode<Slot>) {
     }
 }
 
-/// Start with one full-width view. Switch activities or split panes as needed.
+/// Start with Roster on the left and Session on the right at the golden ratio.
 fn default_layout() -> PaneNode<Slot> {
-    PaneNode::leaf_with_activity(PaneId::new("main"), ActivityId::new("roster"), Slot)
+    PaneNode::Split {
+        direction: SplitDirection::Horizontal,
+        ratio: 0.618_033_988_749_894_8,
+        first: Box::new(PaneNode::leaf_with_activity(
+            PaneId::new("main"),
+            ActivityId::new("roster"),
+            Slot,
+        )),
+        second: Box::new(PaneNode::leaf_with_activity(
+            PaneId::new("session"),
+            ActivityId::new("session"),
+            Slot,
+        )),
+    }
 }
 
 #[component]
-fn Header(connected: Signal<bool>, addr: String) -> impl IntoView {
+fn StatusFooter(connected: Signal<bool>, auth: AuthContext, room: RoomContext) -> impl IntoView {
     let status_variant = move || {
         if connected.get() {
             StatusVariant::Success
@@ -319,12 +324,13 @@ fn Header(connected: Signal<bool>, addr: String) -> impl IntoView {
     };
 
     view! {
-        <header class="app-header">
+        <footer class="app-footer" data-testid="status-footer">
+            <span class="title">"marshal"</span>
+            <span class="version">{concat!("v", env!("CARGO_PKG_VERSION"))}</span>
             <Status variant=Signal::derive(status_variant)>
                 {move || status_label()}
             </Status>
-            <span class="title">"marshal"</span>
-            <span class="substrate">{addr}</span>
+
             <span style="flex:1"/>
             <button
                 class="reset-btn"
@@ -336,7 +342,10 @@ fn Header(connected: Signal<bool>, addr: String) -> impl IntoView {
                     }
                 }
             >"reset layout"</button>
-        </header>
+            <notify::NotificationBell />
+            <ParticipantStack room=room />
+            <ProfileMenu auth=auth room=room />
+        </footer>
     }
 }
 
@@ -353,15 +362,13 @@ const ICON_SEND: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentC
 /// panel reuses. Panel-specific rules live in each panel's own `<style>`.
 const SHELL_CSS: &str = r#"
 .app-shell { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--color-base-100); color: var(--color-text-primary); }
-.app-header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--color-border); background: var(--color-base-200); flex-shrink: 0; }
-.app-header .title { font-weight: 600; letter-spacing: 0.02em; }
-.app-header .substrate { color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 12px; }
-.app-header .reset-btn { appearance: none; border: 1px solid var(--color-border); background: var(--color-base-150); color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.02em; padding: 4px 10px; border-radius: var(--radius-sm); cursor: pointer; transition: color 0.12s, border-color 0.12s, background 0.12s; }
-.app-header .reset-btn:hover { color: var(--color-text-primary); border-color: var(--color-border-hover); background: var(--color-base-100); }
+.app-footer { display: flex; align-items: center; gap: 12px; padding: 4px 12px; border-top: 1px solid var(--color-border); background: var(--color-base-200); flex-shrink: 0; }
+.app-footer .title { font-weight: 600; letter-spacing: 0.02em; }
+.app-footer .version { color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 12px; }
+.app-footer .reset-btn { appearance: none; border: 1px solid var(--color-border); background: var(--color-base-150); color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.02em; padding: 4px 10px; border-radius: var(--radius-sm); cursor: pointer; transition: color 0.12s, border-color 0.12s, background 0.12s; }
+.app-footer .reset-btn:hover { color: var(--color-text-primary); border-color: var(--color-border-hover); background: var(--color-base-100); }
 .app-main { flex: 1; min-height: 0; }
-@media(max-width:600px) { .app-header { padding:8px 12px; gap:8px; } .app-header .substrate { display:none; } .app-header .reset-btn { white-space:nowrap; } }
-/* the notification bell, pinned to a fixed corner and out of the flex flow */
-.notif-anchor { position: fixed; bottom: 12px; right: 12px; z-index: 90; }
+@media(max-width:600px) { .app-footer { padding:8px 12px; gap:8px; } .app-footer .version { display:none; } .app-footer .reset-btn { white-space:nowrap; } }
 .pane-scroll { height: 100%; overflow: auto; padding: 14px 16px; }
 
 /* panel headers */

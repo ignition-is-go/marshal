@@ -25,12 +25,12 @@ impl Now {
 /// Install the shared clock at the app root. Call once, inside `App`.
 pub fn provide_now() {
     let (now, set_now) = signal(js_sys::Date::now());
-    // Leptos' `set_interval` cleans the handle up on owner drop; at the root
-    // owner that's the app's lifetime, which is exactly what we want.
-    set_interval(
+    let clock = set_interval_with_handle(
         move || set_now.set(js_sys::Date::now()),
         Duration::from_secs(1),
-    );
+    )
+    .expect("dashboard clock timer");
+    on_cleanup(move || clock.clear());
     provide_context(Now(now));
 }
 

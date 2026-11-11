@@ -84,7 +84,21 @@ async fn main() -> Result<()> {
     // the event table grows with session lifecycle, not with heartbeats
     // (lv-6731). Late-bound to the Postgres producer after build below.
     let session_filter = Arc::new(daemon::liveness_filter::SessionLivenessFilter::new());
+    let browser = match daemon::browser::BrowserConfig::from_env()? {
+        Some(config) => Some(daemon::browser::Browser::new(config).await?),
+        None => None,
+    };
+    let browser_lifetime = Arc::new(std::sync::Mutex::new(None));
+    let browser_owner = browser_lifetime.clone();
     let mut builder = MykoServer::builder()
+        .try_after_init(move |server| {
+            if let Some(browser) = browser {
+                log::info!("marshal browser listening on {}", browser.local_addr()?);
+                *browser_owner.lock().expect("browser lifetime lock") =
+                    Some(browser.install(server)?);
+            }
+            Ok(())
+        })
         .with_bind_addr(bind_addr)
         .with_persister_override("Client", blackhole.clone())
         .with_persister_override("Server", blackhole.clone())
@@ -203,6 +217,14 @@ Options:
   -V, --version  Print the version and exit
 
 Environment:
+  MARSHAL_BROWSER_BIND     Protected browser HTTP/WS listen address (optional)
+  MARSHAL_UI_DIR           Built UI directory (required with browser listener)
+  MARSHAL_AUTH_ISSUER      OIDC issuer
+  MARSHAL_AUTH_CLIENT_ID   Browser OIDC client ID
+  MARSHAL_AUTH_CLIENT_SECRET  Browser OIDC client secret
+  MARSHAL_AUTH_ORIGIN      Public browser origin
+  MARSHAL_AUTH_EMAIL_DOMAINS  Comma-separated admitted verified email domains
+  MARSHAL_AUTH_POSTGRES_URL  Persistent browser session database
   MARSHAL_BIND       WebSocket and MCP listen address (default {DEFAULT_BIND})
   MARSHAL_HOOK_BIND  HTTP hook listen address (default {DEFAULT_HOOK_BIND})
   MYKO_POSTGRES_URL  Postgres URL for durable state; without it the daemon

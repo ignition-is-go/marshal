@@ -24,10 +24,14 @@ tokio-tungstenite = "0.29"
 # HTTP MCP router (POST /myko/mcp request/response + SSE) and the
 # `mcp::filter` tool-visibility allowlist the pull model relies on.
 # Keep the core and code-generating macros on the same release.
-myko = "=6.11.5"
-myko-macros = "=6.11.5"
-myko-server = "=6.11.5"
-myko-leptos = "=6.11.5"
+myko = "=6.15.1"
+myko-macros = "=6.15.1"
+myko-server = "=6.15.1"
+myko-leptos = "=6.15.1"
+myko-auth = "=6.15.1"
+pulse-auth = { git = "https://github.com/ignition-is-go/pulse-multi-user.git", tag = "v0.9.0" }
+pulse-multi-user = { git = "https://github.com/ignition-is-go/pulse-multi-user.git", tag = "v0.9.0" }
+pulse-multi-user-leptos = { git = "https://github.com/ignition-is-go/pulse-multi-user.git", tag = "v0.9.0" }
 hyphae = "3.1.2"
 
 # Local crates. `version` is required so `cargo publish` accepts the

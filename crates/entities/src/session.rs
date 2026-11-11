@@ -133,6 +133,7 @@ mod tests {
 }
 
 #[myko_item]
+#[myko::myko_external(SET, DEL)]
 pub struct Session {
     /// WebSocket client this session is currently bound to. Auto-populated
     /// by the server from the WS connection — clients send the SET command
@@ -365,6 +366,40 @@ impl myko::command::CommandHandler for RegisterSession {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(mut self, ctx: CommandContext) -> Result<(), CommandError> {
+        if let Some(identity) = ctx.req.auth.as_ref().and_then(|auth| auth.identity()) {
+            let user = identity.user_id.as_ref().ok_or_else(|| {
+                CommandError::new(
+                    ctx.req.tx.to_string(),
+                    ctx.command_id.to_string(),
+                    "Verified user required",
+                )
+            })?;
+            if !self
+                .session
+                .id
+                .0
+                .starts_with(&operator_console_prefix(user.as_ref()))
+            {
+                return Err(CommandError::new(
+                    ctx.req.tx.to_string(),
+                    ctx.command_id.to_string(),
+                    "Console belongs to another user",
+                ));
+            }
+            self.session.operator = identity
+                .claims
+                .get("verified_email")
+                .and_then(|email| email.as_str())
+                .map(str::to_owned);
+            self.session.pid = 0;
+            self.session.host = Some(HostInfo {
+                name: "web-console".into(),
+                os: "browser".into(),
+                arch: "wasm".into(),
+            });
+            self.session.agent_id = None;
+            self.session.channels_enabled = Some(false);
+        }
         self.session.client_id = ctx.client_id().map(|id| ClientId(Arc::from(id)));
         let id = self.session.id.clone();
         update_registered_session(&ctx, &id, |_| self.session)
@@ -393,4 +428,48 @@ pub fn update_registered_session(
         .map(str::to_owned)
         .or_else(|| prior.and_then(|s| s.agent_id.clone()));
     ctx.emit_set(&session)
+}
+
+/// Browser console IDs are scoped to the verified durable user, with a per-tab suffix.
+pub fn operator_console_prefix(user_id: &str) -> String {
+    format!("console-{user_id}:")
+}
+
+#[myko::myko_command]
+pub struct CloseOperatorConsole {
+    pub id: SessionId,
+}
+
+impl myko::command::CommandHandler for CloseOperatorConsole {
+    fn execute(self, ctx: CommandContext) -> Result<(), CommandError> {
+        let user = ctx
+            .req
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.identity())
+            .and_then(|identity| identity.user_id.as_ref())
+            .ok_or_else(|| {
+                CommandError::new(
+                    ctx.req.tx.to_string(),
+                    ctx.command_id.to_string(),
+                    "Verified user required",
+                )
+            })?;
+        if !self
+            .id
+            .0
+            .starts_with(&operator_console_prefix(user.as_ref()))
+        {
+            return Err(CommandError::new(
+                ctx.req.tx.to_string(),
+                ctx.command_id.to_string(),
+                "Console belongs to another user",
+            ));
+        }
+        let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
+        if let Some(session) = sessions.iter().find(|session| session.id == self.id) {
+            ctx.emit_del(session.as_ref())?;
+        }
+        Ok(())
+    }
 }

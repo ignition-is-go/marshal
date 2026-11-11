@@ -8,6 +8,7 @@
 //! commands — there's no saga in the critical path for delivery.
 
 pub mod auto_rooms;
+pub mod browser;
 pub mod cleanup;
 pub mod hooks;
 pub mod http_listener;
