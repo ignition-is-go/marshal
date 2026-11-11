@@ -311,9 +311,10 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
 
     let result = (|| -> Result<()> {
         let mut group_mode = GroupMode::default();
+        let mut live_only = false;
         loop {
             let snap = state.snapshot();
-            terminal.draw(|frame| draw(&snap, group_mode, frame.area(), frame))?;
+            terminal.draw(|frame| draw(&snap, group_mode, live_only, frame.area(), frame))?;
             if event::poll(FRAME_POLL)?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
@@ -325,6 +326,7 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
                         break;
                     }
                     KeyCode::Char('g') => group_mode = group_mode.next(),
+                    KeyCode::Char('f') => live_only = !live_only,
                     _ => {}
                 }
             }
@@ -338,7 +340,13 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
     result
 }
 
-fn draw(snap: &StateInner, group_mode: GroupMode, area: Rect, frame: &mut ratatui::Frame) {
+fn draw(
+    snap: &StateInner,
+    group_mode: GroupMode,
+    live_only: bool,
+    area: Rect,
+    frame: &mut ratatui::Frame,
+) {
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
@@ -351,10 +359,10 @@ fn draw(snap: &StateInner, group_mode: GroupMode, area: Rect, frame: &mut ratatu
         .split(area);
 
     draw_header(snap, chunks[0], frame);
-    draw_agents(snap, group_mode, chunks[1], frame);
+    draw_agents(snap, group_mode, live_only, chunks[1], frame);
     draw_rooms(snap, chunks[2], frame);
     draw_messages(snap, chunks[3], frame);
-    draw_status(snap, group_mode, chunks[4], frame);
+    draw_status(snap, group_mode, live_only, chunks[4], frame);
 }
 
 fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
@@ -367,12 +375,7 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let live = snap
         .sessions
         .iter()
-        .filter(|s| {
-            s.client_id
-                .as_ref()
-                .map(|cid| snap.live_clients.contains(cid.0.as_ref()))
-                .unwrap_or(false)
-        })
+        .filter(|s| session_is_live(snap, s))
         .count();
     let line = Line::from(vec![
         Span::styled(dot, dot_style),
@@ -438,12 +441,14 @@ fn agents_header() -> Row<'static> {
     )
 }
 
-fn session_row(snap: &StateInner, s: &Session, now: i64) -> Row<'static> {
-    let live = s
-        .client_id
+fn session_is_live(snap: &StateInner, s: &Session) -> bool {
+    s.client_id
         .as_ref()
-        .map(|cid| snap.live_clients.contains(cid.0.as_ref()))
-        .unwrap_or(false);
+        .is_some_and(|cid| snap.live_clients.contains(cid.0.as_ref()))
+}
+
+fn session_row(snap: &StateInner, s: &Session, now: i64) -> Row<'static> {
+    let live = session_is_live(snap, s);
     let conn_cell = if live {
         RowCell::from("● live").style(Style::default().fg(Color::Green))
     } else {
@@ -476,9 +481,17 @@ fn session_row(snap: &StateInner, s: &Session, now: i64) -> Row<'static> {
 /// always sink to the bottom. Room mode lists a session once per
 /// room it's in — membership is many-to-many, so duplication is the
 /// honest rendering.
-fn group_sessions(snap: &StateInner, mode: GroupMode) -> Vec<(String, Vec<&Arc<Session>>)> {
+fn group_sessions(
+    snap: &StateInner,
+    mode: GroupMode,
+    live_only: bool,
+) -> Vec<(String, Vec<&Arc<Session>>)> {
     let mut groups: BTreeMap<String, Vec<&Arc<Session>>> = BTreeMap::new();
-    for s in &snap.sessions {
+    for s in snap
+        .sessions
+        .iter()
+        .filter(|s| !live_only || session_is_live(snap, s))
+    {
         match mode {
             GroupMode::None => groups.entry(String::new()).or_default().push(s),
             GroupMode::Identity => groups.entry(format_identity(s)).or_default().push(s),
@@ -515,12 +528,24 @@ fn group_sessions(snap: &StateInner, mode: GroupMode) -> Vec<(String, Vec<&Arc<S
     out
 }
 
-fn draw_agents(snap: &StateInner, mode: GroupMode, area: Rect, frame: &mut ratatui::Frame) {
+fn draw_agents(
+    snap: &StateInner,
+    mode: GroupMode,
+    live_only: bool,
+    area: Rect,
+    frame: &mut ratatui::Frame,
+) {
     let now = now_ms();
+    let count = snap
+        .sessions
+        .iter()
+        .filter(|s| !live_only || session_is_live(snap, s))
+        .count();
+    let filter = if live_only { " · live" } else { "" };
     let title = if mode == GroupMode::None {
-        format!(" Agents ({}) ", snap.sessions.len())
+        format!(" Agents ({count}){filter} ")
     } else {
-        format!(" Agents ({}) · by {} ", snap.sessions.len(), mode.label())
+        format!(" Agents ({count}) · by {}{filter} ", mode.label())
     };
     let block = Block::default().borders(Borders::ALL).title(title);
 
@@ -528,6 +553,7 @@ fn draw_agents(snap: &StateInner, mode: GroupMode, area: Rect, frame: &mut ratat
         let rows: Vec<Row> = snap
             .sessions
             .iter()
+            .filter(|s| !live_only || session_is_live(snap, s))
             .map(|s| session_row(snap, s, now))
             .collect();
         let table = Table::new(rows, AGENT_COLUMNS)
@@ -553,7 +579,7 @@ fn draw_agents(snap: &StateInner, mode: GroupMode, area: Rect, frame: &mut ratat
         y += 1;
         remaining -= 1;
     }
-    for (label, members) in group_sessions(snap, mode) {
+    for (label, members) in group_sessions(snap, mode, live_only) {
         if remaining == 0 {
             break;
         }
@@ -772,7 +798,13 @@ fn draw_messages(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     frame.render_widget(p, area);
 }
 
-fn draw_status(snap: &StateInner, mode: GroupMode, area: Rect, frame: &mut ratatui::Frame) {
+fn draw_status(
+    snap: &StateInner,
+    mode: GroupMode,
+    live_only: bool,
+    area: Rect,
+    frame: &mut ratatui::Frame,
+) {
     let last = snap
         .last_event
         .clone()
@@ -782,6 +814,11 @@ fn draw_status(snap: &StateInner, mode: GroupMode, area: Rect, frame: &mut ratat
         Span::raw("    "),
         Span::styled(
             format!("g group: {}", mode.label()),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("f filter: {}", if live_only { "live" } else { "all" }),
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw("  "),
@@ -903,9 +940,13 @@ mod tests {
     }
 
     fn render(snap: &StateInner, mode: GroupMode, height: u16) -> String {
+        render_filtered(snap, mode, height, false)
+    }
+
+    fn render_filtered(snap: &StateInner, mode: GroupMode, height: u16, live_only: bool) -> String {
         let mut terminal = Terminal::new(TestBackend::new(160, height)).unwrap();
         terminal
-            .draw(|frame| draw_agents(snap, mode, frame.area(), frame))
+            .draw(|frame| draw_agents(snap, mode, live_only, frame.area(), frame))
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
@@ -948,6 +989,42 @@ mod tests {
         assert!(screen.contains("▾ #room1 (2)"), "{screen}");
         assert_eq!(screen.matches("agent-0").count(), 2, "{screen}");
         assert!(!screen.contains("#everyone"), "{screen}");
+    }
+
+    #[test]
+    fn live_filter_uses_connected_clients_in_every_group_mode() {
+        let mut snap = fixture();
+        Arc::make_mut(&mut snap.sessions[0]).client_id =
+            Some(myko::entities::client::ClientId("connected".into()));
+        Arc::make_mut(&mut snap.sessions[1]).client_id =
+            Some(myko::entities::client::ClientId("disconnected".into()));
+        snap.live_clients.insert("connected".into());
+        for mode in [
+            GroupMode::None,
+            GroupMode::Identity,
+            GroupMode::Project,
+            GroupMode::Cwd,
+            GroupMode::Room,
+        ] {
+            let live = render_filtered(&snap, mode, 24, true);
+            assert!(
+                live.contains("agent-0") && live.contains("· live"),
+                "{live}"
+            );
+            assert!(
+                !live.contains("agent-1") && !live.contains("agent-2"),
+                "{live}"
+            );
+            let all = render_filtered(&snap, mode, 24, false);
+            assert!(all.contains("agent-1") && all.contains("agent-2"), "{all}");
+        }
+        snap.live_clients.clear();
+        let empty = render_filtered(&snap, GroupMode::Room, 8, true);
+        assert!(empty.contains("Agents (0)"), "{empty}");
+        assert!(
+            !empty.contains("agent-0") && !empty.contains("▾"),
+            "{empty}"
+        );
     }
 
     #[test]
