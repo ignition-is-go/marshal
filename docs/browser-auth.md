@@ -1,8 +1,9 @@
 # Browser authentication and agent compatibility
 
 This draft validates browser authentication and trusted legacy agent compatibility.
-It does not yet implement login for remote agent clients. Presence integration
-is pending the shared operation namespace fix. Do not deploy this draft.
+It does not yet implement login for remote agent clients. Presence operations
+are namespaced in the companion shared-package change. Do not deploy this draft
+until client authentication and package compatibility are complete.
 
 ## Client authentication direction
 
@@ -29,7 +30,8 @@ Myko supplies credential providers, bearer transports, verification, and MCP OAu
 server discovery/handoff. Marshal still needs the client login, endpoint-scoped
 credential storage/refresh, hook wiring, and authenticated agent-session policy.
 The details above are a design proposal; only server choice, runtime client auth,
-and preserving ordinary binary distribution are established user constraints.
+and avoiding server-specific builds are established user constraints. No
+alternative packaging method has been approved.
 
 Marshal's operator UI uses Pulse login, the shared participant bubbles, and the
 shared profile menu. The default pane layout is Roster on the left at 61.8% and
@@ -55,7 +57,7 @@ registration handler derives the operator email from the verified identity.
 Browser users can observe the whole Marshal instance; this is not room-level
 isolation of agent messages.
 
-The planned UI presence uses one collaboration room for this Marshal instance. Those human
+UI presence uses one collaboration room for this Marshal instance. Those human
 participants are separate from Marshal's agent roster and messaging rooms.
 Signing in does not create an agent roster entry. The Console panel retains its
 explicit online/offline control.
@@ -89,8 +91,10 @@ signed-issuer validation. It is not a daemon configuration mode.
 
 ## Dependencies and validation
 
-The integration is based on Myko 6.15.1 and pulse-multi-user 0.9.0. All shared
-Pulse crates must use the same immutable source revision. Myko now requires raw
+The integration uses Myko 6.15.1 and pulse-multi-user revision `7c3d286`,
+based on 0.9.0 with the explicit presence operation names from
+[pulse-multi-user #35](https://github.com/ignition-is-go/pulse-multi-user/pull/35).
+All shared Pulse crates must use the same immutable source revision. Myko now requires raw
 client event opt-in; only Session SET/DEL are enabled to preserve agent clients.
 Browser policy still rejects both operations.
 
@@ -113,8 +117,8 @@ expiry are not runtime-validated by this fixture.
 The current check covers anonymous admission, rejected email domains, real
 browser login, pane geometry, Console registration/heartbeat/offline, verified
 operator identity, sender impersonation denial, raw event denial, live logout
-revocation, and Myko 6.11.5 agent registration/messaging/rooms/reconnect. Presence
-bubbles are not runtime-validated until the room backend is installed.
+revocation, and Myko 6.11.5 agent registration/messaging/rooms/reconnect. Presence bubbles are validated with two independent browser identities alongside
+the existing agent room commands on the same server.
 
 The verification writes its result, browser screenshot, and fixture log under
 `scripts/browser/artifacts/`. It never connects to the live Marshal daemon.

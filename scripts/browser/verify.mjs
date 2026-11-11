@@ -212,13 +212,19 @@ try {
   });
   await alice.screenshot({ path: resolve(artifacts, 'marshal-footer.png'), fullPage: true });
   await check('second signed-in browser mounts independently', async () => { await login(bob, 'Bob'); });
-  // Presence assertions are added with the upstream command-namespace fix.
+  await check('operator bubbles share presence without changing the agent roster', async () => {
+    await expect(alice.locator('.pulse-room-participant[aria-label^="Bob"]')).toBeVisible();
+    await expect(bob.locator('.pulse-room-participant[aria-label^="Alice"]')).toBeVisible();
+    assert.ok(!legacyRows.some((row) => row.operator === 'bob@fixture.test'));
+    await bob.screenshot({path:resolve(artifacts,'marshal-presence.png'),fullPage:true});
+  });
   await check('logout removes signed-in chrome, revokes browser access, and preserves agents', async () => {
     await alice.getByRole('button', { name: 'Account menu', exact: true }).click();
     await alice.getByRole('button', { name: 'Sign out', exact: true }).click();
     await expect(alice.getByTestId('auth-google')).toBeVisible();
     await expect(alice.getByTestId('status-footer')).toHaveCount(0);
     await expect(bob.getByTestId('status-footer')).toBeVisible();
+    await expect(bob.locator('.pulse-room-participant[aria-label^="Alice"]')).toHaveCount(0);
     await expect.poll(() => protectedSocket.readyState, {timeout:10000}).toBe(WebSocket.CLOSED);
     const response = await mcp(backendPort, "return await myko.query('GetAllSessions',{});", session.credential);
     assert.equal(response.status, 401);

@@ -4609,7 +4609,7 @@ dependencies = [
 [[package]]
 name = "pulse-auth"
 version = "0.9.0"
-source = "git+https://github.com/ignition-is-go/pulse-multi-user.git?tag=v0.9.0#63fa4018b92a20c21427d92c8e54c20682d7945a"
+source = "git+https://github.com/ignition-is-go/pulse-multi-user.git?rev=7c3d286fa33df758dec27361a3b4b5b815bc60d8#7c3d286fa33df758dec27361a3b4b5b815bc60d8"
 dependencies = [
  "anyhow",
  "axum",
@@ -4655,7 +4655,7 @@ dependencies = [
 [[package]]
 name = "pulse-multi-user"
 version = "0.9.0"
-source = "git+https://github.com/ignition-is-go/pulse-multi-user.git?tag=v0.9.0#63fa4018b92a20c21427d92c8e54c20682d7945a"
+source = "git+https://github.com/ignition-is-go/pulse-multi-user.git?rev=7c3d286fa33df758dec27361a3b4b5b815bc60d8#7c3d286fa33df758dec27361a3b4b5b815bc60d8"
 dependencies = [
  "hyphae",
  "myko",
@@ -4668,7 +4668,7 @@ dependencies = [
 [[package]]
 name = "pulse-multi-user-leptos"
 version = "0.9.0"
-source = "git+https://github.com/ignition-is-go/pulse-multi-user.git?tag=v0.9.0#63fa4018b92a20c21427d92c8e54c20682d7945a"
+source = "git+https://github.com/ignition-is-go/pulse-multi-user.git?rev=7c3d286fa33df758dec27361a3b4b5b815bc60d8#7c3d286fa33df758dec27361a3b4b5b815bc60d8"
 dependencies = [
  "base64",
  "futures",

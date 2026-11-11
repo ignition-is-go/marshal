@@ -16,6 +16,7 @@ use pulse_auth::{
         myko_transport::{MykoAuthService, PreparedMykoAuth},
     },
 };
+use pulse_multi_user::{AccessPolicy, RoomGrant, RoomId, RoomRegistration, RoomService};
 use tokio::net::{TcpListener, TcpStream};
 use tower::Service;
 use tower_http::services::ServeDir;
@@ -66,7 +67,7 @@ pub struct Browser {
     router: Router,
     provider: Arc<MykoAuthProvider>,
     prepared: PreparedMykoAuth,
-    pub auth: Arc<AuthState>,
+    auth: Arc<AuthState>,
 }
 impl Browser {
     pub async fn new(config: BrowserConfig) -> Result<Self> {
@@ -109,6 +110,19 @@ impl Browser {
     /// transport starts accepting connections.
     pub fn install(self, server: &MykoServer) -> Result<BrowserLifetime> {
         let service = self.prepared.install(server.ctx(), SelfOnlyUserAccess)?;
+        let rooms = RoomService::presence_only(MarshalPresence {
+            auth: self.auth.clone(),
+        });
+        let registration = rooms
+            .install_myko(&server.ctx())
+            .map_err(anyhow::Error::msg)?;
+        let mut changes = self.auth.subscribe_changes();
+        let watched_rooms = rooms.clone();
+        let auth_watcher = tokio::spawn(async move {
+            while changes.changed().await.is_ok() {
+                watched_rooms.invalidate_access();
+            }
+        });
         let context = Arc::new(server.ctx());
         let info = server.server_info();
         let task = tokio::spawn(async move {
@@ -137,6 +151,9 @@ impl Browser {
         });
         Ok(BrowserLifetime {
             _service: service,
+            _registration: registration,
+            _rooms: rooms,
+            auth_watcher,
             task,
         })
     }
@@ -144,11 +161,34 @@ impl Browser {
 
 pub struct BrowserLifetime {
     _service: MykoAuthService,
+    _registration: RoomRegistration,
+    _rooms: Arc<RoomService>,
+    auth_watcher: tokio::task::JoinHandle<()>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for BrowserLifetime {
     fn drop(&mut self) {
         self.task.abort();
+        self.auth_watcher.abort();
+    }
+}
+
+struct MarshalPresence {
+    auth: Arc<AuthState>,
+}
+impl AccessPolicy for MarshalPresence {
+    fn authorize(
+        &self,
+        credential: &pulse_auth::OpaqueCredential,
+        resource: &str,
+    ) -> Result<RoomGrant, String> {
+        if resource != "marshal" {
+            return Err("unknown Marshal presence resource".into());
+        }
+        Ok(RoomGrant {
+            room: RoomId("marshal:operators".into()),
+            principal: self.auth.principal(credential)?,
+        })
     }
 }
 
@@ -221,8 +261,10 @@ fn allowed_operation(kind: OperationKind, operation: &str) -> bool {
                 | "ReadMessages"
                 | "AckMessages"
                 | "ImportSandboxRun"
+                | "JoinPresenceRoom"
+                | "LeavePresenceRoom"
         ),
-        OperationKind::Report => matches!(operation, "WatchUsers" | "WatchRoom"),
+        OperationKind::Report => matches!(operation, "WatchUsers" | "WatchPresenceRoom"),
         OperationKind::View => false,
     }
 }
