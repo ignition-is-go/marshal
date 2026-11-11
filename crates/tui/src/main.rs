@@ -1074,6 +1074,11 @@ mod tests {
                 host: None,
                 project: Some(format!("project{i}")),
                 channels_enabled: None,
+                acks_pushes: None,
+                agent_id: None,
+                session_name: None,
+                activity: None,
+                kind: None,
             }));
             for room in ["everyone".to_string(), format!("room{i}")] {
                 snap.members.push(Arc::new(RoomMember {
@@ -1305,6 +1310,7 @@ mod tests {
                 to_session_id: Some(SessionId("session1".into())),
                 to_room_id: None,
                 to_operator: None,
+                response_required: false,
                 body: format!("message-body-{i}"),
                 sent_at: 0,
             }));
