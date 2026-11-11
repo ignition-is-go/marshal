@@ -475,6 +475,28 @@ the `marshal` MCP server as `marshal__send_message`, `marshal__broadcast`,\n\
 mod tests {
     use super::*;
 
+    #[test]
+    fn setup_keeps_user_delegation_policy_and_emits_shared_approval_guidance() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("AGENTS.md");
+        let user_policy = "## Operator-approved delegation\nDo not request duplicate approval.\n";
+        std::fs::write(
+            &path,
+            format!("{MD_BEGIN}\nold managed guidance\n{MD_END}\n\n{user_policy}"),
+        )
+        .unwrap();
+        let block = format!(
+            "{AGENTS_BLOCK}\n{}\n",
+            marshal_entities::COORDINATION_GUIDANCE
+        );
+        write_managed(&path, MD_BEGIN, MD_END, &block).unwrap();
+        let regenerated = std::fs::read_to_string(path).unwrap();
+        assert!(regenerated.contains("Authorization follows the task"));
+        assert!(regenerated.contains("Do not require a second operator approval"));
+        assert!(regenerated.contains(user_policy));
+        assert!(!regenerated.contains("old managed guidance"));
+    }
+
     fn test_hook_commands() -> HookCmds {
         HookCmds {
             ss: "shim codex-hook session-start http://host:6156".into(),
