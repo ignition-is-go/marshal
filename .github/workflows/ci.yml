@@ -89,7 +89,7 @@ jobs:
         run: python3 scripts/ci/report_resources.py
 
   browser-auth:
-    runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
+    runs-on: {group: ci-trusted-linux-persistent, labels: [self-hosted, Linux, X64, ram-ge-16g, disk-ge-100g]}
     timeout-minutes: 30
     env:
       NO_COLOR: "true"
@@ -148,7 +148,7 @@ jobs:
       - name: Verify actual daemon with Postgres and restart
         working-directory: scripts/browser
         env:
-          MYKO_POSTGRES_URL: postgres://marshal_dev:marshal-dev-only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/marshal_dev
+          MYKO_POSTGRES_URL: postgres://marshal_dev:marshal-dev-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/marshal_dev
           MARSHAL_VERIFY_RESTART: "1"
         run: npm run verify
 
