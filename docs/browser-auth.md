@@ -78,3 +78,52 @@ and session expiry require separate deployment validation.
 The optional OAuth fixture validates discovery, explicit consent, PKCE code exchange,
 code replay rejection, refresh, protected MCP execution, and browser logout revoking
 the delegated MCP token. It uses the same shared production integration.
+
+## Isolated development setup
+
+Build the actual daemon and UI bundle, then point it at a dedicated local Postgres
+17 database whose name contains `dev`. Keep the database separate from both the
+live Marshal database and other applications' development databases.
+
+```sh
+cargo build --locked -p marshal-daemon --bin marshal-daemon
+(cd crates/ui && NO_COLOR=true trunk build)
+```
+
+For a local manual walkthrough with the signed test issuer:
+
+```sh
+export MYKO_POSTGRES_URL # Set privately to the dedicated local dev database URL.
+node scripts/browser/dev.mjs --fixture
+```
+
+The server listens at `http://127.0.0.1:8878`. Alice and Bob are test accounts.
+This mode runs the real daemon with persisted auth sessions and coordination
+state, but does not validate the real identity provider. Other machines can use
+an SSH forward to the dev host's loopback port. The launcher does not bind public
+or mesh interfaces.
+
+For real provider sign-in, register a dedicated development OAuth application
+with callback and origin `http://localhost:8878/`, set the five required
+`MARSHAL_AUTH_*` variables including `MARSHAL_AUTH_ORIGIN=http://localhost:8878`, and run the launcher without
+`--fixture`. Use `http://localhost:8878/` consistently with that registration.
+A protected JSON file containing environment keys can be supplied through
+`MARSHAL_DEV_CONFIG` instead of exporting individual values. Do not commit it.
+The launcher defaults to the test issuer only when `--fixture` is explicit.
+
+To repeat the automated checks against the actual daemon and database:
+
+```sh
+MARSHAL_VERIFY_RESTART=1 npm --prefix scripts/browser run verify
+```
+
+This requires the dedicated database URL and the built daemon. The check exercises
+browser login, two-user presence, old agent compatibility, graceful daemon stop,
+new-process startup, durable console/message replay, browser session restoration,
+presence reconnect, and logout revocation after restart. It never resets the live
+Marshal daemon. CI runs this check against its own Postgres service.
+
+Before production rollout, validate the dedicated dev OAuth application with real
+sign-in, the intended HTTPS origin and ingress, MCP host consent, and the existing
+agent launchers. Session expiry and the final release/package artifact remain
+separate acceptance checks. A local signed-issuer pass does not satisfy those gates.

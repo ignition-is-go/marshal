@@ -93,6 +93,20 @@ jobs:
     timeout-minutes: 30
     env:
       NO_COLOR: "true"
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: marshal_dev
+          POSTGRES_USER: marshal_dev
+          POSTGRES_PASSWORD: marshal-dev-only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U marshal_dev -d marshal_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Authenticate private Cargo dependencies
@@ -121,7 +135,7 @@ jobs:
       - name: Install Chromium and its system dependencies
         working-directory: scripts/browser
         run: npx playwright install --with-deps chromium
-      - run: cargo build -p marshal-daemon --example browser_fixture --locked
+      - run: cargo build -p marshal-daemon --bin marshal-daemon --example browser_fixture --locked
       - name: Build the browser bundle
         working-directory: crates/ui
         run: trunk build
@@ -131,6 +145,12 @@ jobs:
       - name: Verify shared MCP OAuth handoff
         working-directory: scripts/browser
         run: MARSHAL_VERIFY_OAUTH=1 npm run verify
+      - name: Verify actual daemon with Postgres and restart
+        working-directory: scripts/browser
+        env:
+          MYKO_POSTGRES_URL: postgres://marshal_dev:marshal-dev-only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/marshal_dev
+          MARSHAL_VERIFY_RESTART: "1"
+        run: npm run verify
 
   # marshal-shim ships to Windows (ue_plugindev) as a cross-compiled
   # x86_64-pc-windows-gnu binary, but its Windows code is `#[cfg(windows)]`

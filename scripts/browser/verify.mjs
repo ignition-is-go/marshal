@@ -1,13 +1,10 @@
+import { startDevRuntime } from './dev-runtime.mjs';
 import assert from 'node:assert/strict';
-import { createServer, request } from 'node:http';
-import { connect } from 'node:net';
-import { spawn, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 import { MykoClient, ConnectionStatus, decode } from './artifacts/legacy-client.mjs';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
-import { startOidcFixture } from './oidc-provider.mjs';
 
 const artifacts = resolve(import.meta.dirname, process.env.MARSHAL_BROWSER_ARTIFACTS ?? 'artifacts');
 await mkdir(artifacts, { recursive: true });
@@ -15,60 +12,10 @@ const checks = [];
 const errors = [];
 const transportErrors = [];
 const check = async (name, action) => { await action(); checks.push(name); console.log('PASS ' + name); };
-const freePort = async () => {
-  const server = createServer();
-  await new Promise((done) => server.listen(0, '127.0.0.1', done));
-  const port = server.address().port;
-  await new Promise((done) => server.close(done));
-  return port;
-};
-const agentPort = await freePort();
-const hookPort = await freePort();
-let issuer;
-const proxy = createServer((incoming, outgoing) => {
-  if (incoming.url.startsWith('/auth/user')) { outgoing.writeHead(404); outgoing.end(); return; }
-  if (!incoming.url.startsWith('/oidc/') && !incoming.url.startsWith('/myko') && !incoming.url.startsWith('/.well-known/')) {
-    const path = new URL(incoming.url, 'http://fixture').pathname;
-    const file = resolve(dist, '.' + (path === '/' ? '/index.html' : path));
-    if (!file.startsWith(dist + '/')) { outgoing.writeHead(403); outgoing.end(); return; }
-    readFile(file).then((body) => {
-      const type = file.endsWith('.wasm') ? 'application/wasm' : file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html';
-      outgoing.writeHead(200, {'content-type':type}); outgoing.end(body);
-    }).catch(() => { outgoing.writeHead(404); outgoing.end(); });
-    return;
-  }
-  const port = incoming.url.startsWith('/oidc/') ? issuer.port : agentPort;
-  const upstream = request({ hostname: '127.0.0.1', port, path: incoming.url, method: incoming.method, headers: incoming.headers }, (response) => {
-    outgoing.writeHead(response.statusCode, response.headers); response.pipe(outgoing);
-  });
-  upstream.on('error', () => { outgoing.writeHead(502); outgoing.end(); });
-  incoming.pipe(upstream);
-});
-proxy.on('upgrade', (incoming, socket, head) => {
-  const upstream = connect(agentPort, '127.0.0.1', () => {
-    upstream.write(`${incoming.method} ${incoming.url} HTTP/${incoming.httpVersion}\r\n` + Object.entries(incoming.headers).map(([name, value]) => `${name}: ${value}`).join('\r\n') + '\r\n\r\n');
-    if (head.length) upstream.write(head);
-    socket.pipe(upstream).pipe(socket);
-  });
-  upstream.on('error', () => socket.destroy());
-  socket.on('error', () => upstream.destroy());
-  socket.on('close', () => upstream.destroy());
-});
-await new Promise((done) => proxy.listen(0, '127.0.0.1', done));
-const origin = `http://127.0.0.1:${proxy.address().port}`;
-issuer = await startOidcFixture({ appOrigin: origin, internalIssuer: true });
-const target = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {cwd: resolve(import.meta.dirname, '../..'), encoding: 'utf8'})).target_directory;
-const binary = process.env.MARSHAL_BROWSER_FIXTURE ?? resolve(target, 'debug/examples/browser_fixture');
-const dist = resolve(import.meta.dirname, process.env.MARSHAL_FRONTEND_DIST ?? '../../crates/ui/dist');
-let serverLog = '';
-const child = spawn(binary, [], { env: {
-  ...process.env, ...(process.env.MARSHAL_VERIFY_OAUTH ? {MARSHAL_AUTH_OAUTH_ISSUER: origin + '/myko/oauth', MARSHAL_AUTH_OAUTH_RESOURCE: origin + '/myko/mcp'} : {}), MARSHAL_BIND: `127.0.0.1:${agentPort}`,
-  MARSHAL_HOOK_BIND: `127.0.0.1:${hookPort}`, MARSHAL_AUTH_ORIGIN: origin,
-  MARSHAL_AUTH_ISSUER: issuer.issuer, MARSHAL_AUTH_CLIENT_ID: issuer.clientId, MARSHAL_AUTH_CLIENT_SECRET: issuer.clientSecret,
-}, stdio: ['ignore', 'pipe', 'pipe'] });
-child.stdout.on('data', (data) => { serverLog += data; });
-child.stderr.on('data', (data) => { serverLog += data; });
-child.on('error', (error) => errors.push(error.message));
+const runtime = await startDevRuntime({errors});
+const {origin, proxy, issuer, binary, agentPort, startDaemon} = runtime;
+const artifact = {binary, sha256:createHash('sha256').update(await readFile(binary)).digest('hex'), postgres:Boolean(process.env.MYKO_POSTGRES_URL), restart:Boolean(process.env.MARSHAL_VERIFY_RESTART), issuer:'signed test issuer'};
+let child = startDaemon();
 let browser;
 const sockets = [];
 const legacy = new MykoClient();
@@ -296,6 +243,31 @@ try {
     assert.ok(!legacyRows.some((row) => row.operator === 'bob@fixture.test'));
     await bob.screenshot({path:resolve(artifacts,'marshal-presence.png'),fullPage:true});
   });
+  if (process.env.MARSHAL_VERIFY_RESTART) {
+    await check('real daemon restart preserves sessions, messages, users and authenticated browser access', async () => {
+      assert.ok(process.env.MYKO_POSTGRES_URL, 'restart validation requires isolated Postgres');
+      assert.ok(!binary.endsWith('browser_fixture'), 'restart validation must run the actual daemon');
+      const previousPid = child.pid;
+      const exited = new Promise(done => child.once('exit', done));
+      child.kill('SIGTERM');
+      await exited;
+      child = startDaemon();
+      assert.notEqual(child.pid, previousPid);
+      await expect.poll(async () => { try { return (await mcp(agentPort, "return await myko.query('GetAllSandboxRuns',{});", session.credential)).status; } catch { return 0; } }, {timeout:30000}).toBe(200);
+      const response = await mcp(agentPort, "return await myko.query('GetAllSessions',{});", session.credential);
+      assert.ok(JSON.stringify(response.body).includes(ownConsole), 'verified console survives durable replay');
+      assert.ok(!response.body.error && !response.body.result?.isError, JSON.stringify(response.body));
+      await expect.poll(() => legacy.getConnectionStatus(), {timeout:20000}).toBe(ConnectionStatus.Connected);
+      const inbox = await command('ReadMessages', {asSession:'legacy-b',inbox:true,sent:false,unread:true});
+      assert.ok(JSON.stringify(inbox).includes('verified operator message'), 'messages survive replay');
+      await alice.reload();
+      await expect(alice.getByTestId('status-footer')).toBeVisible({timeout:30000});
+      await bob.reload();
+      await expect(bob.getByTestId('status-footer')).toBeVisible({timeout:30000});
+      await expect(alice.locator('.pulse-room-participant[aria-label^="Bob"]')).toBeVisible();
+      await expect(bob.locator('.pulse-room-participant[aria-label^="Alice"]')).toBeVisible();
+    });
+  }
   await check('logout removes signed-in chrome, revokes browser access, and preserves agents', async () => {
     await alice.getByRole('button', { name: 'Account menu', exact: true }).click();
     await alice.getByRole('button', { name: 'Sign out', exact: true }).click();
@@ -311,12 +283,12 @@ try {
   });
   }
   assert.deepEqual(errors, []);
-  await writeFile(resolve(artifacts, process.env.MARSHAL_VERIFY_OAUTH ? 'oauth-result.json' : 'result.json'), JSON.stringify({ status: 'passed', checks }, null, 2));
+  await writeFile(resolve(artifacts, process.env.MARSHAL_VERIFY_RESTART ? 'persistent-result.json' : process.env.MARSHAL_VERIFY_OAUTH ? 'oauth-result.json' : 'result.json'), JSON.stringify({ status: 'passed', artifact, checks }, null, 2));
 } catch (error) {
   const page = browser?.contexts()[0]?.pages()[0];
   const visibleText = await page?.locator('body').innerText().catch(() => '');
   await page?.screenshot({path:resolve(artifacts,'failure.png'),fullPage:true}).catch(() => {});
-  await writeFile(resolve(artifacts, process.env.MARSHAL_VERIFY_OAUTH ? 'oauth-result.json' : 'result.json'), JSON.stringify({ status: 'failed', checks, error: error.stack, browserErrors: errors, transportErrors, visibleText, serverLog }, null, 2));
+  await writeFile(resolve(artifacts, process.env.MARSHAL_VERIFY_RESTART ? 'persistent-result.json' : process.env.MARSHAL_VERIFY_OAUTH ? 'oauth-result.json' : 'result.json'), JSON.stringify({ status: 'failed', artifact, checks, error: error.stack, browserErrors: errors, transportErrors, visibleText, serverLog: runtime.serverLog }, null, 2));
   throw error;
 } finally {
   for (const socket of sockets) socket.close();
@@ -327,5 +299,5 @@ try {
   proxy.closeAllConnections();
   await new Promise((done) => proxy.close(done));
   await issuer.close();
-  await writeFile(resolve(artifacts, 'server.log'), serverLog);
+  await writeFile(resolve(artifacts, 'server.log'), runtime.serverLog);
 }
