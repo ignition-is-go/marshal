@@ -41,6 +41,7 @@ use std::{
 
 const FRAME_POLL: Duration = Duration::from_millis(150);
 const RECENT_LIMIT: usize = 50;
+const ACTIVE_WINDOW_MS: i64 = 60_000;
 const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
 /// Env var that overrides the daemon WebSocket URL. Same name the shim
 /// uses, so a single `export MARSHAL_DAEMON_ADDRESS=...` configures
@@ -77,10 +78,8 @@ struct StateInner {
     /// `nick.rs`. Sessions missing from the map (assignment saga
     /// hasn't run yet) fall back to their short id.
     nicknames: HashMap<String, String>,
-    /// Live `Client` entity ids, used to render per-session connected /
-    /// disconnected status. A session whose `client_id` is not in this
-    /// set has lost its WS connection (or the daemon was just restarted
-    /// and its shim hasn't reconnected yet).
+    /// Live WebSocket clients. Hook-only sessions have no persistent client;
+    /// their recent activity is a separate presence signal.
     live_clients: HashSet<String>,
     connected: bool,
     last_event: Option<String>,
@@ -366,6 +365,7 @@ fn draw(
 }
 
 fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
+    let now = now_ms();
     let dot = if snap.connected { "●" } else { "○" };
     let dot_style = if snap.connected {
         Style::default().fg(Color::Green)
@@ -375,7 +375,7 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
     let live = snap
         .sessions
         .iter()
-        .filter(|s| session_is_live(snap, s))
+        .filter(|s| session_is_present(snap, s, now))
         .count();
     let line = Line::from(vec![
         Span::styled(dot, dot_style),
@@ -385,7 +385,10 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(format!("({live} live)"), Style::default().fg(Color::Green)),
+        Span::styled(
+            format!("({live} live/active)"),
+            Style::default().fg(Color::Green),
+        ),
         Span::raw("  "),
         Span::styled(
             format!("{} rooms", snap.rooms.len()),
@@ -405,7 +408,7 @@ fn draw_header(snap: &StateInner, area: Rect, frame: &mut ratatui::Frame) {
 /// flat table, the grouped sub-tables, and the standalone header row
 /// all align.
 const AGENT_COLUMNS: [Constraint; 9] = [
-    Constraint::Length(7),  // conn
+    Constraint::Length(8),  // presence
     Constraint::Length(19), // name (assigned nickname)
     Constraint::Length(10), // id (session_id[:8])
     Constraint::Length(22), // identity (operator@host)
@@ -424,7 +427,7 @@ const AGENT_COLUMNS: [Constraint; 9] = [
 
 fn agents_header() -> Row<'static> {
     Row::new(vec![
-        RowCell::from("conn"),
+        RowCell::from("status"),
         RowCell::from("name"),
         RowCell::from("id"),
         RowCell::from("identity"),
@@ -441,18 +444,39 @@ fn agents_header() -> Row<'static> {
     )
 }
 
-fn session_is_live(snap: &StateInner, s: &Session) -> bool {
-    s.client_id
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Presence {
+    Live,
+    Active,
+    Idle,
+}
+
+fn session_presence(snap: &StateInner, s: &Session, now: i64) -> Presence {
+    if s.client_id
         .as_ref()
         .is_some_and(|cid| snap.live_clients.contains(cid.0.as_ref()))
+    {
+        Presence::Live
+    } else if s.last_activity_at.is_some_and(|at| {
+        // Future timestamps must not keep a clock-skewed session active.
+        (0..=ACTIVE_WINDOW_MS).contains(&now.saturating_sub(at))
+    }) {
+        Presence::Active
+    } else {
+        Presence::Idle
+    }
+}
+
+/// The live filter includes connected clients and recently observed hook activity.
+fn session_is_present(snap: &StateInner, s: &Session, now: i64) -> bool {
+    session_presence(snap, s, now) != Presence::Idle
 }
 
 fn session_row(snap: &StateInner, s: &Session, now: i64) -> Row<'static> {
-    let live = session_is_live(snap, s);
-    let conn_cell = if live {
-        RowCell::from("● live").style(Style::default().fg(Color::Green))
-    } else {
-        RowCell::from("○ off ").style(Style::default().fg(Color::DarkGray))
+    let conn_cell = match session_presence(snap, s, now) {
+        Presence::Live => RowCell::from("● live").style(Style::default().fg(Color::Green)),
+        Presence::Active => RowCell::from("● active").style(Style::default().fg(Color::Cyan)),
+        Presence::Idle => RowCell::from("○ idle").style(Style::default().fg(Color::DarkGray)),
     };
     let activity_cell = build_activity_cell(s, now);
     let identity = format_identity(s);
@@ -485,12 +509,13 @@ fn group_sessions(
     snap: &StateInner,
     mode: GroupMode,
     live_only: bool,
+    now: i64,
 ) -> Vec<(String, Vec<&Arc<Session>>)> {
     let mut groups: BTreeMap<String, Vec<&Arc<Session>>> = BTreeMap::new();
     for s in snap
         .sessions
         .iter()
-        .filter(|s| !live_only || session_is_live(snap, s))
+        .filter(|s| !live_only || session_is_present(snap, s, now))
     {
         match mode {
             GroupMode::None => groups.entry(String::new()).or_default().push(s),
@@ -539,7 +564,7 @@ fn draw_agents(
     let count = snap
         .sessions
         .iter()
-        .filter(|s| !live_only || session_is_live(snap, s))
+        .filter(|s| !live_only || session_is_present(snap, s, now))
         .count();
     let filter = if live_only { " · live" } else { "" };
     let title = if mode == GroupMode::None {
@@ -553,7 +578,7 @@ fn draw_agents(
         let rows: Vec<Row> = snap
             .sessions
             .iter()
-            .filter(|s| !live_only || session_is_live(snap, s))
+            .filter(|s| !live_only || session_is_present(snap, s, now))
             .map(|s| session_row(snap, s, now))
             .collect();
         let table = Table::new(rows, AGENT_COLUMNS)
@@ -579,7 +604,7 @@ fn draw_agents(
         y += 1;
         remaining -= 1;
     }
-    for (label, members) in group_sessions(snap, mode, live_only) {
+    for (label, members) in group_sessions(snap, mode, live_only, now) {
         if remaining == 0 {
             break;
         }
@@ -970,7 +995,7 @@ mod tests {
         ] {
             let screen = render(&snap, mode, 8); // six interior lines
             assert!(
-                screen.contains("conn") && screen.contains("name"),
+                screen.contains("status") && screen.contains("name"),
                 "{screen}"
             );
             assert!(
@@ -1024,6 +1049,44 @@ mod tests {
         assert!(
             !empty.contains("agent-0") && !empty.contains("▾"),
             "{empty}"
+        );
+    }
+
+    #[test]
+    fn recent_hook_activity_counts_as_live_without_a_websocket() {
+        let mut snap = fixture();
+        let now = now_ms();
+        Arc::make_mut(&mut snap.sessions[0]).last_activity_at = Some(now - 20_000);
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], now),
+            Presence::Active
+        );
+        for mode in [
+            GroupMode::None,
+            GroupMode::Identity,
+            GroupMode::Project,
+            GroupMode::Cwd,
+            GroupMode::Room,
+        ] {
+            let screen = render_filtered(&snap, mode, 24, true);
+            assert!(
+                screen.contains("agent-0") && screen.contains("● active"),
+                "{screen}"
+            );
+            assert!(!screen.contains("agent-1"), "{screen}");
+        }
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], now + 40_000),
+            Presence::Active
+        );
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], now + 40_001),
+            Presence::Idle
+        );
+        Arc::make_mut(&mut snap.sessions[0]).last_activity_at = Some(now + 1);
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], now),
+            Presence::Idle
         );
     }
 
