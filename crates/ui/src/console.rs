@@ -7,43 +7,36 @@
 //! and join room. That's the escape hatch for when a session is stuck, nobody's
 //! at its machine, or you just need to reach a peer from a browser.
 //!
-//! Identity is stable per-browser (a localStorage id → the same nickname each
-//! visit) with an editable operator name. Going offline (or closing the tab —
-//! the daemon sweeps the stale row) removes the console from the roster. This
-//! mirrors exactly how the Rust shim and the opencode plugin register: a raw
-//! `SET`/`DEL` `MEvent` for the `Session`, plus a 5 s liveness heartbeat.
+//! Browser consoles use a verified user ID and a per-tab suffix. The server
+//! derives their operator email from the authenticated session.
 
 use leptos::prelude::*;
 use marshal_entities::{
-    BroadcastMessage, BroadcastMessageResult, GetAllRooms, GetAllSessions, HostInfo, JoinRoom,
-    JoinRoomResult, LivePushStatus, RoomId, SendMessage, SendMessageResult, Session, SessionId,
-    WakeStatus,
+    BroadcastMessage, BroadcastMessageResult, CloseOperatorConsole, GetAllRooms, GetAllSessions,
+    HostInfo, JoinRoom, JoinRoomResult, LivePushStatus, RegisterOperatorConsole, RoomId,
+    SendMessage, SendMessageResult, Session, SessionId, WakeStatus, operator_console_prefix,
 };
-use myko::client::MykoClient;
-use myko::wire::event::{MEvent, MEventType};
+use myko_leptos::{CommandSink, use_command_sink};
 use pulse_leptos_ui::{Button, ButtonVariant, EmptyState, Field, Select};
+use pulse_multi_user_leptos::auth::AuthContext;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::nick::{self};
 
-const SOURCE_ID: &str = "marshal-ui";
-const CONSOLE_ID_KEY: &str = "marshal-ui-console-id";
-const OPERATOR_KEY: &str = "marshal-ui-operator";
-
 /// The operator console's identity + roster lifecycle. Cheap to clone (an
 /// `Arc<str>` id, Copy signals, and the Clone myko client).
 #[derive(Clone)]
 pub struct Console {
-    /// Stable per-browser session id (persisted), so the daemon assigns the
-    /// same nickname on every visit.
+    /// Verified user namespace plus a fresh suffix for this browser tab.
     pub session_id: Arc<str>,
-    /// Editable operator name (persisted). Anchors the `op:<name>` auto-room.
+    /// Verified profile name for display. The server supplies the operator email.
     pub operator: RwSignal<String>,
     /// Whether the console is currently ON the roster (opted in to participate).
     pub online: RwSignal<bool>,
     connected_at: RwSignal<i64>,
-    client: MykoClient,
+    sink: CommandSink,
+    registration_error: RwSignal<Option<String>>,
 }
 
 impl Console {
@@ -85,20 +78,28 @@ impl Console {
 
     /// SET the roster row (register / heartbeat / self-heal — idempotent).
     fn register(&self) {
-        let _ = self.client.send_event(MEvent::from_item(
-            &self.session(),
-            MEventType::SET,
-            SOURCE_ID,
-        ));
+        let error = self.registration_error;
+        let online = self.online;
+        self.sink.dispatch::<RegisterOperatorConsole, ()>(
+            RegisterOperatorConsole {
+                session: self.session(),
+            },
+            move |result| {
+                if let Err(message) = result {
+                    error.set(Some(message));
+                    online.set(false);
+                } else {
+                    error.set(None);
+                }
+            },
+        );
     }
 
     /// DEL the roster row (leave the roster).
     fn deregister(&self) {
-        let _ = self.client.send_event(MEvent::from_item(
-            &self.session(),
-            MEventType::DEL,
-            SOURCE_ID,
-        ));
+        self.sink.send(CloseOperatorConsole {
+            id: self.as_session(),
+        });
     }
 
     /// Opt in to participate: stamp connect time and go online. The root effect
@@ -118,21 +119,36 @@ impl Console {
 /// Create the console identity + wire its roster lifecycle. Call once in `App`
 /// AFTER `provide_myko` (it reads the myko client from context).
 pub fn provide_console() {
-    let client = expect_context::<MykoClient>();
-    let session_id: Arc<str> = Arc::from(load_or_make_console_id().as_str());
-    let operator = RwSignal::new(load_operator());
+    let sink = use_command_sink();
+    let auth = expect_context::<AuthContext>();
+    let user = auth.user.get_untracked().expect("signed-in user profile");
+    let suffix = js_sys::Date::now().to_string() + "-" + &js_sys::Math::random().to_string();
+    let session_id: Arc<str> = Arc::from(format!(
+        "{}{suffix}",
+        operator_console_prefix(user.id.as_ref())
+    ));
+    let operator = RwSignal::new(user.name);
     let console = Console {
         session_id,
         operator,
         online: RwSignal::new(false),
         connected_at: RwSignal::new(js_sys::Date::now() as i64),
-        client,
+        sink,
+        registration_error: RwSignal::new(None),
     };
     provide_context(console.clone());
-
-    // Persist operator edits.
-    Effect::new(move |_| {
-        save_operator(&operator.get());
+    let sessions = myko_leptos::live_query::<GetAllSessions>(|| GetAllSessions {});
+    let own_id = console.session_id.clone();
+    Effect::new(move || {
+        if let Some(email) = sessions
+            .get()
+            .iter()
+            .find(|session| session.id.0 == own_id)
+            .and_then(|session| session.operator.clone())
+            && operator.get_untracked() != email
+        {
+            operator.set(email);
+        }
     });
 
     let connected = myko_leptos::use_connection_status();
@@ -151,58 +167,22 @@ pub fn provide_console() {
     // Liveness heartbeat: keep the row fresh so the daemon sweeper doesn't reap
     // an online console. Untracked reads — the interval is the reactivity here.
     let c_hb = console.clone();
-    set_interval(
+    let heartbeat = set_interval_with_handle(
         move || {
             if c_hb.online.get_untracked() && connected.get_untracked() {
                 c_hb.register();
             }
         },
         Duration::from_secs(5),
-    );
+    )
+    .expect("console heartbeat timer");
+    on_cleanup(move || heartbeat.clear());
 }
 
 /// Read the console from context. Panics only if `provide_console()` wasn't
 /// called at the root — a wiring bug.
 pub fn use_console() -> Console {
     use_context::<Console>().expect("provide_console() must run at the app root")
-}
-
-// ── localStorage helpers ─────────────────────────────────────────────────────
-
-fn storage() -> Option<web_sys::Storage> {
-    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-}
-
-fn load_or_make_console_id() -> String {
-    if let Some(existing) = storage()
-        .and_then(|s| s.get_item(CONSOLE_ID_KEY).ok().flatten())
-        .filter(|s| !s.is_empty())
-    {
-        return existing;
-    }
-    // Stable, collision-resistant enough for a per-browser console handle.
-    let id = format!(
-        "console-{:x}-{:x}",
-        js_sys::Date::now() as u64,
-        (js_sys::Math::random() * 4_294_967_296.0) as u64
-    );
-    if let Some(s) = storage() {
-        let _ = s.set_item(CONSOLE_ID_KEY, &id);
-    }
-    id
-}
-
-fn load_operator() -> String {
-    storage()
-        .and_then(|s| s.get_item(OPERATOR_KEY).ok().flatten())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "operator".to_string())
-}
-
-fn save_operator(op: &str) {
-    if let Some(s) = storage() {
-        let _ = s.set_item(OPERATOR_KEY, op);
-    }
 }
 
 // ── The Console panel ─────────────────────────────────────────────────────────
@@ -281,15 +261,13 @@ fn Identity(console: Console) -> impl IntoView {
     let op = console.operator;
     let c_toggle = console.clone();
     let online = console.online;
+    let error = console.registration_error;
     view! {
+        {move || error.get().map(|message| view! { <p role="alert">{message}</p> })}
         <div class="con-identity">
             <div class="con-field">
                 <span class="con-label">"operator"</span>
-                <Field
-                    value=Signal::derive(move || op.get())
-                    on_change=Callback::new(move |v: String| op.set(v))
-                    input_type="text"
-                />
+                <span>{move || op.get()}</span>
             </div>
             <Button
                 variant=Signal::derive(move || if online.get() { ButtonVariant::Neutral } else { ButtonVariant::Primary })

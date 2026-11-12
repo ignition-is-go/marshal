@@ -396,33 +396,45 @@ fn ordinary_shim_preserves_hook_metadata_and_exposes_it_in_resources() {
     let row = shim.wait_registered(&cell, me);
     assert_eq!(row.agent_id, seed.agent_id);
     let stdout = lines_of(shim.wrapper.stdout.take().unwrap());
+    // Server registration can precede the shim's reactive roster update.
     for (id, uri) in [(11, "marshal://whoami"), (12, "marshal://roster")] {
-        writeln!(
-            shim.wrapper.stdin.as_mut().unwrap(),
-            "{}",
-            serde_json::json!({
-                "jsonrpc":"2.0", "id": id, "method":"resources/read", "params":{"uri":uri}
-            })
-        )
-        .unwrap();
-        let line = first_line(&stdout, "resource response", |line| {
-            serde_json::from_str::<Value>(line)
-                .ok()
-                .is_some_and(|value| value["id"] == id)
-        });
-        let value: Value = serde_json::from_str(&line).unwrap();
-        let text = value["result"]["contents"][0]["text"].as_str().unwrap();
-        let content: Value = serde_json::from_str(text).unwrap();
-        let actual = if uri.ends_with("whoami") {
-            &content["agent_id"]
-        } else {
-            &content["sessions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|s| s["session_id"] == me)
-                .unwrap()["agent_id"]
-        };
-        assert_eq!(actual, "agent/\"x\nopaque");
+        let deadline = Instant::now() + WAIT;
+        loop {
+            writeln!(
+                shim.wrapper.stdin.as_mut().unwrap(),
+                "{}",
+                serde_json::json!({
+                    "jsonrpc":"2.0", "id": id, "method":"resources/read", "params":{"uri":uri}
+                })
+            )
+            .unwrap();
+            let line = first_line(&stdout, "resource response", |line| {
+                serde_json::from_str::<Value>(line)
+                    .ok()
+                    .is_some_and(|value| value["id"] == id)
+            });
+            let value: Value = serde_json::from_str(&line).unwrap();
+            let text = value["result"]["contents"][0]["text"].as_str().unwrap();
+            let content: Value = serde_json::from_str(text).unwrap();
+            let actual = if uri.ends_with("whoami") {
+                &content["agent_id"]
+            } else {
+                content["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s["session_id"] == me)
+                    .map(|session| &session["agent_id"])
+                    .unwrap_or(&Value::Null)
+            };
+            if actual == "agent/\"x\nopaque" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{uri} did not observe metadata: {actual}"
+            );
+            thread::sleep(POLL);
+        }
     }
 }

@@ -7,6 +7,7 @@
 //! `marshal_entities::SendMessage` and `marshal_entities::BroadcastMessage`
 //! commands — there's no saga in the critical path for delivery.
 
+pub mod auth;
 pub mod auto_rooms;
 pub mod cleanup;
 pub mod hooks;

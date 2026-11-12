@@ -19,7 +19,7 @@ use crate::nick::use_nicknames;
 /// Call once in `App`, after `provide_console` + `provide_nicknames`.
 pub fn provide_notifications() {
     let notifs = Notifications::new();
-    provide_context(notifs.clone());
+    provide_context(notifs);
 
     let console = use_console();
     let nick = use_nicknames();

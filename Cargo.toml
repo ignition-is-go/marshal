@@ -8,6 +8,10 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 
+# Keep the shared notification primitives and all multi-user widgets on one source.
+[patch.crates-io]
+pulse-leptos-ui = { git = "https://github.com/ignition-is-go/pulse-leptos-ui.git", rev = "e19e88c168772159ac7389ef102785b3b8aaae0a" }
+
 [workspace.dependencies]
 # Core
 serde = { version = "1", features = ["derive", "rc"] }
@@ -24,10 +28,14 @@ tokio-tungstenite = "0.29"
 # HTTP MCP router (POST /myko/mcp request/response + SSE) and the
 # `mcp::filter` tool-visibility allowlist the pull model relies on.
 # Keep the core and code-generating macros on the same release.
-myko = "=6.11.5"
-myko-macros = "=6.11.5"
-myko-server = "=6.11.5"
-myko-leptos = "=6.11.5"
+myko = "=6.15.1"
+myko-macros = "=6.15.1"
+myko-server = "=6.15.1"
+myko-leptos = "=6.15.1"
+myko-auth = "=6.15.1"
+pulse-auth = { git = "https://github.com/ignition-is-go/pulse-multi-user.git", rev = "7c3d286fa33df758dec27361a3b4b5b815bc60d8" }
+pulse-multi-user = { git = "https://github.com/ignition-is-go/pulse-multi-user.git", rev = "7c3d286fa33df758dec27361a3b4b5b815bc60d8" }
+pulse-multi-user-leptos = { git = "https://github.com/ignition-is-go/pulse-multi-user.git", rev = "7c3d286fa33df758dec27361a3b4b5b815bc60d8" }
 hyphae = "3.1.2"
 
 # Local crates. `version` is required so `cargo publish` accepts the

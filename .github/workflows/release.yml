@@ -51,6 +51,11 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Authenticate private Cargo dependencies
+        uses: ./.github/actions/private-cargo
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Report runner resources
         if: always()
         continue-on-error: true
@@ -267,6 +272,13 @@ jobs:
           git show "$GITHUB_SHA:scripts/publish-cargo-package.sh" > scripts/publish-cargo-package.sh
           git show "$GITHUB_SHA:scripts/publish-npm-package.sh" > scripts/publish-npm-package.sh
           chmod +x scripts/publish-cargo-package.sh scripts/publish-npm-package.sh
+          mkdir -p .github/actions/private-cargo
+          git show "$GITHUB_SHA:.github/actions/private-cargo/action.yml" > .github/actions/private-cargo/action.yml
+      - name: Authenticate private Cargo dependencies
+        uses: ./.github/actions/private-cargo
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Install package build dependencies
         run: |
           sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
@@ -323,6 +335,11 @@ jobs:
         with:
           # Build the exact commit the release job stamped + tagged.
           ref: v${{ needs.release.outputs.version }}
+      - name: Authenticate private Cargo dependencies
+        uses: ./.github/actions/private-cargo
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Report runner resources
         if: always()
         continue-on-error: true
