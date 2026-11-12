@@ -333,6 +333,23 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_wake_bridge_can_observe_read_acknowledgements() {
+        marshal_entities::link();
+        for operation in ["GetAllSessions", "GetAllMessages", "GetAllMessageReads"] {
+            assert!(
+                MarshalPolicy
+                    .authorize_anonymous(AuthorizationRequest::Execute {
+                        kind: OperationKind::Query,
+                        operation,
+                        arguments: &json!({}),
+                    })
+                    .is_ok(),
+                "wake bridge query {operation} must remain available to native agents"
+            );
+        }
+    }
+
+    #[test]
     fn anonymous_agents_cannot_claim_verified_console_identity() {
         for (operation, arguments) in [
             (

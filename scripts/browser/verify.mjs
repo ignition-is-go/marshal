@@ -137,6 +137,18 @@ try {
     assert.equal(room.name, 'compatibility');
     await command('LeaveRoom', {asSession:'legacy-a',room:room.roomId});
   });
+  await check('native wake bridges observe acknowledgements and stop treating read messages as unread', async () => {
+    let reads = [];
+    const subscription = legacy.watchQuery({queryId:'GetAllMessageReads',queryItemType:'MessageRead',query:{}}).subscribe({next: rows => { reads = rows; }, error: error => errors.push(error.message)});
+    try {
+      const sent = await command('SendMessage', {asSession:'legacy-a',toSessionId:'legacy-b',body:'wake acknowledgement probe',responseRequired:false});
+      const ack = await command('AckMessages', {asSession:'legacy-b',messageIds:[sent.messageId]});
+      assert.equal(ack.newlyAcked, 1);
+      await expect.poll(() => reads.some(read => read.messageId === sent.messageId && read.sessionId === 'legacy-b')).toBe(true);
+      const unread = await command('ReadMessages', {asSession:'legacy-b',inbox:true,unread:true});
+      assert.ok(unread.messages.every(message => message.messageId !== sent.messageId));
+    } finally { subscription.unsubscribe(); }
+  });
   await check('existing agent reconnect and Session DEL/SET remain accepted', async () => {
     emit(agentSession('legacy-a'), 'DEL');
     await expect.poll(() => legacyRows.some((row) => row.id === 'legacy-a')).toBe(false);
