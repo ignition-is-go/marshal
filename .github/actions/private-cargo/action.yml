@@ -20,6 +20,7 @@ runs:
           css-styled
           mullion
           pulse-multi-user
+          pulse-leptos-ui
         permission-contents: read
     - shell: bash
       env:
@@ -30,9 +31,9 @@ runs:
         echo "::add-mask::$authorization"
         {
           echo 'CARGO_NET_GIT_FETCH_WITH_CLI=true'
-          echo 'GIT_CONFIG_COUNT=3'
+          echo 'GIT_CONFIG_COUNT=4'
           index=0
-          for repository in css-styled mullion pulse-multi-user; do
+          for repository in css-styled mullion pulse-multi-user pulse-leptos-ui; do
             printf 'GIT_CONFIG_KEY_%s=http.https://github.com/ignition-is-go/%s.git.extraheader\n' "$index" "$repository"
             printf 'GIT_CONFIG_VALUE_%s=AUTHORIZATION: basic %s\n' "$index" "$authorization"
             index=$((index + 1))

@@ -42,3 +42,7 @@ hyphae = "3.1.2"
 # alias). Source code uses `use marshal_entities::...` — the auto
 # dash→underscore conversion Rust applies to crate names.
 marshal-entities = { path = "crates/entities", version = "0.59.0" }
+
+# Keep the shared notification primitives and all multi-user widgets on one source.
+[patch.crates-io]
+pulse-leptos-ui = { git = "https://github.com/ignition-is-go/pulse-leptos-ui.git", rev = "059ca7430bd938c832d1301db38d049372046073" }

@@ -21,7 +21,8 @@ use mullion::{
     SplitDirection,
 };
 use pulse_leptos_ui::{
-    BaseStyle, PULSE_MULLION_CLASS, PopoverPlacement, PulseMullionStyle, Status, StatusVariant,
+    BaseStyle, NotificationToasts, PULSE_MULLION_CLASS, PopoverPlacement, PulseMullionStyle,
+    Status, StatusVariant,
 };
 use pulse_multi_user_leptos::{
     ProfileMenu,
@@ -169,6 +170,7 @@ fn AuthenticatedApp(auth: AuthContext) -> impl IntoView {
                 />
             </main>
             <StatusFooter connected=connected.into() auth=auth room=room />
+            <NotificationToasts />
             <palette::CommandK />
         </div>
 
@@ -327,7 +329,6 @@ fn StatusFooter(connected: Signal<bool>, auth: AuthContext, room: RoomContext) -
             </div>
             <span style="flex:1"/>
             <div class="footer-group" role="group" aria-label="System status">
-                <notify::NotificationBell />
                 <div class="footer-brand" aria-label="Marshal">
                     <span class="title">"marshal"</span>
                     <span class="version">{concat!("v", env!("CARGO_PKG_VERSION"))}</span>
@@ -335,6 +336,7 @@ fn StatusFooter(connected: Signal<bool>, auth: AuthContext, room: RoomContext) -
                 <Status variant=Signal::derive(status_variant)>
                     {move || status_label()}
                 </Status>
+                <notify::NotificationBell />
             </div>
         </footer>
     }

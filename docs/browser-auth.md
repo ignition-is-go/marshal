@@ -137,3 +137,11 @@ uses a private CA, set `MARSHAL_AUTH_CA_CERT` to its PEM root for the daemon and
 `AuthState::new_with_http_client` integration with an additional trusted root;
 certificate verification and HTTPS-only issuer requests remain enabled. No auth
 routes or token implementation are added to the proxy.
+
+The dev UI consumes the shared `NotificationToast` / `NotificationToasts`
+primitives from pulse-leptos-ui revision `059ca743`. A single toast stack reads
+Marshal's existing `Notifications` store alongside the rightmost footer bell.
+Toast expiry or dismissal preserves bell history. The immutable workspace patch
+keeps multi-user widgets and Marshal on the same shared UI crate; CI authenticates
+that private source alongside the existing private dependencies. Replace this
+source pin with the published shared release during release packaging.
