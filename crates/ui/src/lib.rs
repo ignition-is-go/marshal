@@ -20,7 +20,9 @@ use mullion::{
     ActivityDef, ActivityIcon, ActivityId, ActivityNode, MullionRoot, PaneEvent, PaneId, PaneNode,
     SplitDirection,
 };
-use pulse_leptos_ui::{BaseStyle, PULSE_MULLION_CLASS, PulseMullionStyle, Status, StatusVariant};
+use pulse_leptos_ui::{
+    BaseStyle, PULSE_MULLION_CLASS, PopoverPlacement, PulseMullionStyle, Status, StatusVariant,
+};
 use pulse_multi_user_leptos::{
     ProfileMenu,
     auth::{AuthContext, AuthGate, myko_transport::provide_authenticated_myko, provide_auth},
@@ -249,13 +251,6 @@ struct StoredLayout {
     tree: PaneNode<Slot>,
 }
 
-/// Clear the persisted layout (the header's "reset layout" control).
-fn clear_layout() {
-    if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = s.remove_item(LAYOUT_KEY);
-    }
-}
-
 /// Restore the saved arrangement, falling back to `default_layout()` when
 /// there's nothing stored, it fails to parse, its version is stale, or the URL
 /// asks for the default (`?reset` / `?default`).
@@ -326,26 +321,15 @@ fn StatusFooter(connected: Signal<bool>, auth: AuthContext, room: RoomContext) -
 
     view! {
         <footer class="app-footer" data-testid="status-footer">
+            <ProfileMenu auth=auth room=room placement=PopoverPlacement::TopStart />
+            <ParticipantStack room=room />
+            <span style="flex:1"/>
+            <notify::NotificationBell />
             <span class="title">"marshal"</span>
             <span class="version">{concat!("v", env!("CARGO_PKG_VERSION"))}</span>
             <Status variant=Signal::derive(status_variant)>
                 {move || status_label()}
             </Status>
-
-            <span style="flex:1"/>
-            <button
-                class="reset-btn"
-                title="Discard your saved arrangement and return to the default layout"
-                on:click=move |_| {
-                    clear_layout();
-                    if let Some(w) = web_sys::window() {
-                        let _ = w.location().reload();
-                    }
-                }
-            >"reset layout"</button>
-            <notify::NotificationBell />
-            <ParticipantStack room=room />
-            <ProfileMenu auth=auth room=room />
         </footer>
     }
 }
@@ -366,10 +350,8 @@ const SHELL_CSS: &str = r#"
 .app-footer { display: flex; align-items: center; gap: 12px; padding: 4px 12px; border-top: 1px solid var(--color-border); background: var(--color-base-200); flex-shrink: 0; }
 .app-footer .title { font-weight: 600; letter-spacing: 0.02em; }
 .app-footer .version { color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 12px; }
-.app-footer .reset-btn { appearance: none; border: 1px solid var(--color-border); background: var(--color-base-150); color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.02em; padding: 4px 10px; border-radius: var(--radius-sm); cursor: pointer; transition: color 0.12s, border-color 0.12s, background 0.12s; }
-.app-footer .reset-btn:hover { color: var(--color-text-primary); border-color: var(--color-border-hover); background: var(--color-base-100); }
 .app-main { flex: 1; min-height: 0; }
-@media(max-width:600px) { .app-footer { padding:8px 12px; gap:8px; } .app-footer .version { display:none; } .app-footer .reset-btn { white-space:nowrap; } }
+@media(max-width:600px) { .app-footer { padding:8px 12px; gap:8px; } }
 .pane-scroll { height: 100%; overflow: auto; padding: 14px 16px; }
 
 /* panel headers */
