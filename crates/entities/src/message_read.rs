@@ -15,6 +15,7 @@ use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, Re
 use crate::message::Message;
 
 #[myko_item]
+#[myko_public_queries(all)]
 pub struct MessageRead {
     /// Cascade on the *message*: an ack is meaningless once its message is gone,
     /// so it dies with the message. This is the ack's primary lifetime owner.
