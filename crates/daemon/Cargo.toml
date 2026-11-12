@@ -1,6 +1,7 @@
 [package]
 name = "marshal-daemon"
 version = "0.60.0"
+publish = false
 edition.workspace = true
 license.workspace = true
 description = "Coordination daemon for the marshal multi-agent service. Owns the live roster and routes messages between Claude Code sessions."
@@ -16,7 +17,8 @@ name = "marshal-daemon"
 path = "src/main.rs"
 
 [package.metadata.flux]
-tasks = ["check", "build", "test", "lint", "publish"]
+# Distributed as a release binary because shared Pulse auth is Git-only.
+tasks = ["check", "build", "test", "lint"]
 
 [dependencies]
 anyhow = { workspace = true }
