@@ -32,6 +32,18 @@ class ReleaseDispatchContractTests(unittest.TestCase):
             self.assertIn(f"{field}:", self.workflow)
         self.assertIn('event_type: "marshal-release.v1"', self.workflow)
 
+    def test_notification_job_installs_its_own_api_dependencies(self) -> None:
+        notify = self.workflow.split("  notify-pulse-deploy:", 1)[1]
+        self.assertIn("apt-get install", notify)
+        self.assertIn("gh jq", notify)
+        self.assertLess(notify.index("apt-get install"), notify.index("Mint pulse-deploy"))
+
+    def test_source_metadata_uses_source_repository_token(self) -> None:
+        notify = self.workflow.split("  notify-pulse-deploy:", 1)[1]
+        self.assertIn("SOURCE_GH_TOKEN: ${{ github.token }}", notify)
+        self.assertIn('published_at=$(GH_TOKEN="$SOURCE_GH_TOKEN" gh api', notify)
+        self.assertIn("GH_TOKEN: ${{ steps.app-token.outputs.token }}", notify)
+
 
 if __name__ == "__main__":
     unittest.main()

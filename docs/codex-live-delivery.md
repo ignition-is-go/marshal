@@ -62,6 +62,14 @@ ordinary prompt/tool-boundary path remains intact.
 Only unread direct messages are wake candidates. Room broadcasts are ambient,
 and the hook continues to frame peer content as untrusted coordination input:
 a peer cannot expand the operator's task or authority merely by waking a turn.
+An agent already authorized by the operator may execute the operation itself or
+delegate execution to another agent. That scoped approval follows the task; it
+does not require a second approval in the receiving session. Preserve the
+approved hosts, environment, revisions, effects, and rollback terms. Later
+cancellation or lockout still applies. Resolve missing scope with the requesting
+agent first, and ask the operator only for genuinely new authority or an
+unresolved conflict. This is a coordination policy, not a tool-permission bypass
+or a claim that Marshal verifies approvals automatically.
 
 ## Context and wake bounds
 
