@@ -321,15 +321,21 @@ fn StatusFooter(connected: Signal<bool>, auth: AuthContext, room: RoomContext) -
 
     view! {
         <footer class="app-footer" data-testid="status-footer">
-            <ProfileMenu auth=auth room=room placement=PopoverPlacement::TopStart />
-            <ParticipantStack room=room />
+            <div class="footer-group" role="group" aria-label="Collaboration">
+                <ProfileMenu auth=auth room=room placement=PopoverPlacement::TopStart />
+                <ParticipantStack room=room />
+            </div>
             <span style="flex:1"/>
-            <notify::NotificationBell />
-            <span class="title">"marshal"</span>
-            <span class="version">{concat!("v", env!("CARGO_PKG_VERSION"))}</span>
-            <Status variant=Signal::derive(status_variant)>
-                {move || status_label()}
-            </Status>
+            <div class="footer-group" role="group" aria-label="System status">
+                <notify::NotificationBell />
+                <div class="footer-brand" aria-label="Marshal">
+                    <span class="title">"marshal"</span>
+                    <span class="version">{concat!("v", env!("CARGO_PKG_VERSION"))}</span>
+                </div>
+                <Status variant=Signal::derive(status_variant)>
+                    {move || status_label()}
+                </Status>
+            </div>
         </footer>
     }
 }
@@ -347,11 +353,13 @@ const ICON_SEND: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentC
 /// panel reuses. Panel-specific rules live in each panel's own `<style>`.
 const SHELL_CSS: &str = r#"
 .app-shell { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--color-base-100); color: var(--color-text-primary); }
-.app-footer { display: flex; align-items: center; gap: 12px; padding: 4px 12px; border-top: 1px solid var(--color-border); background: var(--color-base-200); flex-shrink: 0; }
-.app-footer .title { font-weight: 600; letter-spacing: 0.02em; }
-.app-footer .version { color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 12px; }
+.app-footer { position: relative; z-index: 60; flex-shrink: 0; height: var(--size-control); box-sizing: border-box; display: flex; align-items: center; padding: 0 var(--spacing-md); border-top: 1px solid var(--color-border); border-bottom: 2px solid transparent; gap: var(--spacing-md); background: var(--color-base-100); font-family: var(--font-mono); font-size: var(--font-size-2xs); line-height: 1.5; color: var(--color-text-tertiary); white-space: nowrap; }
+.app-footer .footer-group { align-self: stretch; display: inline-flex; align-items: center; gap: var(--spacing-sm); min-width: 0; }
+.app-footer .footer-brand { align-self: stretch; display: inline-flex; align-items: center; gap: var(--spacing-xs); padding: 0; color: var(--color-text-primary); letter-spacing: 0.08em; }
+.app-footer .version { color: var(--color-text-tertiary); letter-spacing: 0; }
+.app-footer .status { font-size: inherit; }
 .app-main { flex: 1; min-height: 0; }
-@media(max-width:600px) { .app-footer { padding:8px 12px; gap:8px; } }
+@media(max-width:600px) { .app-footer { gap:var(--spacing-sm); } }
 .pane-scroll { height: 100%; overflow: auto; padding: 14px 16px; }
 
 /* panel headers */
