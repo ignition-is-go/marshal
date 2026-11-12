@@ -13,12 +13,16 @@ Install the binaries, run the daemon, then wire the harnesses you use.
 ### 1. Install the binaries
 
 ```bash
-cargo install marshal-shim marshal-daemon
+cargo install marshal-shim
 # optional but recommended for visibility into the live roster
 cargo install marshal-tui
 ```
 
-This puts `marshal-shim` and `marshal-daemon` on your `PATH` (typically `~/.cargo/bin`).
+This puts `marshal-shim` on your `PATH`, typically `~/.cargo/bin`. Download
+`marshal-daemon-x86_64-unknown-linux-gnu` from the [same release](https://github.com/ignition-is-go/marshal/releases/latest),
+make it executable, and install it as `marshal-daemon` on the server. The daemon
+is distributed as a release binary because its shared Pulse auth dependencies
+are private Git packages. Building it from source requires repository access.
 
 ### 2. Start the daemon
 
