@@ -139,7 +139,7 @@ certificate verification and HTTPS-only issuer requests remain enabled. No auth
 routes or token implementation are added to the proxy.
 
 The dev UI consumes the shared `NotificationToast` / `NotificationToasts`
-primitives from pulse-leptos-ui revision `059ca743`. A single toast stack reads
+primitives from pulse-leptos-ui revision `e19e88c1`. A single toast stack reads
 Marshal's existing `Notifications` store alongside the rightmost footer bell.
 Toast expiry or dismissal preserves bell history. The immutable workspace patch
 keeps multi-user widgets and Marshal on the same shared UI crate; CI authenticates

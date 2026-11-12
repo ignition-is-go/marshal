@@ -10,7 +10,7 @@ rust-version = "1.85"
 
 # Keep the shared notification primitives and all multi-user widgets on one source.
 [patch.crates-io]
-pulse-leptos-ui = { git = "https://github.com/ignition-is-go/pulse-leptos-ui.git", rev = "059ca7430bd938c832d1301db38d049372046073" }
+pulse-leptos-ui = { git = "https://github.com/ignition-is-go/pulse-leptos-ui.git", rev = "e19e88c168772159ac7389ef102785b3b8aaae0a" }
 
 [workspace.dependencies]
 # Core
