@@ -555,6 +555,15 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
     // ambient (read via `marshal://messages room=…` or the marshal UI), so it
     // never hijacks the turn with unrelated context. `inbox: true` (direct +
     // room) stays available for explicit reads; auto-inject is direct-only.
+    //
+    // Hold the leases from before the read until the new ones are taken.
+    // `ack_surfaced` acks, then releases under this lock, so this read either
+    // sees a lease still held or sees the row already read. Reading first and
+    // locking after let a pull read a row as unread, then find its lease
+    // released by an ack that landed in between, and offer it a second time.
+    let Ok(mut leases) = LEASES.lock() else {
+        return (String::new(), Vec::new());
+    };
     let read = ReadMessages {
         room: None,
         from: None,
@@ -631,9 +640,6 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
         .chain(agent.iter().map(|m| (*m, false)))
         .map(|(m, is_human)| (m, is_human, render_line(m)))
         .collect();
-    let Ok(mut leases) = LEASES.lock() else {
-        return (String::new(), Vec::new());
-    };
     let now = Instant::now();
     let mut lines_budget = lines_limit;
     let mut selected_ids = Vec::new();
