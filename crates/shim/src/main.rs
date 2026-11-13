@@ -16,8 +16,10 @@ mod codex_hook;
 mod codex_setup;
 mod link;
 mod mcp;
+mod roster_read;
 mod session_discovery;
 mod statusline;
+mod terminal_send;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -142,6 +144,27 @@ fn main() -> Result<()> {
             codex_hook::watch(&sid, base.as_deref(), once);
             return Ok(());
         }
+        // Message the marshal from a terminal, outside any session. See
+        // `terminal_send`.
+        Some("all") => {
+            let body = argv.collect::<Vec<_>>().join(" ");
+            return run_terminal_send(terminal_send::Target::All, body);
+        }
+        Some("tell") => {
+            let target = argv
+                .next()
+                .context("usage: marshal-shim tell <team, nickname or session id> <message>")?;
+            let body = argv.collect::<Vec<_>>().join(" ");
+            return run_terminal_send(terminal_send::Target::Named(target), body);
+        }
+        // Print the roster as JSON for other programs. See `roster_read`.
+        Some("roster") if argv.next().is_none() => {
+            return tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building tokio runtime")?
+                .block_on(roster_read::run());
+        }
         // One-shot cross-platform setup: wire marshal into a Codex install
         // (CLI / IDE / desktop app) by writing the config.toml + AGENTS.md
         // managed blocks. For laptops / the desktop app where there's no
@@ -207,6 +230,10 @@ Commands:
   codex-setup   Wire Marshal into a Codex install (codex-setup --help for options)
   codex-run     Start Codex with Marshal live delivery
   codex-bridge  Run the Codex live-delivery bridge on its own (codex-run starts it)
+  tell          Message a team, nickname or session from a terminal:
+                tell <team, nickname or session id> <message>
+  all           Message every session from a terminal: all <message>
+  roster        Print the roster as JSON
 
 Options:
   --check        Print \"ok\" and exit (install smoke test)
@@ -219,6 +246,15 @@ then {DEFAULT_DAEMON_ADDRESS}.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
+}
+
+fn run_terminal_send(target: terminal_send::Target, body: String) -> Result<()> {
+    anyhow::ensure!(!body.trim().is_empty(), "there's no message to send");
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?
+        .block_on(terminal_send::run(target, body))
 }
 
 async fn serve() -> Result<()> {
