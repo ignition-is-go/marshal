@@ -93,7 +93,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -104,7 +104,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -256,9 +256,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "autosocket"
-version = "6.15.1"
+version = "6.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbef22c604ed5a13fc99f3e987e76b6bc0be18be02410ffcb5648aa87a9f7e2c"
+checksum = "b0171e3b8857c780e0fb28d3e4cfcaf29d1cd0038c2800501d322e67c04866b9"
 dependencies = [
  "base64",
  "flume",
@@ -1746,7 +1746,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3472,9 +3472,9 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "myko"
-version = "6.15.1"
+version = "6.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa7d17fbffaa6492a66916f4e954f4bc2faaa494c743d4e7db43b4f56fd9751d"
+checksum = "91c5a14f5b04da496c0c0a4d26e552f415a415020cfbcf4c0103cf87450e0bcf"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -3520,9 +3520,9 @@ dependencies = [
 
 [[package]]
 name = "myko-auth"
-version = "6.15.1"
+version = "6.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06848845933f652418b894fb8278217adcd7d1335a25435ff449483d08226a21"
+checksum = "c34c1bb2622bdf512768c50345a53b8509b32369bb358ee4cb728dc48b65eae7"
 dependencies = [
  "base64",
  "futures",
@@ -3552,9 +3552,9 @@ dependencies = [
 
 [[package]]
 name = "myko-leptos"
-version = "6.15.1"
+version = "6.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca03842c063922f118e5b835ce032b66e655d9cc583d67d35215cae7d50cd1cd"
+checksum = "8af8e7dbfc3a4f814bca83d0fe7d0d9e63751efa8db9c136bea10b9afc8a2641"
 dependencies = [
  "hyphae-leptos",
  "leptos",
@@ -3564,9 +3564,9 @@ dependencies = [
 
 [[package]]
 name = "myko-macros"
-version = "6.15.1"
+version = "6.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d39b8252cb2da94d90a3b7248f893b32891bc00a545d0e0b7d5ce3b1c0e191a8"
+checksum = "4a2fd1a5b688afea88e53e469d1bbb348de52e4c77d92b6d97fdfad3735ac420"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3576,9 +3576,9 @@ dependencies = [
 
 [[package]]
 name = "myko-server"
-version = "6.15.1"
+version = "6.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "265b97cc0bf04b9d5bc7c9ff9839563d5d03cb9737db6de6554b232f541102e2"
+checksum = "9135d3d0c90ce5a0e042b7b546f08eacc8b7c8d3fc918f2feb9c2b331348b2e7"
 dependencies = [
  "base64",
  "chrono",
@@ -3611,9 +3611,9 @@ dependencies = [
 
 [[package]]
 name = "myko-telemetry"
-version = "6.15.1"
+version = "6.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "311a9bfd41fd71c1105cd03a62c14be76e0534c0687b5ae138ef78d5f8a30dd9"
+checksum = "55d28a7316f0ac9e292a28cba0c82101ed6683e3832e1d48bcceb9c35b37c8ac"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3717,7 +3717,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4550,7 +4550,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4724,7 +4724,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5349,7 +5349,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5408,7 +5408,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5914,7 +5914,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5952,7 +5952,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6285,10 +6285,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7159,7 +7159,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
