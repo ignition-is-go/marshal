@@ -46,8 +46,21 @@ or rollout files.
 Eager registration uses the dedicated `/hook/session-register` endpoint. It
 only creates or refreshes the roster row; it never surfaces or acknowledges
 inbox messages because there is no model turn available to receive them.
-`SessionStart` remains the identity/context injection path and a fallback for
-Codex launches that do not use `codex-run`.
+`SessionStart` injects identity/context for ordinary launches. Prompt and tool
+boundary hooks also refresh `<marshal_session>` from the hook's authoritative
+session id. A fork can inherit its parent's developer context without running
+`SessionStart`; the latest block explicitly supersedes that inherited identity.
+
+For outgoing MCP calls, the shim binds the caller from the host-provided
+`params._meta.threadId` on each request, overriding `asSession` in model arguments.
+Caller-relative resource reads use the same metadata when supplied. This is per
+request, so interleaved parent/fork calls cannot rebind a shared MCP process.
+Metadata nested inside tool arguments is never used for identity. Invalid thread
+metadata rejects the request. Older clients that omit thread metadata retain the
+explicit `asSession` fallback and rely on refreshed hook context.
+
+Codex 0.167.0 supplies this tool-call metadata in
+[`with_mcp_tool_call_ids_meta`](https://github.com/openai/codex/blob/rust-v0.167.0/codex-rs/core/src/mcp_tool_call.rs).
 
 For the launcher-selected thread, the bridge sets `[nickname]` even before
 Codex has generated a title. Later title updates retain the nickname prefix.

@@ -32,8 +32,8 @@ pub struct ToolHost {
     pub cwd: String,
     /// True under the Codex harness. Codex gives the shim no connection
     /// identity and disk discovery is unreliable, so the shim owns no Session
-    /// and write tools carry an explicit `asSession` (the id the SessionStart
-    /// hook injected) instead of resolving the caller from the WS connection.
+    /// and request metadata binds each call to its active thread. Older clients
+    /// without metadata use explicit `asSession` from the latest hook context.
     pub is_codex: bool,
     /// The shim's local copy of its Session entity. Mutations
     /// (set_status) update this and re-emit a SET event so the
@@ -125,11 +125,34 @@ impl Handler for CoordHandler {
         })
     }
 
+    fn call_tool_with_meta<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a Value,
+        meta: &'a Value,
+        notifier: &'a Notifier,
+    ) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let args = bind_codex_caller(self.host.is_codex, args, meta)?;
+            self.call_tool(name, &args, notifier).await
+        })
+    }
+
     fn read_resource<'a>(&'a self, uri: &'a str) -> ResourceFuture<'a> {
+        self.read_resource_with_meta(uri, &Value::Null)
+    }
+
+    fn read_resource_with_meta<'a>(&'a self, uri: &'a str, meta: &'a Value) -> ResourceFuture<'a> {
         let host = Arc::clone(&self.host);
         let uri = uri.to_string();
         Box::pin(async move {
-            let parsed = ParsedUri::parse(&uri)?;
+            let mut parsed = ParsedUri::parse(&uri)?;
+            if let Some(id) = codex_thread_id(host.is_codex, meta)
+                .map_err(|e| ResourceError::invalid_params(e.message))?
+            {
+                parsed.query.remove("as_session");
+                parsed.query.insert("asSession".into(), id.into());
+            }
             match parsed.path.as_str() {
                 "whoami" => Ok(read_whoami(&host, &uri, &parsed.query)),
                 "roster" => Ok(read_roster(&host, &uri)),
@@ -376,11 +399,39 @@ async fn read_messages(
 // Tool implementations (writes)
 // =============================================================================
 
-/// The session a write command acts AS. Under Codex the shim holds no
-/// connection identity, so the agent names its own session explicitly via
-/// `asSession` (the id the SessionStart hook injected in the `<marshal_session>`
-/// block) and the shim forwards it. Every other harness resolves the caller
-/// from the WS connection, so this is `None`.
+/// Bind each request independently: a shared MCP process can serve a parent and
+/// its forks concurrently. Never cache the last thread or trust arguments._meta.
+/// Codex sets params._meta.threadId outside the model's tool arguments.
+fn bind_codex_caller(is_codex: bool, args: &Value, meta: &Value) -> Result<Value, ToolError> {
+    let mut args = args.clone();
+    if let Some(thread_id) = codex_thread_id(is_codex, meta)? {
+        let object = args
+            .as_object_mut()
+            .ok_or_else(|| ToolError::invalid_params("tool arguments must be an object"))?;
+        object.remove("as_session");
+        object.insert("asSession".into(), Value::String(thread_id.into()));
+    }
+    // Older Codex clients omit threadId; retain explicit identity compatibility.
+    Ok(args)
+}
+
+fn codex_thread_id(is_codex: bool, meta: &Value) -> Result<Option<&str>, ToolError> {
+    if !is_codex {
+        return Ok(None);
+    }
+    meta.get("threadId")
+        .map(|id| {
+            id.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ToolError::invalid_params("invalid Codex request metadata threadId"))
+        })
+        .transpose()
+}
+
+/// The session a write command acts AS. Request metadata has already replaced
+/// model-supplied identity when the Codex client provides it. Other harnesses
+/// resolve their caller from the WS connection.
 fn caller(host: &ToolHost, args: &Value) -> Result<Option<SessionId>, ToolError> {
     if !host.is_codex {
         return Ok(None);
@@ -624,7 +675,7 @@ fn write_schema(is_codex: bool, mut properties: Value, required: &[&str]) -> Val
                 "asSession".into(),
                 json!({
                     "type": "string",
-                    "description": "Your session id from <marshal_session>."
+                    "description": "Your session id from the latest <marshal_session>; host thread metadata takes precedence."
                 }),
             );
         }
@@ -908,6 +959,66 @@ mod tests {
             let content: Value = serde_json::from_str(&resource.text).unwrap();
             assert_eq!(content["agent_id"].as_str(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn codex_fork_metadata_overrides_inherited_sender_per_request() {
+        let host = ToolHost {
+            client: Arc::new(MykoClient::new()),
+            pid: 1,
+            cwd: "/repo".into(),
+            is_codex: true,
+            session: Arc::new(Mutex::new((*session("placeholder")).clone())),
+            sessions_cell: Cell::new(vec![session("parent"), session("fork")]).lock(),
+            rooms_cell: Cell::new(vec![]).lock(),
+            members_cell: Cell::new(vec![]).lock(),
+            nicknames_cell: Cell::new(vec![]).lock(),
+            wake_watchers_cell: Cell::new(vec![]).lock(),
+        };
+        let inherited = json!({"asSession": "parent", "as_session": "parent", "body": "test",
+            "_meta": {"threadId": "forged"}});
+        // Interleaving does not rebind a shared process or change the parent.
+        for id in ["fork", "parent", "fork"] {
+            let bound = bind_codex_caller(true, &inherited, &json!({"threadId": id})).unwrap();
+            assert_eq!(caller(&host, &bound).unwrap().unwrap().0.as_ref(), id);
+            assert_eq!(bound["body"], "test");
+            assert!(bound.get("as_session").is_none());
+        }
+        assert_eq!(inherited["asSession"], "parent");
+        assert_eq!(
+            bind_codex_caller(true, &inherited, &Value::Null).unwrap(),
+            inherited
+        );
+        assert_eq!(
+            bind_codex_caller(false, &inherited, &json!({"threadId": "fork"})).unwrap(),
+            inherited
+        );
+        for invalid in [json!(null), json!(""), json!("  "), json!(12)] {
+            assert!(bind_codex_caller(true, &inherited, &json!({"threadId": invalid})).is_err());
+        }
+        let omitted = bind_codex_caller(true, &json!({}), &json!({"threadId": "fork"})).unwrap();
+        assert_eq!(caller(&host, &omitted).unwrap().unwrap().0.as_ref(), "fork");
+        let handler = CoordHandler {
+            host: Arc::new(host),
+        };
+        for id in ["fork", "parent", "fork"] {
+            let meta = json!({"threadId": id});
+            let resource = handler
+                .read_resource_with_meta("marshal://whoami?asSession=parent", &meta)
+                .await
+                .unwrap();
+            let identity: Value = serde_json::from_str(&resource.text).unwrap();
+            assert_eq!(identity["session_id"], id);
+        }
+        assert!(
+            handler
+                .read_resource_with_meta(
+                    "marshal://whoami?asSession=parent",
+                    &json!({"threadId": ""})
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[test]

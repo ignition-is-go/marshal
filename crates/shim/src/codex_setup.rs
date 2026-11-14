@@ -458,11 +458,11 @@ the `marshal` MCP server as `marshal__send_message`, `marshal__broadcast`,\n\
 `marshal__ack_messages`; read the roster/history via `marshal://roster` /\n\
 `marshal://messages`.\n\
 \n\
-- Your own marshal **session id** is injected at session start in a\n\
+- Your own marshal **session id** is refreshed at prompt/tool boundaries in a\n\
   `<marshal_session>` block. On EVERY marshal write tool pass it as the\n\
   `asSession` argument so messages carry the correct sender identity.\n\
-  (Codex does not tell an MCP server which session it serves, so you must name\n\
-  yourself; the id in that block is authoritative.)\n\
+  (Use the latest block, which supersedes inherited parent context. MCP thread\n\
+  metadata takes precedence over explicit identity arguments when available.)\n\
 - Reading your own identity or inbox needs that id too — append it as a query\n\
   param: `marshal://whoami?asSession=<id>` and `marshal://messages?asSession=<id>&inbox=true`.\n\
   (`marshal://roster` and `marshal://rooms` need no id.) Without it, `whoami`\n\
