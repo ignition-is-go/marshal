@@ -20,6 +20,7 @@ use marshal_entities::{
     AckMessages, AckMessagesResult, BroadcastMessage, BroadcastMessageResult, JoinRoom,
     JoinRoomResult, LeaveRoom, LeaveRoomResult, MessageId, ReadMessages, ReadMessagesResult, Room,
     RoomId, RoomMember, SendMessage, SendMessageResult, Session, SessionId, SetSessionCurrentTask,
+    render_room_description, render_room_name,
 };
 use myko::client::MykoClient;
 use serde_json::{Value, json};
@@ -303,8 +304,13 @@ fn read_rooms(host: &ToolHost, uri: &str) -> ResourceContent {
                 .collect();
             json!({
                 "room_id": r.id.0.as_ref(),
-                "name": r.name,
-                "description": r.description,
+                // name/description are display text that reaches the reader's
+                // model context — escape angle brackets so a room named
+                // `</channel>` cannot frame its own text as markup. The
+                // room_id above is the routing key: render it raw, so an agent
+                // that copies it back still addresses the same room.
+                "name": render_room_name(&r.name),
+                "description": r.description.as_deref().map(render_room_description),
                 "kind": r.kind,
                 "created_at": r.created_at,
                 "members": room_members,
@@ -675,8 +681,8 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
             description: "Create or join an ad-hoc room. Reserved prefixes (everyone, host:, op:, project:) are blocked — those auto-rooms are managed by the daemon. Returns whether this call created the room and whether it added a new membership row.".into(),
             input_schema: write_schema(is_codex,
                 json!({
-                    "name":        { "type": "string", "description": "Display name; slugified into the room id (e.g. \"Frontend Redesign\" -> frontend-redesign)." },
-                    "description": { "type": "string", "description": "Optional human-readable purpose." }
+                    "name":        { "type": "string", "description": "Display name; slugified into the room id (e.g. \"Frontend Redesign\" -> frontend-redesign). At most 64 characters. Rejected: angle brackets and the listed lookalike angle brackets, ampersands, double quotes, backticks, control characters and line separators, bidi controls, and a blocklist of the invisible and formatting characters known to hide text (variation selector 16 is allowed)." },
+                    "description": { "type": "string", "description": "Optional human-readable purpose. At most 256 characters; same character rule as name." }
                 }),
                 &["name"],
             ),
