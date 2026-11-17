@@ -139,7 +139,9 @@ Rules every adapter keeps:
    one version, and upstream has no other rule for what a daemon accepts), that the harness's hooks and MCP server point at `marshal-shim`,
    and that the target has no `marshal/daemon-address` file naming a different address. The shim reads
    that file ahead of `MARSHAL_DAEMON_ADDRESS`, so such a file would silently send the agent to another
-   daemon. The adapter runs
+   daemon. (Upstream's own comments disagree: the `ADDRESS_FILE` doc comment
+   and `channels.rs` say the environment variable wins. The launcher follows what the shim's connect
+   path actually does, `first_daemon_address(file, env, legacy)`. Settling that order is a separate fix.) The adapter runs
    these checks over its own channel (ssh, the VM agent, the container exec). Otherwise each of these
    failures shows up only as a timeout with no reason. `launch` runs `check` first unless `--no-check`
    is given. Upstream has no `doctor` subcommand. If one is added later, `check` can call it instead.
