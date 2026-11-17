@@ -101,9 +101,22 @@ object from stdout. Anything written to stderr is shown to the user.
 }
 ```
 
-Response: `{"version": 1, "handle": "<opaque, the adapter's own>", "where": "build-03 tmux:claude-app",
-"attach": "ssh -t build-03 tmux attach -t =claude-app"}`. Exit nonzero with a message on stderr if
-nothing was started.
+Response:
+
+```json
+{
+  "version": 1,
+  "handle": "<opaque, the adapter's own>",
+  "host": "build-03",
+  "cwd": "/home/agent/work/app",
+  "where": "build-03 tmux:claude-app",
+  "attach": "ssh -t build-03 tmux attach -t =claude-app"
+}
+```
+
+`host` is the target's host name, as its `gethostname` reports it. `cwd` is the absolute folder the
+harness was started in. The launcher matches both against the joined row (see Join proof). `attach` is
+optional. Exit nonzero with a message on stderr if nothing was started.
 
 **`stop`** — request `{"version": 1, "handle": "…"}`. **`status`** (optional) — request
 `{"version": 1, "handle": "…"}`, response `{"running": true|false}`. It lets `launch list` tell "exited
