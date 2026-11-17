@@ -156,8 +156,8 @@ them there:
 ### Join proof
 
 `agent_id` is self-asserted, so any session could present `launch-<uuid>`. The launcher therefore
-also checks that the row's `host.name` matches the host the adapter reported in `where`, and that its
-`cwd` matches the requested folder. That isn't authentication, which upstream's trust model leaves to
+also checks that the row's `host.name` and `cwd` match the `host` and `cwd` the adapter reported in its
+`launch` response. That isn't authentication, which upstream's trust model leaves to
 the mesh. It is enough that a stray or mistaken session isn't taken for the launched one.
 
 ### First task, with nobody at the keyboard
