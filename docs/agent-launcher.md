@@ -136,7 +136,10 @@ Rules every adapter keeps:
 4. **Check before starting.** A `check` verb (same request as `launch`) confirms, on the target, that
    it can reach the launch address on both ports, that `marshal-shim --version` there has the same
    major.minor as the request's `marshal_version` (the launcher's own; Marshal releases every crate at
-   one version, and upstream has no other rule for what a daemon accepts), and that the harness's hooks and MCP server point at `marshal-shim`. The adapter runs
+   one version, and upstream has no other rule for what a daemon accepts), that the harness's hooks and MCP server point at `marshal-shim`,
+   and that the target has no `marshal/daemon-address` file naming a different address. The shim reads
+   that file ahead of `MARSHAL_DAEMON_ADDRESS`, so such a file would silently send the agent to another
+   daemon. The adapter runs
    these checks over its own channel (ssh, the VM agent, the container exec). Otherwise each of these
    failures shows up only as a timeout with no reason. `launch` runs `check` first unless `--no-check`
    is given. Upstream has no `doctor` subcommand. If one is added later, `check` can call it instead.
