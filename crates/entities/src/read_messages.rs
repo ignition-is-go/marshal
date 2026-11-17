@@ -15,23 +15,21 @@ use std::sync::Arc;
 use myko::{
     command::{CommandContext, CommandError, CommandHandler},
     myko_command,
+    prelude::RequestScoped as _,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     message::{GetAllMessages, Message, MessageId},
     message_read::{GetAllMessageReads, MessageRead},
-    room::{GetAllRooms, Room, RoomId, resolve_room},
+    room::{GetAllRooms, Room, RoomId, RoomLookupError, resolve_room},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
 
 #[myko_command(ReadMessagesResult)]
 pub struct ReadMessages {
-    /// Filter to messages addressed to this room. Polymorphic reference —
-    /// a room id (preferred) or a room display name (auto-room ids carry a
-    /// collision-resistant suffix callers don't know), e.g. `everyone`,
-    /// `op:*`, `project:*`, or any ad-hoc room.
+    /// Filter to messages addressed to a room ID or unambiguous display label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<RoomId>,
 
@@ -120,6 +118,26 @@ impl CommandHandler for ReadMessages {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
         let me = resolve_caller(&ctx, &sessions, self.as_session.as_ref())?;
 
+        let room_filter = match self.room {
+            Some(reference) => {
+                let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
+                let id = match resolve_room(&rooms, reference.0.as_ref()) {
+                    Ok(room) => room.id.clone(),
+                    // Keep the original ID filter when room lookup finds no match.
+                    Err(RoomLookupError::Unknown) => reference,
+                    Err(error @ RoomLookupError::Ambiguous) => {
+                        return Err(CommandError {
+                            tx: ctx.tx().to_string(),
+                            command_id: ctx.command_id.to_string(),
+                            message: error.message().to_string(),
+                        });
+                    }
+                };
+                Some(id)
+            }
+            None => None,
+        };
+
         let messages: Vec<Arc<Message>> = ctx.exec_query(GetAllMessages {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
         let reads: Vec<Arc<MessageRead>> = ctx.exec_query(GetAllMessageReads {})?;
@@ -145,17 +163,6 @@ impl CommandHandler for ReadMessages {
             .limit
             .map(|n| n.min(MAX_LIMIT))
             .unwrap_or(DEFAULT_LIMIT);
-
-        // A `room` reference may be the display name (auto-room ids carry a
-        // collision-resistant suffix callers don't know). Resolve it once —
-        // id first, then name — and filter on the resolved id.
-        let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
-        let room_filter: Option<RoomId> = self
-            .room
-            .as_ref()
-            .and_then(|reference| {
-                resolve_room(&rooms, reference.0.as_ref()).map(|room| room.id.clone())
-            });
 
         // Visibility + filter pipeline.
         let visible: Vec<&Arc<Message>> = messages

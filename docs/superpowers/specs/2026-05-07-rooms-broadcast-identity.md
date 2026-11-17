@@ -168,17 +168,11 @@ and so cleanup can sweep them when the last member leaves — except
 
 - Singleton: `everyone`. Always exists, every live session is a member,
   the cleanup sweeper never DELs it.
-- Other auto-rooms carry a display label `host:<name>`, `op:<operator>`,
-  `project:<basename>` (the value sanitized so it fits the name rule), and
-  an id `<label>~<16-hex fingerprint of the original value>`: the fingerprint
-  is what keeps distinct identities that sanitize to the same label in
-  separate rooms (e.g. two projects sharing a 56-character prefix, or `a<b`
-  vs `ab`), while staying stable and recomputable across processes and
-  restarts. Callers that do not know the fingerprint (everyone, since they
-  never see the original value) reference the auto-room by its display name;
-  `broadcast_message`, `read_messages` and `leave_room` resolve the room id
-  first, then the display name. The original value is preserved in
-  `RoomKind::Auto { source }`.
+- Operator and project room IDs are `op:<operator>` and
+  `project:<basename>`, using the original identity value. Their display
+  labels are bounded and omit blocked characters. Use the ID from
+  `marshal://rooms` to address a room. Commands prefer an exact ID and
+  reject display labels that match multiple rooms.
 - Ad-hoc room ids are slugified from the user-supplied name (lowercase,
   `[a-z0-9-]+`), with `-{N}` suffix on collision (same dedup trick we
   use for nicknames).
@@ -193,11 +187,9 @@ and so cleanup can sweep them when the last member leaves — except
   Characters not on the list are allowed. Auto-rooms drop blocked characters
   from the operator / project value instead of failing (added later; the
   exact list is `FORBIDDEN_RANGES` in `crates/entities/src/room.rs`).
-- A room SET directly by a client can still carry angle brackets, so the
-  text is escaped to `&lt;`/`&gt;` at the render boundaries (the
-  `marshal://rooms` resource, the `@mention` push) — escaping, not
-  dropping, so no visible content is lost — and the cleanup sweep
-  normalizes the stored text the same way, so it converges within a tick.
+- Marshal escapes room metadata in `marshal://rooms` and mention
+  notifications, including metadata written directly over the WebSocket.
+  The cleanup sweep leaves stored room text intact.
 
 ### Tool surface
 

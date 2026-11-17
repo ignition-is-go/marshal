@@ -363,16 +363,13 @@ longer than 256, and either one containing a character on this blocklist:
   U+E0100–U+E01EF.
 
 U+FE0F (variation selector 16) is allowed, so emoji such as ❤️ still work.
-Characters not listed are allowed; this is not a general filter for every
-invisible or confusable character. The `op:` and `project:` auto-rooms drop
-blocked characters from the operator or project basename instead, so a repo
-directory named `a<b` gets the room `project:ab`. The daemon's cleanup sweep
-(every 3 seconds) also rewrites any stored room whose name or description
-breaks the rule, dropping blocked characters and keeping the room id (a
-name left empty becomes the cleaned id, or `room`). That
-covers rooms stored before the rule and rows a client SET directly over the
-WebSocket, but only after they are stored: until render-time escaping
-lands, a raw name can still reach a push sent before the next sweep.
+Auto-rooms use a bounded display label. The room ID keeps the original
+operator or project basename, so existing memberships and message history
+stay attached to the same room. Use `room_id` from `marshal://rooms` to
+address a room. A display label is accepted when it identifies one room.
+Marshal escapes room metadata when it renders listings and mention
+notifications, including for rooms written directly over the WebSocket.
+Stored names and descriptions retain their original text.
 
 A peer's `send_message` is persisted first, then Marshal attempts a synchronous
 live-channel push when the recipient supports one. The result reports these

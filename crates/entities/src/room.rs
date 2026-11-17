@@ -20,12 +20,8 @@ use std::sync::Arc;
 
 #[myko_item]
 pub struct Room {
-    /// Display name. For auto-rooms, equal to `id`. For ad-hoc rooms,
-    /// the user-supplied label (which `id` is slugified from). Follows the
-    /// room text rule (`is_forbidden_room_text_char`, `ROOM_NAME_MAX_CHARS`)
-    /// at creation; the daemon's cleanup sweep repairs a stored name that
-    /// breaks it (keeping `id`), so an older or directly-SET auto-room's
-    /// name can briefly differ from its id.
+    /// Display label. The room ID identifies the room even if another room has
+    /// the same label.
     #[myko_setter]
     pub name: String,
 
@@ -273,14 +269,7 @@ pub fn sanitize_room_text(raw: &str, max_chars: usize) -> String {
         .collect()
 }
 
-/// Render a stored room name for model context (room listings, mention
-/// pushes): escape angle brackets to `&lt;`/`&gt;` so the text cannot read
-/// as markup, capped at [`ROOM_NAME_MAX_CHARS`]. Unlike
-/// [`sanitize_room_name`], no visible content is dropped. Escaping is
-/// idempotent — the rendered text carries no raw angle brackets — so text
-/// the repair sweep already rendered is safe to render again at the
-/// boundary: a re-render is a no-op while the rendered text fits the cap,
-/// and re-caps it (at most one further pass) when it does not.
+/// Escape angle brackets in the first 64 characters for model-facing display.
 pub fn render_room_name(raw: &str) -> String {
     render_room_text(raw, ROOM_NAME_MAX_CHARS)
 }
@@ -304,17 +293,37 @@ fn render_room_text(raw: &str, max_chars: usize) -> String {
     out
 }
 
-/// Resolve a caller-supplied room reference: the room id (preferred) or the
-/// room name. Auto-room ids are no longer equal to their display names
-/// (the collision-resistant suffix, see the daemon's auto-room anchor), so
-/// callers reference those rooms by name. An id match wins; otherwise the
-/// first room whose display name matches is used.
-pub fn resolve_room<'a>(rooms: &'a [Arc<Room>], reference: &str) -> Option<&'a Room> {
-    rooms
-        .iter()
-        .find(|r| r.id.0.as_ref() == reference)
-        .or_else(|| rooms.iter().find(|r| r.name == reference))
-        .map(|r| &**r)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RoomLookupError {
+    Unknown,
+    Ambiguous,
+}
+
+impl RoomLookupError {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Unknown => "no room with that ID or label",
+            Self::Ambiguous => "ambiguous room label; use the room ID",
+        }
+    }
+}
+
+/// Resolve a room ID or an unambiguous display label. An exact ID always wins.
+pub(crate) fn resolve_room<'a>(
+    rooms: &'a [Arc<Room>],
+    reference: &str,
+) -> Result<&'a Room, RoomLookupError> {
+    if let Some(room) = rooms.iter().find(|room| room.id.0.as_ref() == reference) {
+        return Ok(room);
+    }
+
+    let mut matches = rooms.iter().filter(|room| room.name == reference);
+    let room = matches.next().ok_or(RoomLookupError::Unknown)?;
+    if matches.next().is_some() {
+        return Err(RoomLookupError::Ambiguous);
+    }
+
+    Ok(room)
 }
 
 #[cfg(test)]
@@ -438,30 +447,12 @@ mod tests {
     }
 
     #[test]
-    fn render_room_text_is_idempotent_or_recaps() {
-        // Fits the cap: rendering twice must not double-escape.
-        let raw = "a<b>";
-        let once = render_room_name(raw);
-        assert_eq!(once, "a&lt;b&gt;");
-        assert_eq!(render_room_name(&once), once, "fits: exactly idempotent");
-
-        // Over the cap once escaped: the second pass re-caps and then
-        // stabilizes (at most two passes, no double-escaping).
-        let long = "x</channel>".repeat(10);
-        let once = render_room_name(&long);
-        assert!(once.chars().count() > ROOM_NAME_MAX_CHARS);
-        let twice = render_room_name(&once);
-        assert_eq!(
-            render_room_name(&twice),
-            twice,
-            "the re-cap is stable"
-        );
-        assert!(!once.contains('<') && !once.contains('>'));
-    }
-
-    #[test]
     fn render_room_name_caps_before_escaping() {
-        let raw = format!("{}<{}", "n".repeat(ROOM_NAME_MAX_CHARS), "/close>".repeat(4));
+        let raw = format!(
+            "{}<{}",
+            "n".repeat(ROOM_NAME_MAX_CHARS),
+            "/close>".repeat(4)
+        );
         let rendered = render_room_name(&raw);
         assert!(rendered.starts_with("n".repeat(ROOM_NAME_MAX_CHARS).as_str()));
         assert!(!rendered.contains('<') && !rendered.contains('>'));
@@ -470,10 +461,7 @@ mod tests {
     #[test]
     fn render_room_description_keeps_line_breaks_and_caps() {
         assert_eq!(render_room_description("Line 1\nLine 2"), "Line 1\nLine 2");
-        assert_eq!(
-            render_room_description("ok<b>"),
-            "ok&lt;b&gt;"
-        );
+        assert_eq!(render_room_description("ok<b>"), "ok&lt;b&gt;");
         let long = "d".repeat(ROOM_DESCRIPTION_MAX_CHARS + 10);
         assert_eq!(
             render_room_description(&long).chars().count(),
@@ -484,26 +472,26 @@ mod tests {
     #[test]
     fn resolve_room_matches_by_id_then_by_name() {
         let room = Room {
-            id: RoomId(Arc::from("project:acme-app~0123456789abcdef")),
-            name: "project:acme-app".into(),
+            id: RoomId(Arc::from("project:acme<app")),
+            name: "project:acmeapp".into(),
             description: None,
             kind: RoomKind::Auto {
                 source: AutoSource::Project {
-                    basename: "acme-app".into(),
+                    basename: "acme<app".into(),
                 },
             },
             created_at: 0,
         };
         let rooms = vec![Arc::new(room)];
+        assert!(resolve_room(&rooms, "project:acme<app").is_ok(), "id match");
         assert!(
-            resolve_room(&rooms, "project:acme-app~0123456789abcdef").is_some(),
-            "id match"
+            resolve_room(&rooms, "project:acmeapp").is_ok(),
+            "label match for a sanitized auto-room name"
         );
-        assert!(
-            resolve_room(&rooms, "project:acme-app").is_some(),
-            "name match for a fingerprinted auto-room id"
-        );
-        assert!(resolve_room(&rooms, "nobody").is_none());
+        assert!(matches!(
+            resolve_room(&rooms, "nobody"),
+            Err(RoomLookupError::Unknown)
+        ));
 
         // An id match wins over a name match when both could apply.
         let rooms = vec![
@@ -522,8 +510,14 @@ mod tests {
                 created_at: 0,
             }),
         ];
-        assert_eq!(resolve_room(&rooms, "design").unwrap().id.0.as_ref(), "design");
-        assert_eq!(resolve_room(&rooms, "other").unwrap().id.0.as_ref(), "other");
+        assert_eq!(
+            resolve_room(&rooms, "design").unwrap().id.0.as_ref(),
+            "design"
+        );
+        assert_eq!(
+            resolve_room(&rooms, "other").unwrap().id.0.as_ref(),
+            "other"
+        );
     }
 
     #[test]

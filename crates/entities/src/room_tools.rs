@@ -19,7 +19,10 @@ use myko::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    room::{GetAllRooms, Room, RoomId, RoomKind, resolve_room, validate_room_description, validate_room_name},
+    room::{
+        GetAllRooms, Room, RoomId, RoomKind, render_room_name, resolve_room,
+        validate_room_description, validate_room_name,
+    },
     room_member::{GetAllRoomMembers, RoomMember, RoomMemberId},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
@@ -139,7 +142,7 @@ impl CommandHandler for JoinRoom {
 
         Ok(JoinRoomResult {
             room_id: room.id.clone(),
-            name: room.name.clone(),
+            name: render_room_name(&room.name),
             joined,
             created,
         })
@@ -150,8 +153,7 @@ impl CommandHandler for JoinRoom {
 
 #[myko_command(LeaveRoomResult)]
 pub struct LeaveRoom {
-    /// Either a `room_id` (preferred) or the original room name —
-    /// the server tries id-match first, then name-match.
+    /// A room ID or an unambiguous display label.
     pub room: String,
 
     /// Self-identified caller for connectionless paths (HTTP-MCP agents).
@@ -182,20 +184,14 @@ impl CommandHandler for LeaveRoom {
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
 
-        let room = resolve_room(&rooms, &self.room)
-            .ok_or_else(|| err(&ctx, &format!("no room matching '{}'", self.room)))?
-            .clone();
+        let room = resolve_room(&rooms, &self.room).map_err(|error| err(&ctx, error.message()))?;
 
         // Auto-rooms aren't user-leavable — their membership is
         // recomputed by the AutoRoomSaga from the session's identity.
         if !matches!(room.kind, RoomKind::Adhoc) {
             return Err(err(
                 &ctx,
-                &format!(
-                    "room '{}' is an auto-room ({:?}); membership is derived from your session's identity",
-                    room.id.0.as_ref(),
-                    room.kind,
-                ),
+                "cannot leave an auto-room because membership is derived from your session identity",
             ));
         }
 
