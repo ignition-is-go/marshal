@@ -33,7 +33,7 @@ Tools (`tools/call`):
 
 - `send_message(to, body)` — send to a peer by `session_id`
 - `broadcast(to_room, body)` — fan-out to every member of a room
-- `join_room(room)` / `leave_room(room)` — create/join or leave an ad-hoc room
+- `join_room(name, description?)` / `leave_room(room)` — create/join or leave an ad-hoc room (names: at most 64 characters; `<`, `>` and the listed lookalike angle brackets, `&`, `"`, backtick, control characters, line separators, bidi controls, and a blocklist of the invisible and formatting characters known to hide text are rejected; see the main README for the full list)
 - `set_status(text)` — set the free-form `current_task` text shown on the roster
 - `ack_messages(message_ids)` — mark messages read for this session
 

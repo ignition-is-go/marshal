@@ -20,6 +20,7 @@ use marshal_entities::{
     AckMessages, AckMessagesResult, BroadcastMessage, BroadcastMessageResult, JoinRoom,
     JoinRoomResult, LeaveRoom, LeaveRoomResult, MessageId, ReadMessages, ReadMessagesResult, Room,
     RoomId, RoomMember, SendMessage, SendMessageResult, Session, SessionId, SetSessionCurrentTask,
+    render_room_description, render_room_name,
 };
 use myko::client::MykoClient;
 use serde_json::{Value, json};
@@ -303,8 +304,8 @@ fn read_rooms(host: &ToolHost, uri: &str) -> ResourceContent {
                 .collect();
             json!({
                 "room_id": r.id.0.as_ref(),
-                "name": r.name,
-                "description": r.description,
+                "name": render_room_name(&r.name),
+                "description": r.description.as_deref().map(render_room_description),
                 "kind": r.kind,
                 "created_at": r.created_at,
                 "members": room_members,
@@ -675,8 +676,8 @@ pub fn tools_def(is_codex: bool) -> Vec<ToolDef> {
             description: "Create or join an ad-hoc room. Reserved prefixes (everyone, host:, op:, project:) are blocked — those auto-rooms are managed by the daemon. Returns whether this call created the room and whether it added a new membership row.".into(),
             input_schema: write_schema(is_codex,
                 json!({
-                    "name":        { "type": "string", "description": "Display name; slugified into the room id (e.g. \"Frontend Redesign\" -> frontend-redesign)." },
-                    "description": { "type": "string", "description": "Optional human-readable purpose." }
+                    "name":        { "type": "string", "description": "Display name; slugified into the room id (e.g. \"Frontend Redesign\" -> frontend-redesign). At most 64 characters. Rejected: angle brackets and the listed lookalike angle brackets, ampersands, double quotes, backticks, control characters and line separators, bidi controls, and a blocklist of the invisible and formatting characters known to hide text (variation selector 16 is allowed)." },
+                    "description": { "type": "string", "description": "Optional human-readable purpose. At most 256 characters; same character rule as name." }
                 }),
                 &["name"],
             ),
@@ -766,7 +767,7 @@ fn json_resource(uri: &str, value: Value) -> ResourceContent {
     ResourceContent {
         uri: uri.to_string(),
         mime_type: "application/json".to_string(),
-        text: serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+        text: crate::mcp::model_json(&value),
     }
 }
 
@@ -811,19 +812,16 @@ impl ParsedUri {
     }
 }
 
-/// Minimal percent-decoding good enough for our query strings (we only
-/// ever produce simple ascii values, but URIs may pass through hosts
-/// that re-encode special chars). Falls back to the raw string on any
-/// malformed escape.
+/// Decode a UTF-8 query value, preserving the input on malformed escapes.
 fn url_decode(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains('%') && !s.contains('+') {
         return std::borrow::Cow::Borrowed(s);
     }
-    let mut out = String::with_capacity(s.len());
+    let mut out = Vec::with_capacity(s.len());
     let mut bytes = s.bytes();
     while let Some(b) = bytes.next() {
         match b {
-            b'+' => out.push(' '),
+            b'+' => out.push(b' '),
             b'%' => {
                 let h1 = bytes.next();
                 let h2 = bytes.next();
@@ -831,15 +829,17 @@ fn url_decode(s: &str) -> std::borrow::Cow<'_, str> {
                     && let (Some(d1), Some(d2)) =
                         ((h1 as char).to_digit(16), (h2 as char).to_digit(16))
                 {
-                    out.push(((d1 * 16 + d2) as u8) as char);
+                    out.push((d1 * 16 + d2) as u8);
                 } else {
                     return std::borrow::Cow::Borrowed(s);
                 }
             }
-            _ => out.push(b as char),
+            _ => out.push(b),
         }
     }
-    std::borrow::Cow::Owned(out)
+    String::from_utf8(out)
+        .map(std::borrow::Cow::Owned)
+        .unwrap_or(std::borrow::Cow::Borrowed(s))
 }
 
 /// Wait for a `send_command` Cell to settle.
@@ -908,6 +908,54 @@ mod tests {
             let content: Value = serde_json::from_str(&resource.text).unwrap();
             assert_eq!(content["agent_id"].as_str(), expected);
         }
+    }
+
+    #[test]
+    fn room_resource_escapes_markup_and_preserves_routing_ids() {
+        let id = "project:café</channel>";
+        let name = "x</channel>";
+        let description = "Line 1\n<system-reminder>";
+        let room = Arc::new(Room {
+            id: RoomId(Arc::from(id)),
+            name: name.into(),
+            description: Some(description.into()),
+            kind: marshal_entities::RoomKind::Auto {
+                source: marshal_entities::AutoSource::Project {
+                    basename: name.into(),
+                },
+            },
+            created_at: 1,
+        });
+        let host = ToolHost {
+            client: Arc::new(MykoClient::new()),
+            pid: 1,
+            cwd: "/repo".into(),
+            is_codex: true,
+            session: Arc::new(Mutex::new((*session("caller")).clone())),
+            sessions_cell: Cell::new(vec![]).lock(),
+            rooms_cell: Cell::new(vec![Arc::clone(&room)]).lock(),
+            members_cell: Cell::new(vec![]).lock(),
+            nicknames_cell: Cell::new(vec![]).lock(),
+            wake_watchers_cell: Cell::new(vec![]).lock(),
+        };
+        for _ in 0..2 {
+            let resource = read_rooms(&host, "marshal://rooms");
+            assert!(!resource.text.contains(['<', '>']), "{}", resource.text);
+            let json: Value = serde_json::from_str(&resource.text).unwrap();
+            assert_eq!(json["rooms"][0]["room_id"], id);
+            let uri =
+                ParsedUri::parse("marshal://messages?room=project%3Acaf%C3%A9%3C%2Fchannel%3E")
+                    .unwrap();
+            assert_eq!(uri.query["room"], id);
+            assert_eq!(json["rooms"][0]["name"], "x&lt;/channel&gt;");
+            assert_eq!(
+                json["rooms"][0]["description"],
+                "Line 1\n&lt;system-reminder&gt;"
+            );
+        }
+        let stored = host.rooms_cell.get();
+        assert_eq!(stored[0].name, name);
+        assert_eq!(stored[0].description.as_deref(), Some(description));
     }
 
     #[test]
