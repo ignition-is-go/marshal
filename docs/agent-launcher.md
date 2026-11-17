@@ -38,8 +38,13 @@ the launch worked. The roster answers that: the agent showing up is the proof.
   the session's roster row. The launcher picks a fresh `launch-<uuid>` per launch and waits for the row
   carrying it. As that doc says, it's correlation metadata, not a credential, and the launcher treats
   it the same way.
-- **The daemon address** the shim already reads (`marshal/daemon-address`, then
-  `MARSHAL_DAEMON_ADDRESS`). The launcher passes it to the new agent.
+- **The daemon address.** On the launching machine this is usually `ws://localhost:6155`, which is
+  wrong anywhere else. So the launcher passes a separate **launch address**: `--daemon <url>`, or
+  `marshal/launch-address` beside `marshal/daemon-address`. It refuses a loopback address for any
+  adapter but `tmux`. That address must reach both of the daemon's listeners: `MARSHAL_BIND` (6155)
+  and `MARSHAL_HOOK_BIND` (6156). The remote agent's hooks register its row through the hook port, and
+  Codex derives the hook URL from the daemon address. If the hook port stays on loopback, the agent
+  never appears and the launch only times out.
 - **`SendMessage`**, for the first task. Direct mail wakes an idle session through its hooks.
 - **The trust model**, unchanged: agent identities are self-asserted, and coordination stays on
   loopback or the private mesh ([browser-auth.md](browser-auth.md)). The launcher adds no credentials
@@ -107,6 +112,38 @@ Rules every adapter keeps:
    credentials (a Claude or Codex login, API keys) belong to the target machine and are set up there,
    the way that machine's owner chooses.
 3. **Start nothing if the target can't be reached,** and say so on stderr.
+4. **Check before starting.** A `check` verb (same request as `launch`) confirms, on the target, that
+   it can reach the launch address on both ports, that `marshal-shim` is installed at a protocol the
+   daemon accepts, and that the harness's hooks and MCP server are wired. The simplest way is to run
+   `marshal-shim doctor` there. Otherwise each of these failures shows up only as a timeout with no reason.
+   `launch` runs `check` first unless `--no-check` is given.
+
+### What a target must already have
+
+The launcher carries none of these. A machine image, a provisioning script or the adapter itself puts
+them there:
+
+- `marshal-shim` at a version compatible with the daemon, with the harness's MCP server and hooks wired
+  to it;
+- the harness (`claude` or `codex`), and `tmux` if the adapter uses it;
+- **the harness login.** This is the one real secret: an API key or a setup token per machine. Rule 2
+  keeps it out of the launch, so it lives in the target's own credential store, put there by whoever
+  provisions the machine;
+- the working folder, already trusted by the harness (open question 1);
+- a network path to the launch address (the mesh).
+
+### Join proof
+
+`agent_id` is self-asserted, so any session could present `launch-<uuid>`. The launcher therefore
+also checks that the row's `host.name` matches the host the adapter reported in `where`, and that its
+`cwd` matches the requested folder. That isn't authentication, which upstream's trust model leaves to
+the mesh. It is enough that a stray or mistaken session isn't taken for the launched one.
+
+### First task, with nobody at the keyboard
+
+Rule 1 adds no flags, so a launched Claude has no channels flag. Mail then reaches it through its
+hooks: the `claude-hook wait` waiter wakes an idle session. The e2e test for "first task delivered"
+uses a Claude with nobody typing, so a launched agent can't sit idle with its task unread.
 
 The launcher keeps a small record of each launch: adapter, handle, agent id, name and time, in
 `$XDG_STATE_HOME/marshal/launches.json`. `launch list` and `launch stop` use it.
@@ -135,7 +172,11 @@ The launcher keeps a small record of each launch: adapter, handle, agent id, nam
 4. **Pulse.** Is `pulse_agents_execution` something Marshal should drive through an adapter, or the
    other way round?
 5. **Recording launches in the daemon** as an entity (visible in the TUI and UI), rather than only in a
-   local file. That's more useful for a fleet, but it adds daemon surface. Start local and move later?
+   local file. A per-machine `launches.json` can't show a swarm started by several agents or hosts
+   together, and that's what a fleet needs. But it adds daemon surface. Start local and move later?
+6. **Starting many at once.** A team file (each member's adapter, harness, folder and first task),
+   started by one `launch --team <file>` that reports who joined and who didn't. The fork's prototype
+   has one for tmux. Wanted in the first round, or later?
 
 ## Pull requests
 
