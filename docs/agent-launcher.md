@@ -21,9 +21,9 @@ the launch worked. The roster answers that: the agent showing up is the proof.
 
 ```
  operator or agent
-        │  marshal-shim launch ssh claude --host build-03 --cwd ~/work/app --task "..."
+        │  marshal-launch ssh claude --host build-03 --cwd ~/work/app --task "..."
         ▼
- ┌─────────────── launcher (marshal-shim) ───────────────┐
+ ┌────────────── launcher (marshal-launch) ──────────────┐
  │ 1. agent_id = launch-<uuid>                            │
  │ 2. env = MARSHAL_DAEMON_ADDRESS, MARSHAL_AGENT_ID, ... │
  │ 3. hand {harness, cwd, env} to the adapter ────────────┼──► marshal-launch-ssh ──► build-03:
@@ -51,23 +51,30 @@ the launch worked. The roster answers that: the agent showing up is the proof.
   and no new listener. A remote agent can join only if the machine it lands on can reach the daemon
   over the mesh. Making sure of that is the adapter's (or the machine's) job, not Marshal's.
 
-## Commands
+## Where it lives: its own binary, not the shim
+
+The shim is the agent's side of Marshal, and it should stay that way (see the review on #168). It also
+shouldn't give an agent a second way to send messages besides its MCP tool. So the launcher is a
+separate crate and binary, **`marshal-launch`**, a Myko client like the TUI. It reads the roster and
+sends the first task over its own connection. It is labelled as the launcher, so the task never looks
+as if it came from the agent's own tools. An agent that may launch others runs `marshal-launch` as it
+runs any program. Marshal grants it nothing more. A later TUI view can call the same library.
 
 ```
-marshal-shim launch <adapter> <harness> [--cwd <dir>] [--name <label>] [--task <text>]
-                    [--timeout <secs>] [-- <adapter options>]
-marshal-shim launch list                    # what was launched, its adapter, and roster state
-marshal-shim launch stop <name|agent_id>    # ask the adapter to stop it; the row clears on exit
-marshal-shim tell <session|nickname> <text> # send a direct message from a terminal
+marshal-launch <adapter> <harness> [--cwd <dir>] [--name <label>] [--task <text>]
+               [--daemon <url>] [--timeout <secs>] [-- <adapter options>]
+marshal-launch list                    # what was launched, its adapter, and roster state
+marshal-launch stop <name|agent_id>    # ask the adapter to stop it; the row clears on exit
 ```
 
 - `<harness>` is `claude` or `codex` to start (Codex through `codex-run`, for live wakes). Other
   harnesses (OpenCode, Pi, Prime Agent) come later, as each gains a way to start it from a command line.
-- `launch` exits 0 and prints the session id and nickname once the agent joins. If the adapter fails or
-  the timeout passes, it exits nonzero and says which. It also says what may still be running, and how
-  to stop it.
-- `tell` is new and is used by `launch --task`. It is useful on its own for scripts and operators, who
-  have no MCP client.
+- It exits 0 and prints the session id and nickname once the agent joins. If the adapter fails or the
+  timeout passes, it exits nonzero and says which. It also says what may still be running, and how to
+  stop it.
+- The first task is one direct message to the joined session's id, sent under a short-lived session of
+  kind `launcher`, and its body says who launched the agent. This is the only message `marshal-launch`
+  sends. It has no general `tell`.
 
 ## The adapter contract
 
@@ -113,10 +120,11 @@ Rules every adapter keeps:
    the way that machine's owner chooses.
 3. **Start nothing if the target can't be reached,** and say so on stderr.
 4. **Check before starting.** A `check` verb (same request as `launch`) confirms, on the target, that
-   it can reach the launch address on both ports, that `marshal-shim` is installed at a protocol the
-   daemon accepts, and that the harness's hooks and MCP server are wired. The simplest way is to run
-   `marshal-shim doctor` there. Otherwise each of these failures shows up only as a timeout with no reason.
-   `launch` runs `check` first unless `--no-check` is given.
+   it can reach the launch address on both ports, that `marshal-shim --version` there is one the daemon
+   accepts, and that the harness's hooks and MCP server point at `marshal-shim`. The adapter runs
+   these checks over its own channel (ssh, the VM agent, the container exec). Otherwise each of these
+   failures shows up only as a timeout with no reason. `launch` runs `check` first unless `--no-check`
+   is given. Upstream has no `doctor` subcommand. If one is added later, `check` can call it instead.
 
 ### What a target must already have
 
@@ -145,7 +153,7 @@ Rule 1 adds no flags, so a launched Claude has no channels flag. Mail then reach
 hooks: the `claude-hook wait` waiter wakes an idle session. The e2e test for "first task delivered"
 uses a Claude with nobody typing, so a launched agent can't sit idle with its task unread.
 
-The launcher keeps a small record of each launch: adapter, handle, agent id, name and time, in
+`marshal-launch` keeps a small record of each launch: adapter, handle, agent id, name and time, in
 `$XDG_STATE_HOME/marshal/launches.json`. `launch list` and `launch stop` use it.
 
 ## Adapters
@@ -164,7 +172,7 @@ The launcher keeps a small record of each launch: adapter, handle, agent id, nam
    folder whether to trust it, and that prompt is a safety feature. The proposal says the target
    machine's owner pre-trusts the working folder there, using the harness's own settings, and the
    launcher never bypasses the prompt. Is that acceptable, or does the fleet need something else?
-2. **Who may launch.** Any agent that can run `marshal-shim` could launch more agents. Should launching
+2. **Who may launch.** Any agent that can run `marshal-launch` could launch more agents. Should launching
    be limited (operator only, a cap on concurrent launches, an allow-list of adapters)? If so, where:
    the launcher, or a daemon-side record?
 3. **Cleanup and cost.** VMs that outlive their agent cost money. Should the launcher stop the target
@@ -181,7 +189,7 @@ The launcher keeps a small record of each launch: adapter, handle, agent id, nam
 ## Pull requests
 
 1. This document, for discussion.
-2. `marshal-shim tell`, then `launch` with the built-in `tmux` adapter, `launch list | stop`, and e2e
+2. The `marshal-launch` crate with the built-in `tmux` adapter, `list | stop`, and e2e
    tests against an in-process daemon: launch, join by `agent_id`, first task delivered, stop clears the
    row, an unreachable daemon starts nothing.
 3. The adapter contract (`marshal-launch-<name>` discovery, request/response v1), with a fake adapter in
