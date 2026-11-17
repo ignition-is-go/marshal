@@ -120,8 +120,9 @@ harness was started in. The launcher matches both against the joined row (see Jo
 optional. Exit nonzero with a message on stderr if nothing was started.
 
 **`stop`** — request `{"version": 1, "handle": "…"}`. **`status`** (optional) — request
-`{"version": 1, "handle": "…"}`, response `{"running": true|false}`. It lets `launch list` tell "exited
-before joining" from "still starting".
+`{"version": 1, "handle": "…"}`, response `{"running": true|false}`. It lets `marshal-launch list` tell "exited
+before joining" from "still starting". An adapter without `status` exits 2 for it, which the launcher
+reads as "unknown", not as an error. Any other nonzero exit is an error.
 
 Rules every adapter keeps:
 
