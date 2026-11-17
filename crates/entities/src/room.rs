@@ -247,19 +247,6 @@ fn validate_room_text(field: &str, text: &str, max_chars: usize) -> Result<(), S
     Ok(())
 }
 
-/// Make a room name from text the daemon derives rather than asks for:
-/// drop every forbidden character and keep at most [`ROOM_NAME_MAX_CHARS`]
-/// characters. Never fails; the result can be empty.
-pub fn sanitize_room_name(raw: &str) -> String {
-    sanitize_room_text(raw, ROOM_NAME_MAX_CHARS)
-}
-
-/// The description counterpart of [`sanitize_room_name`], capped at
-/// [`ROOM_DESCRIPTION_MAX_CHARS`].
-pub fn sanitize_room_description(raw: &str) -> String {
-    sanitize_room_text(raw, ROOM_DESCRIPTION_MAX_CHARS)
-}
-
 /// Drop every forbidden character from `raw` and keep at most `max_chars`
 /// characters (Unicode scalar values). For callers that compose a name from
 /// parts, such as an auto-room prefix plus a value.
@@ -427,10 +414,15 @@ mod tests {
 
     #[test]
     fn sanitize_room_name_drops_forbidden_and_caps_characters() {
-        assert_eq!(sanitize_room_name("project:a<b>\n"), "project:ab");
+        assert_eq!(
+            sanitize_room_text("project:a<b>\n", ROOM_NAME_MAX_CHARS),
+            "project:ab"
+        );
         let long = "é".repeat(ROOM_NAME_MAX_CHARS + 5);
         assert_eq!(
-            sanitize_room_name(&long).chars().count(),
+            sanitize_room_text(&long, ROOM_NAME_MAX_CHARS)
+                .chars()
+                .count(),
             ROOM_NAME_MAX_CHARS
         );
     }

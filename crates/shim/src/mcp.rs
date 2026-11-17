@@ -681,8 +681,8 @@ pub(crate) fn model_json(value: &Value) -> String {
     // JSON escapes keep room IDs usable without emitting literal markup.
     serde_json::to_string_pretty(value)
         .unwrap_or_else(|_| value.to_string())
-        .replace('<', r"<")
-        .replace('>', r">")
+        .replace('<', r"\u003c")
+        .replace('>', r"\u003e")
 }
 
 fn tool_outcome_to_result(outcome: ToolOutcome) -> Value {
