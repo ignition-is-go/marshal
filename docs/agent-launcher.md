@@ -95,6 +95,7 @@ object from stdout. Anything written to stderr is shown to the user.
   "cwd": "~/work/app",
   "name": "claude-app",
   "agent_id": "launch-6f1c…",
+  "marshal_version": "0.60.2",
   "env": { "MARSHAL_DAEMON_ADDRESS": "ws://marshal.mesh:6155", "MARSHAL_AGENT_ID": "launch-6f1c…",
            "MARSHAL_OPERATOR": "…" },
   "options": ["--host", "build-03"]
@@ -133,8 +134,9 @@ Rules every adapter keeps:
    the way that machine's owner chooses.
 3. **Start nothing if the target can't be reached,** and say so on stderr.
 4. **Check before starting.** A `check` verb (same request as `launch`) confirms, on the target, that
-   it can reach the launch address on both ports, that `marshal-shim --version` there is one the daemon
-   accepts, and that the harness's hooks and MCP server point at `marshal-shim`. The adapter runs
+   it can reach the launch address on both ports, that `marshal-shim --version` there has the same
+   major.minor as the request's `marshal_version` (the launcher's own; Marshal releases every crate at
+   one version, and upstream has no other rule for what a daemon accepts), and that the harness's hooks and MCP server point at `marshal-shim`. The adapter runs
    these checks over its own channel (ssh, the VM agent, the container exec). Otherwise each of these
    failures shows up only as a timeout with no reason. `launch` runs `check` first unless `--no-check`
    is given. Upstream has no `doctor` subcommand. If one is added later, `check` can call it instead.
