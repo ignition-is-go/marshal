@@ -1,0 +1,48 @@
+#!/bin/sh
+# A fake marshal-launch adapter for the launcher's tests (contract v1).
+# It starts nothing. What it does is chosen by the request:
+#   check/launch: an option `--fail=<reason>` in the request's options;
+#   stop/status:  the handle (`fake-ok`, `fake-gone`, `fake-no-status`, or
+#                 `fake-fail=<reason>`).
+# `--log=<file>` (check/launch) appends "<verb> <request>" to <file>.
+verb=${1:-}
+req=$(cat)
+opt() { printf '%s' "$req" | grep -o "\"--$1=[^\"]*\"" | head -n 1 | sed "s/^\"--$1=//; s/\"\$//"; }
+log=$(opt log)
+[ -n "$log" ] && printf '%s %s\n' "$verb" "$req" >> "$log"
+reason=$(opt fail)
+case "$verb" in stop|status)
+  handle=$(printf '%s' "$req" | grep -o '"handle":"[^"]*"' | sed 's/^"handle":"//; s/"$//')
+  case "$handle" in fake-fail=*) reason=${handle#fake-fail=} ;; esac
+;; esac
+
+fail() { echo "$1" >&2; exit "${2:-1}"; }
+# An adapter without a status verb, as the contract allows.
+[ "$verb" = status ] && [ "${handle:-}" = fake-no-status ] && fail "unknown verb status" 2
+case "$reason" in
+  "") ;;
+  unreachable) fail "can't reach fake-host: No route to host; nothing was started" ;;
+  daemon-port) fail "fake-host can't reach the daemon at marshal.mesh:6155 (the launch address)" ;;
+  hook-port) fail "fake-host can't reach the daemon's hook port at marshal.mesh:6156" ;;
+  shim-version) fail "on fake-host: the target's marshal-shim is 0.1.0, but this launcher is 0.60.2" ;;
+  daemon-address) fail "fake-host has ~/.config/marshal/daemon-address naming ws://elsewhere:6155; the shim reads that file ahead of MARSHAL_DAEMON_ADDRESS" ;;
+  hooks) fail "Claude's hooks on fake-host don't run \`marshal-shim claude-hook\`" ;;
+  mcp) fail "Claude's MCP server on fake-host is not marshal-shim" ;;
+  silent) exit 3 ;;
+  killed) kill -9 $$ ;;
+  not-json) echo "started it, probably"; exit 0 ;;
+  not-object) echo '[1,2]'; exit 0 ;;
+  wrong-version) echo '{"version":2,"handle":"h","host":"fake-host","cwd":"/w","where":"x"}'; exit 0 ;;
+  no-host) echo '{"version":1,"handle":"h","cwd":"/w","where":"x"}'; exit 0 ;;
+  *) fail "fake adapter: unknown --fail=$reason" 4 ;;
+esac
+
+echo "fake adapter: $verb ok" >&2
+case "$verb" in
+  check) echo '{"version":1}' ;;
+  launch) echo '{"version":1,"handle":"fake-ok","host":"fake-host","cwd":"/work/app","where":"fake-host fake:app","attach":"true"}' ;;
+  stop) echo '{"version":1}' ;;
+  status)
+    case "$handle" in fake-gone) echo '{"version":1,"running":false}' ;; *) echo '{"version":1,"running":true}' ;; esac ;;
+  *) fail "usage: marshal-launch-fake <check|launch|stop|status>" 2 ;;
+esac

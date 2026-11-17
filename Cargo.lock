@@ -3317,6 +3317,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "marshal-launch"
+version = "0.60.2"
+dependencies = [
+ "anyhow",
+ "gethostname",
+ "hyphae",
+ "marshal-entities",
+ "myko",
+ "myko-server",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "marshal-launch-ssh"
+version = "0.60.2"
+dependencies = [
+ "anyhow",
+ "marshal-launch",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "marshal-shim"
 version = "0.60.2"
 dependencies = [

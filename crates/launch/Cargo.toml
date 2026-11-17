@@ -1,0 +1,37 @@
+[package]
+name = "marshal-launch"
+version = "0.60.2"
+edition.workspace = true
+license.workspace = true
+description = "Start a coding agent anywhere through a pluggable adapter, and wait for it to join the marshal roster."
+repository = "https://github.com/ignition-is-go/marshal"
+keywords = ["marshal", "agent", "launcher", "tmux", "myko"]
+categories = ["command-line-utilities"]
+# doc_contract.rs reads docs/agent-launcher.md from outside the crate, so it
+# runs in the workspace only and stays out of the published package.
+exclude = ["tests/doc_contract.rs"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "marshal-launch"
+path = "src/main.rs"
+
+[package.metadata.flux]
+tasks = ["check", "build", "test", "lint", "publish"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+tokio = { workspace = true }
+myko = { workspace = true }
+hyphae = { workspace = true }
+marshal-entities = { workspace = true }
+gethostname = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+myko-server = { workspace = true }
+tempfile = "3"

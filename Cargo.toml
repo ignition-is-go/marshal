@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/entities", "crates/daemon", "crates/shim", "crates/tui", "crates/ui"]
+members = ["crates/entities", "crates/daemon", "crates/launch", "crates/launch-ssh", "crates/shim", "crates/tui", "crates/ui"]
 
 [workspace.package]
 version = "0.49.5"
@@ -46,3 +46,4 @@ hyphae = "3.1.2"
 # alias). Source code uses `use marshal_entities::...` — the auto
 # dash→underscore conversion Rust applies to crate names.
 marshal-entities = { path = "crates/entities", version = "0.60.2" }
+marshal-launch = { path = "crates/launch", version = "0.60.2" }
