@@ -1,0 +1,41 @@
+name: Private Cargo dependencies
+description: Read Marshal's pinned private Git dependencies with a job-scoped token.
+inputs:
+  app-id:
+    required: true
+    description: Source-reading GitHub App ID
+  private-key:
+    required: true
+    description: Source-reading GitHub App private key
+runs:
+  using: composite
+  steps:
+    - id: source
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ignition-is-go
+        repositories: |
+          css-styled
+          mullion
+          pulse-multi-user
+          pulse-leptos-ui
+        permission-contents: read
+    - shell: bash
+      env:
+        SOURCE_TOKEN: ${{ steps.source.outputs.token }}
+      run: |
+        set -euo pipefail
+        authorization=$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 | tr -d '\r\n')
+        echo "::add-mask::$authorization"
+        {
+          echo 'CARGO_NET_GIT_FETCH_WITH_CLI=true'
+          echo 'GIT_CONFIG_COUNT=4'
+          index=0
+          for repository in css-styled mullion pulse-multi-user pulse-leptos-ui; do
+            printf 'GIT_CONFIG_KEY_%s=http.https://github.com/ignition-is-go/%s.git.extraheader\n' "$index" "$repository"
+            printf 'GIT_CONFIG_VALUE_%s=AUTHORIZATION: basic %s\n' "$index" "$authorization"
+            index=$((index + 1))
+          done
+        } >> "$GITHUB_ENV"

@@ -1,0 +1,13 @@
+{
+  "name": "marshal-browser-verification",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "verify": "bun build legacy-client.mjs --target=node --format=esm --outfile=artifacts/legacy-client.mjs && node verify.mjs"
+  },
+  "devDependencies": {
+    "@myko/core": "6.11.5",
+    "@playwright/test": "1.60.0",
+    "cbor-x": "1.6.3"
+  }
+}

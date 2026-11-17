@@ -28,6 +28,7 @@ use crate::{
 };
 
 #[myko_command(ReadMessagesResult)]
+#[myko_public]
 pub struct ReadMessages {
     /// Filter to messages addressed to a room ID or unambiguous display label.
     #[serde(default, skip_serializing_if = "Option::is_none")]

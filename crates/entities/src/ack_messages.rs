@@ -22,6 +22,7 @@ use crate::{
 };
 
 #[myko_command(AckMessagesResult)]
+#[myko_public]
 pub struct AckMessages {
     /// Messages to mark read. Order doesn't matter; missing/unknown
     /// ids are silently skipped (idempotent — re-acking is fine).

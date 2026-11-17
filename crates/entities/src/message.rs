@@ -94,6 +94,7 @@ pub fn truncated_notice(message_id: &str) -> String {
 /// the source of consistency drift after rename/disconnect; with
 /// session_id as the sole stored identity there is nothing to drift.
 #[myko_item]
+#[myko_public_queries(all)]
 pub struct Message {
     /// Sender's session id. NOT a `belongs_to(Session)` cascade: a sent
     /// message must survive the sender exiting so the recipient can still

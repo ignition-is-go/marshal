@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import unittest
+import tomllib
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/release.yml"
@@ -10,6 +11,21 @@ class ReleaseDispatchContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.workflow = WORKFLOW.read_text()
+
+    def test_registry_packages_do_not_depend_on_private_git_packages(self) -> None:
+        root = WORKFLOW.parents[2]
+        workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["dependencies"]
+        for manifest in (root / "crates").glob("*/Cargo.toml"):
+            data = tomllib.loads(manifest.read_text())
+            package = data["package"]
+            if "publish" not in package.get("metadata", {}).get("flux", {}).get("tasks", []):
+                continue
+            self.assertIsNot(package.get("publish"), False, str(manifest))
+            for name, spec in data.get("dependencies", {}).items():
+                if isinstance(spec, dict) and spec.get("workspace"):
+                    spec = workspace[name]
+                if isinstance(spec, dict) and "git" in spec:
+                    self.fail(f"{package['name']} cannot publish Git dependency {name} to crates.io")
 
     def test_dispatch_waits_for_every_release_producer(self) -> None:
         self.assertIn("needs: [release, publish-packages, build-macos]", self.workflow)

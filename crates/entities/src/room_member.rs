@@ -13,6 +13,7 @@ use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, Re
 use crate::{room::Room, session::Session};
 
 #[myko_item]
+#[myko_public_queries(all)]
 pub struct RoomMember {
     #[belongs_to(Room)]
     pub room_id: crate::room::RoomId,

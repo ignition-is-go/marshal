@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[myko_item]
+#[myko_public_queries(all)]
 pub struct Room {
     /// Display label. The room ID identifies the room even if another room has
     /// the same label.

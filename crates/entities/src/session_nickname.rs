@@ -19,6 +19,7 @@ use myko::myko_item;
 use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
 
 #[myko_item]
+#[myko_public_queries(all)]
 pub struct SessionNickname {
     /// The assigned `adjective-noun` handle, frozen for this session's life.
     /// The entity `id` is the session id it belongs to.

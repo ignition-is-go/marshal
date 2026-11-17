@@ -30,6 +30,7 @@ use crate::{
 // ─── JoinRoom ──────────────────────────────────────────────────────────
 
 #[myko_command(JoinRoomResult)]
+#[myko_public]
 pub struct JoinRoom {
     /// User-supplied display name. Slugified into the room id; rooms
     /// with reserved prefixes (`everyone`, `host:`, `op:`, `project:`)
@@ -152,6 +153,7 @@ impl CommandHandler for JoinRoom {
 // ─── LeaveRoom ─────────────────────────────────────────────────────────
 
 #[myko_command(LeaveRoomResult)]
+#[myko_public]
 pub struct LeaveRoom {
     /// A room ID or an unambiguous display label.
     pub room: String,
