@@ -44,7 +44,10 @@ the launch worked. The roster answers that: the agent showing up is the proof.
   adapter but `tmux`. That address must reach both of the daemon's listeners: `MARSHAL_BIND` (6155)
   and `MARSHAL_HOOK_BIND` (6156). The remote agent's hooks register its row through the hook port, and
   Codex derives the hook URL from the daemon address. If the hook port stays on loopback, the agent
-  never appears and the launch only times out.
+  never appears and the launch only times out. A daemon whose hook listener isn't on port 6156 of the launch address's
+  host (test ports, say) is named by `MARSHAL_BASE_URL`. The launcher passes that to every adapter
+  with the launch address, and refuses a loopback one for any adapter but `tmux`, as it does the launch
+  address.
 - **`SendMessage`**, for the first task. Direct mail wakes an idle session through its hooks.
 - **The trust model**, unchanged: agent identities are self-asserted, and coordination stays on
   loopback or the private mesh ([browser-auth.md](browser-auth.md)). The launcher adds no credentials
