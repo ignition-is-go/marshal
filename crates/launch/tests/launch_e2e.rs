@@ -145,7 +145,10 @@ fn launch_join_first_task_record_and_stop() {
     assert_eq!(outcome.agent_id, agent_id);
     assert_eq!(outcome.joined.session_id, "launched-agent");
     assert_eq!(outcome.launched.host, this_host());
-    assert_eq!(server.sessions(), [outcome.launched.handle.clone()]);
+    assert_eq!(
+        server.sessions().as_slice(),
+        std::slice::from_ref(&outcome.launched.handle)
+    );
     assert_eq!(outcome.launched.cwd, cwd.display().to_string());
 
     // The first task: one direct message, labelled, from a launcher row that's gone now.
