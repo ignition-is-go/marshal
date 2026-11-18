@@ -47,8 +47,10 @@ Eager registration uses the dedicated `/hook/session-register` endpoint. It
 only creates or refreshes the roster row; it never surfaces or acknowledges
 inbox messages because there is no model turn available to receive them.
 `SessionStart` injects identity/context for ordinary launches. Prompt and tool
-boundary hooks also refresh `<marshal_session>` from the hook's authoritative
-session id. A fork can inherit its parent's developer context without running
+boundary hooks also refresh `<marshal_session>` from the active thread ID. For
+spawned descendants, the shim reads `subagent.agent_id` from the hook payload.
+Root and older hooks without subagent metadata use `session_id`. A fork can
+inherit its parent's developer context without running
 `SessionStart`; the latest block explicitly supersedes that inherited identity.
 
 For outgoing MCP calls, the shim binds the caller from the host-provided

@@ -527,19 +527,14 @@ fn codex_fork_prompt_refreshes_identity_and_routes_reply_to_fork() {
     let peer_inbox = daemon.prompt_submit("peer");
     let fork_nick = marshal_entities::nickname("fork");
     assert!(peer_inbox.contains(&fork_nick), "{peer_inbox}");
-    daemon.send("peer", "fork", "fork reply");
-    assert!(
-        !daemon
-            .hook_for("prompt-submit", "parent", "codex")
-            .contains("fork reply")
-    );
-    let reply = daemon.hook_for("prompt-submit", "fork", "codex");
-    assert!(reply.contains("id=\"fork\""));
-    assert!(reply.contains("fork reply"));
     daemon.send("peer", "parent", "parent reply");
-    assert!(
-        daemon
-            .hook_for("prompt-submit", "parent", "codex")
-            .contains("parent reply")
-    );
+    daemon.send("peer", "fork", "fork reply");
+    let fork = daemon.hook_for("prompt-submit", "fork", "codex");
+    let parent = daemon.hook_for("prompt-submit", "parent", "codex");
+    assert!(fork.contains("id=\"fork\""), "{fork}");
+    assert!(fork.contains("fork reply"), "{fork}");
+    assert!(!fork.contains("parent reply"), "{fork}");
+    assert!(parent.contains("id=\"parent\""), "{parent}");
+    assert!(parent.contains("parent reply"), "{parent}");
+    assert!(!parent.contains("fork reply"), "{parent}");
 }
