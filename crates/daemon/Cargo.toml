@@ -1,6 +1,6 @@
 [package]
 name = "marshal-daemon"
-version = "0.60.4"
+version = "0.60.5"
 publish = false
 edition.workspace = true
 license.workspace = true
