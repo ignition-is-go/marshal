@@ -25,11 +25,7 @@ use marshal_entities::{
     GetAllSessions, HostInfo, Message, MessageId, MessageRead, MessageReadId, Session, SessionId,
 };
 use myko::prelude::EventPublishing as _;
-use myko::{
-    command::CommandContext,
-    request::RequestContext,
-    server::{MykoServerContext, Persister},
-};
+use myko::{command::CommandContext, request::RequestContext, server::MykoServerContext};
 use myko_server::{BlackholePersister, MykoServer};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -38,7 +34,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     task::JoinHandle,
 };
-use tokio_tungstenite::{accept_async, tungstenite::Message as WebSocketMessage};
+use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message as WebSocketMessage};
 
 const TEST_HOST: &str = "marshal-wake-canary";
 const POLL: Duration = Duration::from_millis(25);
@@ -48,16 +44,15 @@ const SHIM: &str = env!("CARGO_BIN_EXE_marshal-shim");
 struct CellHarness {
     address: String,
     ctx: Arc<MykoServerContext>,
-    shutdown: Option<std::sync::mpsc::Sender<()>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
 }
 
 impl CellHarness {
-    fn spawn() -> Self {
+    fn spawn(first_addr: SocketAddr) -> Self {
         marshal_entities::link();
-        let bind: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
         let join = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -65,31 +60,51 @@ impl CellHarness {
                 .build()
                 .expect("build cell runtime");
             runtime.block_on(async move {
-                let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
-                let server = Arc::new(
-                    MykoServer::builder()
+                let addresses = std::iter::once(first_addr)
+                    .chain(std::iter::repeat_with(candidate_addr))
+                    .take(5);
+                for bind in addresses {
+                    let server = MykoServer::builder()
                         .with_bind_addr(bind)
-                        .with_default_persister(blackhole)
-                        .build(),
-                );
-                ready_tx.send(server.ctx()).expect("publish cell context");
-                tokio::select! {
-                    result = server.run() => {
-                        result.expect("run test cell");
+                        .with_websocket_path("/myko")
+                        .with_default_persister(Arc::new(BlackholePersister))
+                        .build();
+                    let address = format!("ws://{bind}");
+                    let run = server.run();
+                    tokio::pin!(run);
+
+                    tokio::select! {
+                        biased;
+                        result = &mut run => {
+                            let error = result.expect_err("test cell stopped during startup");
+                            if error.downcast_ref::<io::Error>().is_some_and(|error| {
+                                error.kind() == io::ErrorKind::AddrInUse
+                            }) {
+                                continue;
+                            }
+                            panic!("run test cell: {error}");
+                        }
+                        () = wait_for_cell(&address) => {}
+                        _ = &mut shutdown_rx => return,
                     }
-                    _ = tokio::task::spawn_blocking(move || shutdown_rx.recv()) => {}
+
+                    ready_tx
+                        .send((address, server.ctx()))
+                        .expect("publish ready cell");
+                    tokio::select! {
+                        result = &mut run => result.expect("run test cell"),
+                        _ = &mut shutdown_rx => {}
+                    }
+                    return;
                 }
+                panic!("could not bind test cell after five attempts");
             });
         });
-        let ctx = Arc::new(
-            ready_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("cell context"),
-        );
+        let (address, ctx) = ready_rx.recv_timeout(WAIT).expect("ready cell");
 
         Self {
-            address: format!("ws://{bind}"),
-            ctx,
+            address,
+            ctx: Arc::new(ctx),
             shutdown: Some(shutdown_tx),
             join: Some(join),
         }
@@ -446,9 +461,23 @@ impl Drop for BridgeProcess {
     }
 }
 
-fn free_port() -> u16 {
+async fn wait_for_cell(address: &str) {
+    loop {
+        match connect_async(format!("{address}/myko")).await {
+            Ok(_) => return,
+            Err(tokio_tungstenite::tungstenite::Error::Io(error))
+                if error.kind() == io::ErrorKind::ConnectionRefused =>
+            {
+                tokio::time::sleep(POLL).await;
+            }
+            Err(error) => panic!("connect to test cell: {error}"),
+        }
+    }
+}
+
+fn candidate_addr() -> SocketAddr {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
-    listener.local_addr().expect("reserved address").port()
+    listener.local_addr().expect("candidate address")
 }
 
 fn internal_context(ctx: &Arc<MykoServerContext>) -> CommandContext {
@@ -543,7 +572,10 @@ async fn wait_until(label: &str, timeout: Duration, mut condition: impl FnMut() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unix_multi_process_bridge_elects_one_wake_leader_and_fails_over() {
     let temp = tempfile::tempdir().expect("test tempdir");
-    let cell = CellHarness::spawn();
+    let occupied = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind competing listener");
+    let cell = CellHarness::spawn(occupied.local_addr().expect("competing address"));
     let hooks = HookHarness::spawn(Arc::clone(&cell.ctx)).await;
     let app_server = FakeAppServer::spawn(&["unix-thread"]).await;
 
@@ -585,7 +617,7 @@ async fn unix_multi_process_bridge_elects_one_wake_leader_and_fails_over() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn windows_isolated_interactive_bridges_wake_only_their_own_threads() {
     let temp = tempfile::tempdir().expect("test tempdir");
-    let cell = CellHarness::spawn();
+    let cell = CellHarness::spawn(candidate_addr());
     let hooks = HookHarness::spawn(Arc::clone(&cell.ctx)).await;
     let first_app_server = FakeAppServer::spawn(&["windows-thread-a"]).await;
     let second_app_server = FakeAppServer::spawn(&["windows-thread-b"]).await;
