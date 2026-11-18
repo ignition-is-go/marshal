@@ -5,8 +5,8 @@
 //! the session is a member of them. The anchor kinds:
 //!
 //! - `everyone`              — singleton, every session always a member.
-//! - `op:<operator>`         — when `Session.operator` is populated.
-//! - `project:<basename>`    — when `Session.project` is populated
+//! - `op:<operator>`    — when `Session.operator` is populated.
+//! - `project:<basename>` — when `Session.project` is populated
 //!   (the shim resolves it from `git rev-parse --show-toplevel`).
 //!
 //! `host:<name>` is intentionally NOT an anchor. One agent per node made
@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use marshal_entities::{
-    AutoSource, GetAllRoomMembers, GetAllRooms, Room, RoomId, RoomKind, RoomMember, RoomMemberId,
-    Session,
+    AutoSource, GetAllRoomMembers, GetAllRooms, ROOM_NAME_MAX_CHARS, Room, RoomId, RoomKind,
+    RoomMember, RoomMemberId, Session, sanitize_room_text,
 };
 use myko::prelude::EventPublishing as _;
 use myko::{
@@ -98,20 +98,16 @@ impl CommandHandler for DispatchAutoRooms {
         if let Some(op) = session.operator.as_ref()
             && !op.is_empty()
         {
-            let id = format!("op:{op}");
-            anchors.push((
-                RoomId(Arc::from(id.as_str())),
-                id,
-                AutoSource::Operator { name: op.clone() },
-            ));
+            let (id, name) = anchor_room("op:", op);
+            anchors.push((id, name, AutoSource::Operator { name: op.clone() }));
         }
         if let Some(project) = session.project.as_ref()
             && !project.is_empty()
         {
-            let id = format!("project:{project}");
+            let (id, name) = anchor_room("project:", project);
             anchors.push((
-                RoomId(Arc::from(id.as_str())),
                 id,
+                name,
                 AutoSource::Project {
                     basename: project.clone(),
                 },
@@ -148,4 +144,13 @@ impl CommandHandler for DispatchAutoRooms {
 
         Ok(())
     }
+}
+
+fn anchor_room(prefix: &str, value: &str) -> (RoomId, String) {
+    let cap = ROOM_NAME_MAX_CHARS - prefix.chars().count();
+    let label = sanitize_room_text(value, cap);
+    (
+        RoomId(Arc::from(format!("{prefix}{value}"))),
+        format!("{prefix}{label}"),
+    )
 }

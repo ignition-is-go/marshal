@@ -19,7 +19,10 @@ use myko::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    room::{GetAllRooms, Room, RoomId, RoomKind},
+    room::{
+        GetAllRooms, Room, RoomId, RoomKind, render_room_name, resolve_room,
+        validate_room_description, validate_room_name,
+    },
     room_member::{GetAllRoomMembers, RoomMember, RoomMemberId},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
@@ -31,10 +34,14 @@ use crate::{
 pub struct JoinRoom {
     /// User-supplied display name. Slugified into the room id; rooms
     /// with reserved prefixes (`everyone`, `host:`, `op:`, `project:`)
-    /// are blocked so users can't shadow auto-rooms.
+    /// are blocked so users can't shadow auto-rooms. Rejected when it is
+    /// longer than `ROOM_NAME_MAX_CHARS` characters or contains a character
+    /// `is_forbidden_room_text_char` blocks; `FORBIDDEN_RANGES` in
+    /// `room.rs` is the exact list (see `validate_room_name`).
     pub name: String,
 
-    /// Optional human-readable purpose, surfaced in `list_rooms`.
+    /// Optional human-readable purpose, surfaced in `list_rooms`. Same
+    /// character rule as `name`, capped at `ROOM_DESCRIPTION_MAX_CHARS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
@@ -66,6 +73,13 @@ impl CommandHandler for JoinRoom {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
+        // The name and description reach other sessions' model context
+        // (the @mention push, marshal://rooms). Check them first, so no
+        // later error message quotes a name that failed the rule.
+        validate_room_name(&self.name).map_err(|e| err(&ctx, &e))?;
+        if let Some(description) = self.description.as_deref() {
+            validate_room_description(description).map_err(|e| err(&ctx, &e))?;
+        }
         if is_reserved_room_name(&self.name) {
             return Err(err(
                 &ctx,
@@ -129,7 +143,7 @@ impl CommandHandler for JoinRoom {
 
         Ok(JoinRoomResult {
             room_id: room.id.clone(),
-            name: room.name.clone(),
+            name: render_room_name(&room.name),
             joined,
             created,
         })
@@ -141,8 +155,7 @@ impl CommandHandler for JoinRoom {
 #[myko_command(LeaveRoomResult)]
 #[myko_public]
 pub struct LeaveRoom {
-    /// Either a `room_id` (preferred) or the original room name —
-    /// the server tries id-match first, then name-match.
+    /// A room ID or an unambiguous display label.
     pub room: String,
 
     /// Self-identified caller for connectionless paths (HTTP-MCP agents).
@@ -173,22 +186,14 @@ impl CommandHandler for LeaveRoom {
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
 
-        let room = rooms
-            .iter()
-            .find(|r| r.id.0.as_ref() == self.room || r.name == self.room)
-            .ok_or_else(|| err(&ctx, &format!("no room matching '{}'", self.room)))?
-            .clone();
+        let room = resolve_room(&rooms, &self.room).map_err(|error| err(&ctx, error.message()))?;
 
         // Auto-rooms aren't user-leavable — their membership is
         // recomputed by the AutoRoomSaga from the session's identity.
         if !matches!(room.kind, RoomKind::Adhoc) {
             return Err(err(
                 &ctx,
-                &format!(
-                    "room '{}' is an auto-room ({:?}); membership is derived from your session's identity",
-                    room.id.0.as_ref(),
-                    room.kind,
-                ),
+                "cannot leave an auto-room because membership is derived from your session identity",
             ));
         }
 

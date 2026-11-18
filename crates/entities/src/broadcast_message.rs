@@ -29,7 +29,7 @@ use uuid::Uuid;
 use crate::{
     message::{CONTEXT_BODY_MAX_CHARS, Message, MessageId, context_preview},
     message_read::{MessageRead, MessageReadId},
-    room::{GetAllRooms, Room, RoomId},
+    room::{GetAllRooms, Room, RoomId, render_room_name, resolve_room},
     room_member::{GetAllRoomMembers, RoomMember},
     session::{GetAllSessions, Session, SessionId, resolve_caller},
 };
@@ -100,21 +100,11 @@ impl CommandHandler for BroadcastMessage {
         let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
         let sender = resolve_caller(&ctx, &sessions, self.as_session.as_ref())?;
 
-        // Resolve room.
         let rooms: Vec<Arc<Room>> = ctx.exec_query(GetAllRooms {})?;
-        let room = rooms
-            .iter()
-            .find(|r| r.id == self.to_room_id)
-            .ok_or_else(|| {
-                err(
-                    &ctx,
-                    &format!(
-                        "no room with id '{}' on the roster",
-                        self.to_room_id.0.as_ref(),
-                    ),
-                )
-            })?
-            .clone();
+        let room = resolve_room(&rooms, self.to_room_id.0.as_ref())
+            .map_err(|error| err(&ctx, error.message()))?;
+
+        let room_label = render_room_name(&room.name);
 
         // Resolve recipient set: members of the room minus the sender.
         let memberships: Vec<Arc<RoomMember>> = ctx.exec_query(GetAllRoomMembers {})?;
@@ -125,13 +115,7 @@ impl CommandHandler for BroadcastMessage {
             .collect();
 
         if recipient_ids.is_empty() {
-            return Err(err(
-                &ctx,
-                &format!(
-                    "room '{}' has no other members — nothing to broadcast to",
-                    room.id.0.as_ref(),
-                ),
-            ));
+            return Err(err(&ctx, "room has no other members"));
         }
 
         // Persist the single Message row up-front so per-recipient
@@ -208,7 +192,8 @@ impl CommandHandler for BroadcastMessage {
             if target.id == sender.id || !pinged.insert(target.id.0.clone()) {
                 continue;
             }
-            let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
+            let from_nickname =
+                escape_mention_metadata(&crate::nickname_for(&ctx, sender.id.0.as_ref())?);
             // Persist a direct Message so it lands in the target's inbox and is
             // pulled next turn regardless of live state. The body carries the
             // room context so the recipient knows it came from a broadcast. A
@@ -221,7 +206,7 @@ impl CommandHandler for BroadcastMessage {
                 to_session_id: Some(target.id.clone()),
                 to_room_id: None,
                 to_operator: to_operator.clone(),
-                body: format!("[@mention in {}] {}", room.name, self.body),
+                body: format!("[@mention in {room_label}] {}", self.body),
                 sent_at: now,
             };
             ctx.emit_set(&ping)?;
@@ -236,7 +221,7 @@ impl CommandHandler for BroadcastMessage {
                     cid.0.as_ref(),
                     mention_push_content(
                         &from_nickname,
-                        &room.name,
+                        &room_label,
                         to_operator.as_deref(),
                         body_truncated.then_some(ping.id.0.as_ref()),
                     ),
@@ -248,7 +233,7 @@ impl CommandHandler for BroadcastMessage {
                         "from_nickname": from_nickname,
                         "to_session": target.id.0.as_ref(),
                         "to_operator": to_operator,
-                        "room": room.id.0.as_ref(),
+                        "room": escape_mention_metadata(room.id.0.as_ref()),
                         "response_required": self.response_required,
                         "body": context_body,
                         "body_truncated": body_truncated,
@@ -276,7 +261,7 @@ impl CommandHandler for BroadcastMessage {
         Ok(BroadcastMessageResult {
             message_id: msg.id,
             to_room_id: room.id.clone(),
-            to_room_name: room.name.clone(),
+            to_room_name: room_label,
             sent_at: now,
             total: recipient_ids.len() as u32,
             delivered,
@@ -384,6 +369,14 @@ pub(crate) fn mention_push_content(
         None => format!("{from_nickname} mentioned you in {room_name}"),
     };
     crate::send_message::with_truncated_notice(banner, truncated_id)
+}
+
+fn escape_mention_metadata(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]

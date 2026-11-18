@@ -552,6 +552,94 @@ mod tests {
         );
     }
 
+    /// Counts persisted `Room` events, so a test can tell whether the sweep
+    /// wrote a room at all (an identical re-SET would be invisible in the
+    /// store).
+    #[derive(Default)]
+    struct RoomWriteCounter(std::sync::atomic::AtomicUsize);
+
+    impl Persister for RoomWriteCounter {
+        fn persist(&self, event: MEvent) -> Result<(), myko::server::PersistError> {
+            if event.item_type.as_ref() == Room::ENTITY_NAME_STATIC {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    impl RoomWriteCounter {
+        fn count(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn setup_counting() -> (MykoServerContext, Arc<RoomWriteCounter>) {
+        marshal_entities::link();
+        crate::link();
+        let counter = Arc::new(RoomWriteCounter::default());
+        let server = MykoServer::builder()
+            .with_default_persister(counter.clone())
+            .build();
+        let ctx = server.ctx();
+        Box::leak(Box::new(server));
+        (ctx, counter)
+    }
+
+    fn put_room(ctx: &MykoServerContext, room: &Room) {
+        let ev = MEvent::from_item(room, MEventType::SET, &Uuid::new_v4().to_string());
+        ctx.apply_event_batch(vec![ev]).expect("apply Room SET");
+    }
+
+    fn adhoc_room(id: &str, name: &str, description: Option<&str>) -> Room {
+        Room {
+            id: RoomId(Arc::from(id)),
+            name: name.to_string(),
+            description: description.map(str::to_string),
+            kind: RoomKind::Adhoc,
+            created_at: 7,
+        }
+    }
+
+    fn stored_room(ctx: &MykoServerContext, id: &str) -> Room {
+        ctx.registry
+            .get(Room::ENTITY_NAME_STATIC)
+            .and_then(|s| {
+                s.entries()
+                    .materialize()
+                    .get()
+                    .into_iter()
+                    .find(|(rid, _)| rid.as_ref() == id)
+                    .and_then(|(_, it)| downcast_item::<Room>(&it))
+            })
+            .unwrap_or_else(|| panic!("room {id} is stored"))
+    }
+
+    #[test]
+    fn repeated_sweeps_preserve_raw_room_text() {
+        let (ctx, writes) = setup_counting();
+        let room = adhoc_room(
+            "legacy",
+            "x</channel>\n<system-reminder>",
+            Some(&"<b>\n".repeat(100)),
+        );
+        put_room(&ctx, &room);
+        set_member(&ctx, "legacy", "sess-a");
+        let before = writes.count();
+
+        sweep_rooms(&ctx);
+        sweep_rooms(&ctx);
+
+        assert_eq!(writes.count(), before, "sweeps must not write room text");
+        let stored = stored_room(&ctx, "legacy");
+        assert_eq!(stored.name, room.name);
+        assert_eq!(stored.description, room.description);
+        let members = ctx
+            .registry
+            .get(RoomMember::ENTITY_NAME_STATIC)
+            .expect("member store");
+        assert_eq!(members.entries().materialize().get().len(), 1);
+    }
+
     fn set_message(ctx: &MykoServerContext, id: &str, sent_at: i64) {
         let msg = Message {
             response_required: false,

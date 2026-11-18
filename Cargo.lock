@@ -256,9 +256,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "autosocket"
-version = "6.15.2"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0171e3b8857c780e0fb28d3e4cfcaf29d1cd0038c2800501d322e67c04866b9"
+checksum = "9fbc5459b044ed61cdf1bd19a3efce3f1a1c4aa5e2f6f4ffef0a1a54b79212cf"
 dependencies = [
  "base64",
  "flume",
@@ -2439,9 +2439,9 @@ dependencies = [
 
 [[package]]
 name = "hyphae"
-version = "3.1.9"
+version = "3.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2504c98fed284b37d0b78b6155fb0dfb8057a739e9f5e812a3f22b47ba60a865"
+checksum = "a8737da165b405c716274711ffa937aea7f1973bad8d49b07a41d4abea9b65e8"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2460,9 +2460,9 @@ dependencies = [
 
 [[package]]
 name = "hyphae-leptos"
-version = "3.1.9"
+version = "3.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80ff388e39c011a41155c579b1ae2850e32d648ac31920a9a9c58b3ef3885ecd"
+checksum = "a9e4947c1bba76cbedb3f0c28e66613c8541384c067a5085629482ed30a95fce"
 dependencies = [
  "hyphae",
  "leptos",
@@ -3281,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-daemon"
-version = "0.60.2"
+version = "0.60.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-entities"
-version = "0.60.2"
+version = "0.60.5"
 dependencies = [
  "chrono",
  "log",
@@ -3347,7 +3347,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-shim"
-version = "0.60.2"
+version = "0.60.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3374,7 +3374,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-tui"
-version = "0.60.2"
+version = "0.60.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3391,7 +3391,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-ui"
-version = "0.60.2"
+version = "0.60.5"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
@@ -3501,9 +3501,9 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "myko"
-version = "6.15.2"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91c5a14f5b04da496c0c0a4d26e552f415a415020cfbcf4c0103cf87450e0bcf"
+checksum = "49ec410e005189d7e02ac79bfd3a03c93a1d2be6cc5e0ae358173e986f5c8bd9"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -3549,9 +3549,9 @@ dependencies = [
 
 [[package]]
 name = "myko-auth"
-version = "6.15.2"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c34c1bb2622bdf512768c50345a53b8509b32369bb358ee4cb728dc48b65eae7"
+checksum = "3098c05fa50525ee9978e7cf5e94e0b31e338e0616b372bfb9cedf1bdd943554"
 dependencies = [
  "base64",
  "futures",
@@ -3566,9 +3566,9 @@ dependencies = [
 
 [[package]]
 name = "myko-auth0"
-version = "6.15.1"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b10cd14a6de5e4e1beb98ed6ce94455783d678bc13a26e83eb6a7addebbc035"
+checksum = "f6bf43e45c0b5d36573bdab641d1a8d09f5d82aea5c758fd850057d4109db40d"
 dependencies = [
  "futures",
  "jsonwebtoken",
@@ -3581,9 +3581,9 @@ dependencies = [
 
 [[package]]
 name = "myko-leptos"
-version = "6.15.2"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8af8e7dbfc3a4f814bca83d0fe7d0d9e63751efa8db9c136bea10b9afc8a2641"
+checksum = "97f28f5d81572bfe01ff14be4345621e1f62805ba45a42aa8621b8b309e6ab8c"
 dependencies = [
  "hyphae-leptos",
  "leptos",
@@ -3593,9 +3593,9 @@ dependencies = [
 
 [[package]]
 name = "myko-macros"
-version = "6.15.2"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a2fd1a5b688afea88e53e469d1bbb348de52e4c77d92b6d97fdfad3735ac420"
+checksum = "0e8c038bab43fffd4a06cb913db7fcc8d3d65edf1a2003f01b6ba6136770b74b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3605,9 +3605,9 @@ dependencies = [
 
 [[package]]
 name = "myko-server"
-version = "6.15.2"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9135d3d0c90ce5a0e042b7b546f08eacc8b7c8d3fc918f2feb9c2b331348b2e7"
+checksum = "b43fc3f3c9429617dd2fee4859928afd4a5f646ad40ba4dd1b6f199e9f7ac32e"
 dependencies = [
  "base64",
  "chrono",
@@ -3640,9 +3640,9 @@ dependencies = [
 
 [[package]]
 name = "myko-telemetry"
-version = "6.15.2"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55d28a7316f0ac9e292a28cba0c82101ed6683e3832e1d48bcceb9c35b37c8ac"
+checksum = "a1030eccc732c3248ddb7ad5eed25badd81055c012174ca0c7265d8e4f5de99f"
 dependencies = [
  "async-trait",
  "bytes",

@@ -133,11 +133,15 @@ impl Daemon {
     }
 
     fn hook(&self, event: &str, session_id: &str) -> String {
+        self.hook_for(event, session_id, "claude")
+    }
+
+    fn hook_for(&self, event: &str, session_id: &str, harness: &str) -> String {
         let body = format!(r#"{{"session_id":"{session_id}","cwd":"/repo"}}"#);
         let mut stream = TcpStream::connect(self.hooks).expect("connect hook listener");
         write!(
             stream,
-            "POST /hook/{event}?harness=claude HTTP/1.1\r\nHost: x\r\n\
+            "POST /hook/{event}?harness={harness} HTTP/1.1\r\nHost: x\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
@@ -506,4 +510,31 @@ fn check_mention_acknowledgment(acks_pushes: bool) {
         !inbox.contains("MENTION-MARKER"),
         "a mention pushed live came back in the inbox:\n{inbox}"
     );
+}
+
+#[test]
+fn codex_fork_prompt_refreshes_identity_and_routes_reply_to_fork() {
+    let daemon = daemon();
+    daemon.apply(&session("peer"));
+    let parent = daemon.hook_for("session-start", "parent", "codex");
+    assert!(parent.contains("id=\"parent\""));
+    // A fork inherits parent context but may never run SessionStart.
+    let fork = daemon.hook_for("prompt-submit", "fork", "codex");
+    assert!(fork.contains("id=\"fork\""));
+    assert!(fork.contains("supersedes inherited"));
+    assert!(!fork.contains("id=\"parent\""));
+    daemon.send("fork", "peer", "fork request");
+    let peer_inbox = daemon.prompt_submit("peer");
+    let fork_nick = marshal_entities::nickname("fork");
+    assert!(peer_inbox.contains(&fork_nick), "{peer_inbox}");
+    daemon.send("peer", "parent", "parent reply");
+    daemon.send("peer", "fork", "fork reply");
+    let fork = daemon.hook_for("prompt-submit", "fork", "codex");
+    let parent = daemon.hook_for("prompt-submit", "parent", "codex");
+    assert!(fork.contains("id=\"fork\""), "{fork}");
+    assert!(fork.contains("fork reply"), "{fork}");
+    assert!(!fork.contains("parent reply"), "{fork}");
+    assert!(parent.contains("id=\"parent\""), "{parent}");
+    assert!(parent.contains("parent reply"), "{parent}");
+    assert!(!parent.contains("fork reply"), "{parent}");
 }

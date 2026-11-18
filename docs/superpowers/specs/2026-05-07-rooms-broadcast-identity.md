@@ -168,14 +168,28 @@ and so cleanup can sweep them when the last member leaves — except
 
 - Singleton: `everyone`. Always exists, every live session is a member,
   the cleanup sweeper never DELs it.
-- Other auto-room ids are `host:<name>`, `op:<operator>`,
-  `project:<basename>`. Stable, recomputable from a session's identity.
+- Operator and project room IDs are `op:<operator>` and
+  `project:<basename>`, using the original identity value. Their display
+  labels are bounded and omit blocked characters. Use the ID from
+  `marshal://rooms` to address a room. Commands prefer an exact ID and
+  reject display labels that match multiple rooms.
 - Ad-hoc room ids are slugified from the user-supplied name (lowercase,
   `[a-z0-9-]+`), with `-{N}` suffix on collision (same dedup trick we
   use for nicknames).
 - Reserved names + prefixes: `everyone`, `host:`, `op:`, `project:`.
   `join_room("host:foo")` and `join_room("everyone")` error loudly so
   users can't shadow auto-rooms.
+- Room names and descriptions reach other sessions' model context, so
+  `join_room` rejects names over 64 characters (descriptions over 256) and
+  any character on a blocklist: `<`, `>` and the listed lookalike angle brackets, `&`,
+  `"`, backtick, control characters, line separators, bidi controls, and a
+  blocklist of the invisible and formatting characters known to hide text.
+  Characters not on the list are allowed. Auto-rooms drop blocked characters
+  from the operator / project value instead of failing (added later; the
+  exact list is `FORBIDDEN_RANGES` in `crates/entities/src/room.rs`).
+- Marshal escapes room metadata in `marshal://rooms` and mention
+  notifications, including metadata written directly over the WebSocket.
+  The cleanup sweep leaves stored room text intact.
 
 ### Tool surface
 

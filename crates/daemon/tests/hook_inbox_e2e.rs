@@ -176,7 +176,11 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
         "/hook/prompt-submit?host=test-host&operator=test-op&harness=codex",
         r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
     );
-    assert_eq!(repaired, "", "repair without inbox must inject no context");
+    assert!(
+        repaired.contains("id=\"recipient\""),
+        "repair refreshes thread identity"
+    );
+    assert!(!repaired.contains("<marshal_inbox"));
     let sessions: Vec<Arc<Session>> = cmd_ctx(&ctx, Some("c-sender"))
         .exec_query(GetAllSessions {})
         .expect("query repaired sessions");
