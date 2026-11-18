@@ -135,6 +135,12 @@ impl Leases {
 
 static LEASES: LazyLock<Mutex<Leases>> = LazyLock::new(Mutex::default);
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_UNREAD_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn lease_duration() -> Duration {
     std::env::var("MARSHAL_ACK_LEASE_SECS")
         .ok()
@@ -570,6 +576,12 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
         Ok(r) => r,
         Err(_) => return (String::new(), Vec::new()),
     };
+    #[cfg(test)]
+    AFTER_UNREAD_SNAPSHOT.with(|slot| {
+        if let Some(after_snapshot) = slot.take() {
+            after_snapshot();
+        }
+    });
     if result.messages.is_empty() {
         return (String::new(), Vec::new());
     }
@@ -911,6 +923,86 @@ mod lease_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ack_after_unread_snapshot_does_not_offer_the_message_again() {
+        use marshal_entities::{GetAllMessageReads, SendMessage};
+        use myko_server::MykoServer;
+
+        marshal_entities::link();
+        let server = MykoServer::builder().build();
+        let ctx = Arc::new(server.ctx());
+        let cmd_ctx = internal_cmd_ctx(&ctx);
+        let recipient = SessionId(Arc::from("concurrent-inbox-recipient"));
+        let sender = SessionId(Arc::from("concurrent-inbox-sender"));
+        for id in [&sender, &recipient] {
+            let session: Session = serde_json::from_value(serde_json::json!({
+                "id": id.0.as_ref(),
+                "pid": 0,
+                "cwd": "/repo",
+                "connectedAt": 1,
+            }))
+            .expect("test session");
+            cmd_ctx.emit_set(&session).expect("register test session");
+        }
+        let message = SendMessage {
+            to_session_id: recipient.clone(),
+            body: "lease this exactly once".into(),
+            response_required: false,
+            as_session: Some(sender),
+        }
+        .execute(cmd_ctx.clone())
+        .expect("send test message");
+        let (_, first) = surface_unread(&cmd_ctx, recipient.0.as_ref());
+        assert_eq!(first, vec![message.message_id.clone()]);
+
+        let ack_ctx = Arc::clone(&ctx);
+        let ack_session = recipient.clone();
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+        AFTER_UNREAD_SNAPSHOT.with(|slot| {
+            slot.replace(Some(Box::new(move || {
+                let lock_is_free = LEASES.try_lock().is_ok();
+                let ack_cmd_ctx = internal_cmd_ctx(&ack_ctx);
+                let worker =
+                    std::thread::spawn(move || ack_surfaced(&ack_ctx, &ack_session, first));
+
+                // Force the ack into the snapshot-to-selection window. With
+                // the pull holding the lock, the ack can persist but cannot
+                // release its lease until the pull finishes.
+                if lock_is_free {
+                    worker.join().expect("finish acknowledgment");
+                    return;
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let reads: Vec<Arc<marshal_entities::MessageRead>> = ack_cmd_ctx
+                        .exec_query(GetAllMessageReads {})
+                        .expect("read acknowledgments");
+                    if reads
+                        .iter()
+                        .any(|read| read.message_id == message.message_id)
+                    {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "acknowledgment was not stored");
+                    std::thread::yield_now();
+                }
+                worker_tx
+                    .send(worker)
+                    .expect("return acknowledgment worker");
+            })));
+        });
+
+        let (body, duplicate) = surface_unread(&cmd_ctx, recipient.0.as_ref());
+        if let Ok(worker) = worker_rx.recv() {
+            worker.join().expect("finish acknowledgment");
+        }
+        assert!(
+            duplicate.is_empty(),
+            "inbox offered an acked message again: {body}"
+        );
+        assert!(surface_unread(&cmd_ctx, recipient.0.as_ref()).1.is_empty());
+    }
 
     #[test]
     fn a_truncation_notice_names_a_uri_the_resource_serves() {
