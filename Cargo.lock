@@ -3537,9 +3537,9 @@ dependencies = [
 
 [[package]]
 name = "myko-auth0"
-version = "6.15.1"
+version = "6.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b10cd14a6de5e4e1beb98ed6ce94455783d678bc13a26e83eb6a7addebbc035"
+checksum = "f6bf43e45c0b5d36573bdab641d1a8d09f5d82aea5c758fd850057d4109db40d"
 dependencies = [
  "futures",
  "jsonwebtoken",
