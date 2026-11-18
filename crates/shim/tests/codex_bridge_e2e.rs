@@ -25,11 +25,7 @@ use marshal_entities::{
     GetAllSessions, HostInfo, Message, MessageId, MessageRead, MessageReadId, Session, SessionId,
 };
 use myko::prelude::EventPublishing as _;
-use myko::{
-    command::CommandContext,
-    request::RequestContext,
-    server::MykoServerContext,
-};
+use myko::{command::CommandContext, request::RequestContext, server::MykoServerContext};
 use myko_server::{BlackholePersister, MykoServer};
 use serde_json::{Value, json};
 use tempfile::TempDir;
