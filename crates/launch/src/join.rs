@@ -14,7 +14,7 @@ use hyphae::Gettable;
 use marshal_entities::{GetAllSessionNicknames, GetAllSessions, Session, SessionNickname};
 use myko::client::{ConnectionStatus, MykoClient};
 
-use crate::{Adapter, Launched};
+use crate::Launched;
 
 /// How long to wait for the launcher's own connection to the daemon.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -57,6 +57,7 @@ fn same_dir(a: &str, b: &str) -> bool {
 /// Find the launched agent's row: `agent_id`, plus `host.name` and `cwd` from the adapter's report.
 pub fn find<'a>(sessions: &'a [Arc<Session>], agent_id: &str, launched: &Launched) -> Join<'a> {
     let mut refused = Vec::new();
+    let mut matching: Option<&Session> = None;
     for s in sessions.iter().map(|s| s.as_ref()) {
         if s.agent_id.as_deref() != Some(agent_id) {
             continue;
@@ -78,9 +79,16 @@ pub fn find<'a>(sessions: &'a [Arc<Session>], agent_id: &str, launched: &Launche
             ));
             continue;
         }
-        return Join::Joined(s);
+        if let Some(first) = matching {
+            refused.push(format!(
+                "sessions {} and {} both match this launch; no session was selected",
+                first.id.0, s.id.0
+            ));
+            return Join::Waiting(refused);
+        }
+        matching = Some(s);
     }
-    Join::Waiting(refused)
+    matching.map_or(Join::Waiting(refused), Join::Joined)
 }
 
 /// The daemon-assigned nickname for `s`, or the computed one before it's assigned.
@@ -145,17 +153,14 @@ impl Roster {
         self.sessions.get()
     }
 
-    /// Wait for the launched agent's row. Fails early if the adapter says the
-    /// launch has exited, and says what may still be running on a timeout.
+    /// Wait for the launched agent's row. Backend status is independent of this deadline.
     pub async fn wait(
         &self,
-        adapter: &dyn Adapter,
         agent_id: &str,
         launched: &Launched,
         timeout: Duration,
     ) -> Result<Joined> {
         let started = Instant::now();
-        let mut last_status = Instant::now();
         loop {
             let sessions = self.sessions.get();
             let refused = match find(&sessions, agent_id, launched) {
@@ -167,15 +172,6 @@ impl Roster {
                 }
                 Join::Waiting(refused) => refused,
             };
-            if last_status.elapsed() >= Duration::from_secs(1) {
-                last_status = Instant::now();
-                if adapter.status(&launched.handle)? == Some(false) {
-                    bail!(
-                        "the agent at {} exited before joining the roster",
-                        launched.r#where
-                    );
-                }
-            }
             if started.elapsed() > timeout {
                 let mut msg = format!(
                     "no session carrying {agent_id} joined the roster at {} from {} in {} within {}s.",
@@ -197,11 +193,11 @@ impl Roster {
                 }
                 msg.push_str(&format!(
                     " Stop it with `marshal-launch stop {}`.",
-                    launched.handle
+                    agent_id
                 ));
                 bail!(msg);
             }
-            tokio::time::sleep(POLL).await;
+            tokio::time::sleep(POLL.min(timeout.saturating_sub(started.elapsed()))).await;
         }
     }
 }
@@ -251,6 +247,18 @@ mod tests {
             Join::Joined(s) => assert_eq!(s.id.0.as_ref(), "mine"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn matching_rows_do_not_select_an_arbitrary_recipient() {
+        let rows = [
+            row("other-thread", Some("build-03"), "/w/app", Some("launch-1")),
+            row("first-thread", Some("build-03"), "/w/app", Some("launch-1")),
+        ];
+        let Join::Waiting(reasons) = find(&rows, "launch-1", &launched()) else {
+            panic!("ambiguous launch selected an arbitrary thread");
+        };
+        assert!(reasons.iter().any(|reason| reason.contains("both match")));
     }
 
     #[test]

@@ -153,11 +153,51 @@ async fn main() -> Result<()> {
     // A listener that can't bind or stops is logged, and the daemon keeps
     // running, as it always has: the hooks fail quietly within their timeout
     // when nothing answers.
+    let launches = std::env::var_os("MARSHAL_LAUNCH_STATE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("MARSHAL_STATE_DIR")
+                .map(|path| std::path::PathBuf::from(path).join("launches"))
+        })
+        .or_else(|| {
+            marshal_launch::record::default_path()
+                .ok()
+                .map(|p| p.with_file_name("launches"))
+        })
+        .map(|state| {
+            let local = if bind_addr.ip().is_unspecified() {
+                let ip = if bind_addr.is_ipv4() {
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                } else {
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+                };
+                SocketAddr::new(ip, bind_addr.port())
+            } else {
+                bind_addr
+            };
+            let local = format!("ws://{local}");
+            let launch_address = marshal_launch::address::configured_from_environment(
+                std::env::var("MARSHAL_LAUNCH_ADDRESS").ok(),
+            )
+            .unwrap_or_else(|| local.clone());
+            let hook_base = std::env::var("MARSHAL_BASE_URL")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .or_else(|| marshal_launch::api::hook_url(&launch_address, hook_bind.port()).ok());
+            Arc::new(marshal_launch::api::Service::new(
+                state,
+                local,
+                launch_address,
+                hook_base,
+            ))
+        });
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     {
         let hook_ctx = Arc::new(server.ctx());
         tokio::spawn(async move {
-            if let Err(e) = daemon::http_listener::run_until(hook_bind, hook_ctx, stop_rx).await {
+            if let Err(e) =
+                daemon::http_listener::run_with_launch(hook_bind, hook_ctx, stop_rx, launches).await
+            {
                 log::error!("[hook] listener exited: {e}");
             }
         });

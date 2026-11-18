@@ -809,7 +809,7 @@ fn utf16_len(text: &str) -> usize {
 
 /// Build an internal (clientless) `CommandContext`. Commands run through
 /// it carry no WS `client_id`, so they must self-identify via `asSession`.
-fn internal_cmd_ctx(ctx: &Arc<MykoServerContext>) -> CommandContext {
+pub(crate) fn internal_cmd_ctx(ctx: &Arc<MykoServerContext>) -> CommandContext {
     let tx: Arc<str> = uuid::Uuid::new_v4().to_string().into();
     let req = RequestContext::internal(tx, ctx.host_id, "hook");
     CommandContext::new(Arc::from("hook"), Arc::new(req), ctx.clone())

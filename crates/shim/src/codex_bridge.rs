@@ -267,18 +267,46 @@ struct LauncherState {
 struct LauncherStateWriter {
     path: PathBuf,
     state: LauncherState,
+    launch_id: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RegistrationBinding {
+    Unscoped,
+    Pending,
+    Selected(String),
+    OtherThread,
 }
 
 type SharedLauncherState = Arc<tokio::sync::Mutex<LauncherStateWriter>>;
 
 impl LauncherStateWriter {
-    fn new(path: PathBuf, _cwd: PathBuf, thread_id: Option<String>) -> Self {
+    fn new(
+        path: PathBuf,
+        _cwd: PathBuf,
+        thread_id: Option<String>,
+        launch_id: Option<String>,
+    ) -> Self {
         Self {
             path,
+            launch_id,
             state: LauncherState {
                 thread_id,
                 ..LauncherState::default()
             },
+        }
+    }
+
+    fn registration_binding(&self, thread_id: &str) -> RegistrationBinding {
+        let Some(launch_id) = self.launch_id.as_ref() else {
+            return RegistrationBinding::Unscoped;
+        };
+        match self.state.thread_id.as_deref() {
+            None => RegistrationBinding::Pending,
+            Some(selected) if selected == thread_id => {
+                RegistrationBinding::Selected(launch_id.clone())
+            }
+            Some(_) => RegistrationBinding::OtherThread,
         }
     }
 
@@ -339,7 +367,30 @@ pub fn run_codex(args: &[String]) -> Result<()> {
     run_codex_binary(&codex, args)
 }
 
+fn launch_id_from_env() -> Option<String> {
+    std::env::var("MARSHAL_LAUNCH_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+}
+
+fn codex_child(codex: &str) -> Command {
+    let mut command = Command::new(codex);
+    if launch_id_from_env().is_some() {
+        // The shared app-server may run later sessions unrelated to this launch.
+        command
+            .env_remove("MARSHAL_LAUNCH_ID")
+            .env_remove("MARSHAL_OPERATOR");
+    }
+    command
+}
+
 fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
+    if launch_id_from_env().is_some() {
+        let daemon = crate::daemon_address();
+        let hook_base = crate::codex_hook::registration_base(&daemon);
+        crate::codex_setup::check_launch_wiring(&daemon, &hook_base)
+            .context("Codex launch requires working Marshal inbox wiring")?;
+    }
     let mut app_server = match launch_app_server(codex) {
         Ok(app_server) => app_server,
         Err(error) => return run_native_codex(codex, args, &error),
@@ -455,6 +506,9 @@ fn cleanup_proxy(app_server: &LaunchedAppServer) {
 }
 
 fn run_native_codex(codex: &str, args: &[String], bridge_error: &anyhow::Error) -> Result<()> {
+    if launch_id_from_env().is_some() {
+        anyhow::bail!("Codex launch requires the live-delivery bridge: {bridge_error:#}");
+    }
     if shared_connection_path().is_some() {
         anyhow::bail!(
             "shared Codex server unavailable: {bridge_error:#}; no isolated session was started"
@@ -473,13 +527,13 @@ fn run_native_codex(codex: &str, args: &[String], bridge_error: &anyhow::Error) 
 }
 
 fn native_codex_command(codex: &str, args: &[String]) -> Command {
-    let mut command = Command::new(codex);
+    let mut command = codex_child(codex);
     command.args(args);
     command
 }
 
 fn codex_tui_command(codex: &str, remote: &str, args: &[String], cwd: &Path) -> Command {
-    let mut command = Command::new(codex);
+    let mut command = codex_child(codex);
     command.args(["--remote", remote]);
     if !has_explicit_cwd(args) {
         // The managed app-server is shared across launchers and retains the
@@ -916,7 +970,7 @@ fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
         return launch_isolated_app_server(codex);
     }
 
-    let daemon_status = Command::new(codex)
+    let daemon_status = codex_child(codex)
         .args(["app-server", "daemon", "start"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1067,7 +1121,7 @@ fn managed_daemon_version_is_behind(encoded: &[u8]) -> bool {
 
 fn launch_isolated_app_server(codex: &str) -> Result<LaunchedAppServer> {
     let endpoint = ephemeral_loopback_endpoint()?;
-    let mut child = Command::new(codex)
+    let mut child = codex_child(codex)
         .args(["app-server", "--listen", &endpoint])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1147,6 +1201,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                 path,
                 cwd,
                 args.launcher_thread_id.clone(),
+                launch_id_from_env(),
             )))
         });
     let mut proxy_task = spawn_tui_proxy(
@@ -1942,9 +1997,31 @@ async fn try_pending_registration<S>(
     let Some(registration) = pending.get(session_id).cloned() else {
         return;
     };
+    let binding = if let Some(launcher) = launcher {
+        launcher
+            .lock()
+            .await
+            .registration_binding(&registration.thread_id)
+    } else {
+        RegistrationBinding::Unscoped
+    };
+    let agent_id = match binding {
+        RegistrationBinding::Unscoped => crate::codex_hook::agent_id_from_env(),
+        RegistrationBinding::Selected(id) => Some(id),
+        RegistrationBinding::Pending => return,
+        RegistrationBinding::OtherThread => {
+            pending.remove(session_id);
+            return;
+        }
+    };
     let base = hook_base.to_string();
     let nickname = tokio::task::spawn_blocking(move || {
-        crate::codex_hook::register_session(&base, &registration.session_id, &registration.cwd)
+        crate::codex_hook::register_session(
+            &base,
+            &registration.session_id,
+            &registration.cwd,
+            agent_id.as_deref(),
+        )
     })
     .await
     .unwrap_or(None);
@@ -2505,7 +2582,8 @@ mod tests {
     fn launcher_state_records_selected_thread_across_server_generations() {
         let temp = tempfile::tempdir().expect("launcher state tempdir");
         let path = temp.path().join("state.json");
-        let mut writer = LauncherStateWriter::new(path.clone(), PathBuf::from("/work/pulse"), None);
+        let mut writer =
+            LauncherStateWriter::new(path.clone(), PathBuf::from("/work/pulse"), None, None);
 
         writer.connected().expect("first app-server connection");
         writer
@@ -2526,6 +2604,49 @@ mod tests {
                 thread_id: Some("owned-thread".into()),
             })
         );
+    }
+
+    #[test]
+    fn launch_bindings_follow_only_the_selected_thread_across_reconnects() {
+        let directory = tempfile::tempdir().unwrap();
+        let new = |id: &str| {
+            LauncherStateWriter::new(
+                directory.path().join(id),
+                PathBuf::from("/same/workdir"),
+                None,
+                Some(id.into()),
+            )
+        };
+        let mut first = new("launch-first");
+        let mut second = new("launch-second");
+        assert_eq!(
+            first.registration_binding("other"),
+            RegistrationBinding::Pending
+        );
+        first.selected("first-thread").unwrap();
+        second.selected("second-thread").unwrap();
+        for _ in 0..2 {
+            for (launcher, own_thread, other_thread, launch_id) in [
+                (&mut first, "first-thread", "second-thread", "launch-first"),
+                (
+                    &mut second,
+                    "second-thread",
+                    "first-thread",
+                    "launch-second",
+                ),
+            ] {
+                launcher.connected().unwrap();
+                assert_eq!(
+                    launcher.registration_binding(other_thread),
+                    RegistrationBinding::OtherThread
+                );
+                assert_eq!(
+                    launcher.registration_binding(own_thread),
+                    RegistrationBinding::Selected(launch_id.into())
+                );
+                launcher.disconnected().unwrap();
+            }
+        }
     }
 
     #[test]
@@ -3036,6 +3157,7 @@ mod tests {
             launcher_directory.path().join("launcher.json"),
             PathBuf::from("/work/before-prompt"),
             Some("thread-before-prompt".into()),
+            Some("launch-before-prompt".into()),
         )));
 
         let app_server = tokio::spawn(async move {
@@ -3054,6 +3176,24 @@ mod tests {
             let initialized = websocket.next().await.unwrap().unwrap();
             let initialized: Value = serde_json::from_str(initialized.to_text().unwrap()).unwrap();
             assert_eq!(initialized["method"], "initialized");
+
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "method": "thread/started",
+                        "params": {
+                            "thread": {
+                                "id": "other-thread",
+                                "sessionId": "other-session",
+                                "cwd": "/work/before-prompt"
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
 
             let name_read = websocket.next().await.unwrap().unwrap();
             let name_read: Value = serde_json::from_str(name_read.to_text().unwrap()).unwrap();
@@ -3156,6 +3296,7 @@ mod tests {
         let body = request.split_once("\r\n\r\n").unwrap().1;
         let body: Value = serde_json::from_str(body).expect("registration JSON");
         assert_eq!(body["session_id"], "session-before-prompt");
+        assert_eq!(body["agent_id"], "launch-before-prompt");
         assert_eq!(body["cwd"], "/work/before-prompt");
 
         tokio::time::timeout(Duration::from_secs(5), app_server)
@@ -3279,6 +3420,7 @@ mod tests {
             state_path.clone(),
             PathBuf::from("/work/picker"),
             None,
+            None,
         )));
 
         let proxy = spawn_tui_proxy(
@@ -3362,6 +3504,7 @@ mod tests {
         let launcher = Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
             state_path.clone(),
             PathBuf::from("/work/picker"),
+            None,
             None,
         )));
 

@@ -9,11 +9,13 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::{Adapter, LaunchRequest, Launched};
+use crate::external::{DAEMON_CREDENTIAL_ENV, run_bounded};
+use crate::{LaunchBackend, LaunchRequest, Launched, StopReceipt};
 
 /// The longest tmux session name the adapter makes.
 pub const MAX_NAME: usize = 64;
@@ -72,21 +74,86 @@ impl Tmux {
             c.arg("-S").arg(s);
         }
         c.envs(self.client_env.iter().map(|(k, v)| (k, v)));
+        for key in DAEMON_CREDENTIAL_ENV {
+            c.env_remove(key);
+        }
         c
     }
 
-    /// `=name` matches that session exactly, not as a prefix of a longer name.
-    fn has_session(&self, name: &str) -> Result<bool> {
-        let status = self
-            .tmux()
-            .args(["has-session", "-t", &format!("={name}")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .with_context(|| format!("running {}: is tmux installed?", self.program))?;
-        Ok(status.success())
+    fn observation(&self, req: &LaunchRequest, handle: String, cwd: String) -> Launched {
+        let host = req
+            .env
+            .get("MARSHAL_HOST")
+            .filter(|h| !h.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(this_host);
+        let attach = match &self.socket {
+            Some(s) => format!(
+                "tmux -S '{}' attach -t '={handle}'",
+                s.display().to_string().replace('\'', r#"'"'"'"#),
+            ),
+            None => format!("tmux attach -t '={handle}'"),
+        };
+        Launched {
+            handle,
+            r#where: format!("{host} tmux:{}", req.name),
+            host,
+            cwd,
+            attach: Some(attach),
+        }
     }
+
+    fn session_id(&self, handle: &str) -> Result<Option<String>> {
+        anyhow::ensure!(
+            handle.starts_with("marshal-") && valid_name(handle),
+            "invalid tmux recovery handle"
+        );
+        let mut tmux = self.tmux();
+        tmux.env("LC_ALL", "C")
+            .args(["list-sessions", "-F", "#{session_id} #{session_name}"]);
+        let out = run_bounded(tmux, Vec::new(), Duration::from_secs(5))?;
+        if !out.status.success() {
+            let error = String::from_utf8_lossy(&out.stderr);
+            if no_tmux_server(&error) {
+                return Ok(None);
+            }
+            bail!("could not inspect tmux: {}", error.trim());
+        }
+        let sessions = String::from_utf8(out.stdout).context("invalid tmux session list")?;
+        let Some(id) = sessions
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .find_map(|(id, name)| (name == handle).then_some(id))
+        else {
+            return Ok(None);
+        };
+        let mut tmux = self.tmux();
+        tmux.args(["show-environment", "-t", id, "MARSHAL_LAUNCH_KEY"]);
+        let marker = run_bounded(tmux, Vec::new(), Duration::from_secs(5))?;
+        ensure!(
+            marker.status.success()
+                && String::from_utf8_lossy(&marker.stdout).trim()
+                    == format!("MARSHAL_LAUNCH_KEY={handle}"),
+            "tmux session {handle} does not identify this launch"
+        );
+        Ok(Some(id.to_owned()))
+    }
+}
+
+fn no_tmux_server(error: &str) -> bool {
+    error.starts_with("no server running on ")
+        || (error.starts_with("error connecting to ")
+            && error.trim_end().ends_with("(No such file or directory)"))
+}
+
+/// The process key is scoped to one launch. A display label is reusable.
+pub fn session_key(agent_id: &str) -> Result<String> {
+    let key = format!("marshal-{agent_id}");
+    ensure!(
+        !agent_id.is_empty() && valid_name(&key),
+        "invalid agent ID for a tmux launch"
+    );
+    Ok(key)
 }
 
 /// tmux takes `.` and `:` in a target as window and pane separators, so a name
@@ -144,9 +211,8 @@ fn resolve_cwd(cwd: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The `new-session` arguments. The command always goes as two or more
-/// arguments, because tmux hands a lone one to `sh -c`: a one-word `argv`
-/// goes through `env --`, which runs it as given and keeps the shell out.
+/// Build a detached session command. Strip daemon credentials inside the
+/// pane too, because an existing tmux server can already hold them.
 pub fn new_session_args(
     name: &str,
     cwd: &Path,
@@ -161,14 +227,18 @@ pub fn new_session_args(
         "-c".into(),
         cwd.display().to_string(),
     ];
-    for (k, v) in env {
+    for (key, value) in env
+        .iter()
+        .filter(|(key, _)| !DAEMON_CREDENTIAL_ENV.contains(&key.as_str()))
+    {
         args.push("-e".into());
-        args.push(format!("{k}={v}"));
+        args.push(format!("{key}={value}"));
+    }
+    args.extend(["--".to_string(), "env".to_string()]);
+    for key in DAEMON_CREDENTIAL_ENV {
+        args.extend(["-u".to_string(), (*key).to_string()]);
     }
     args.push("--".into());
-    if argv.len() == 1 {
-        args.extend(["env".to_string(), "--".to_string()]);
-    }
     args.extend(argv.iter().cloned());
     args
 }
@@ -189,9 +259,9 @@ pub fn on_path(program: &str, path: Option<OsString>) -> bool {
     path.is_some_and(|dirs| std::env::split_paths(&dirs).any(|d| d.join(program).is_file()))
 }
 
-impl Adapter for Tmux {
+impl LaunchBackend for Tmux {
     fn name(&self) -> &str {
-        crate::address::LOCAL_ADAPTER
+        crate::address::LOCAL_BACKEND
     }
 
     fn check(&self, req: &LaunchRequest) -> Result<()> {
@@ -227,17 +297,10 @@ impl Adapter for Tmux {
             "{} isn't on PATH here, so nothing was started",
             req.argv[0]
         );
-        let out = Command::new(&self.shim[0])
-            .args(&self.shim[1..])
-            .arg("--version")
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| {
-                format!(
-                    "running `{} --version`: is marshal-shim installed?",
-                    self.shim[0]
-                )
-            })?;
+        let mut shim = Command::new(&self.shim[0]);
+        shim.args(&self.shim[1..]).arg("--version");
+        let out = run_bounded(shim, Vec::new(), Duration::from_secs(5))
+            .with_context(|| format!("running `{} --version`", self.shim[0]))?;
         crate::check_shim_version(&String::from_utf8_lossy(&out.stdout), &req.marshal_version)?;
         if let Some(addr) = req.env.get("MARSHAL_DAEMON_ADDRESS") {
             // The agent's config dirs: the XDG_CONFIG_HOME it's given, else ours.
@@ -250,12 +313,11 @@ impl Adapter for Tmux {
                 crate::address::config_dirs_from(xdg, std::env::var_os("HOME").map(PathBuf::from));
             crate::address::check_daemon_address_file(&dirs, addr)?;
         }
-        ensure!(
-            !self.has_session(&req.name)?,
-            "a tmux session named {0} already exists: attach with `tmux attach -t '={0}'`, or pick another --name",
-            req.name
-        );
         Ok(())
+    }
+
+    fn recovery_handle(&self, req: &LaunchRequest) -> Result<String> {
+        session_key(&req.agent_id)
     }
 
     fn launch(&self, req: &LaunchRequest) -> Result<Launched> {
@@ -263,82 +325,85 @@ impl Adapter for Tmux {
             !req.argv.is_empty(),
             "the launch request has no command to run"
         );
-        ensure!(
-            valid_name(&req.name),
-            "{:?} can't name a tmux session",
-            req.name
-        );
+        let handle = self.recovery_handle(req)?;
+        if let Some(launched) = self.recover(req)? {
+            return Ok(launched);
+        }
         let cwd = resolve_cwd(&req.cwd)?;
-        let env: Vec<(String, String)> = req
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let out = self
-            .tmux()
-            .args(new_session_args(&req.name, &cwd, &env, &req.argv))
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("running {}: is tmux installed?", self.program))?;
+        let mut launch_env = req.env.clone();
+        for identity in ["MARSHAL_AGENT_ID", "MARSHAL_LAUNCH_ID"] {
+            launch_env.entry(identity.to_owned()).or_default();
+        }
+        launch_env.insert("MARSHAL_LAUNCH_KEY".to_owned(), handle.clone());
+        launch_env.insert("MARSHAL_LAUNCH_CWD".to_owned(), cwd.display().to_string());
+        let env: Vec<_> = launch_env.into_iter().collect();
+        let mut tmux = self.tmux();
+        tmux.args(new_session_args(&handle, &cwd, &env, &req.argv));
+        let out = run_bounded(tmux, Vec::new(), Duration::from_secs(15))?;
         if !out.status.success() {
+            if let Some(launched) = self.recover(req)? {
+                return Ok(launched);
+            }
             bail!(
                 "tmux couldn't start {}: {}",
                 req.argv.join(" "),
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        // The name the agent's shim reports: MARSHAL_HOST if it's given one.
-        let host = req
-            .env
-            .get("MARSHAL_HOST")
-            .filter(|h| !h.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(this_host);
-        Ok(Launched {
-            handle: req.name.clone(),
-            r#where: format!("{host} tmux:{}", req.name),
-            host,
-            cwd: cwd.display().to_string(),
-            attach: Some(match &self.socket {
-                // Quoted: a zsh shell expands an unquoted `=word` (EQUALS).
-                Some(s) => format!(
-                    "tmux -S '{}' attach -t '={}'",
-                    s.display().to_string().replace('\'', r#"'"'"'"#),
-                    req.name
-                ),
-                None => format!("tmux attach -t '={}'", req.name),
-            }),
-        })
+        Ok(self.observation(req, handle, cwd.display().to_string()))
     }
 
-    fn stop(&self, handle: &str) -> Result<()> {
+    fn recover(&self, req: &LaunchRequest) -> Result<Option<Launched>> {
+        let handle = self.recovery_handle(req)?;
+        let Some(id) = self.session_id(&handle)? else {
+            return Ok(None);
+        };
+        let mut tmux = self.tmux();
+        tmux.args(["show-environment", "-t", &id, "MARSHAL_LAUNCH_CWD"]);
+        let out = run_bounded(tmux, Vec::new(), Duration::from_secs(5))?;
         ensure!(
-            valid_name(handle),
-            "{handle:?} isn't a tmux session this adapter made"
+            out.status.success(),
+            "could not recover tmux launch directory"
         );
-        if !self.has_session(handle)? {
-            return Ok(());
+        let output = String::from_utf8(out.stdout)?;
+        let cwd = output
+            .trim_end_matches('\n')
+            .strip_prefix("MARSHAL_LAUNCH_CWD=")
+            .context("tmux launch directory was not recorded")?;
+        Ok(Some(self.observation(req, handle, cwd.to_owned())))
+    }
+
+    fn stop(&self, handle: &str) -> Result<StopReceipt> {
+        let Some(id) = self.session_id(handle)? else {
+            return Ok(StopReceipt::Gone);
+        };
+        let mut tmux = self.tmux();
+        let owns_session = format!("#{{==:#{{MARSHAL_LAUNCH_KEY}},{handle}}}");
+        let kill = format!(r#"kill-session -t "{id}" ; display-message -p marshal-stopped"#);
+        tmux.args([
+            "if-shell",
+            "-F",
+            "-t",
+            &id,
+            &owns_session,
+            &kill,
+            "display-message -p marshal-mismatch",
+        ]);
+        let out = run_bounded(tmux, Vec::new(), Duration::from_secs(5))?;
+        let receipt = String::from_utf8_lossy(&out.stdout);
+        if out.status.success() && receipt.trim() == "marshal-stopped" {
+            return Ok(StopReceipt::Stopped);
         }
-        let out = self
-            .tmux()
-            .args(["kill-session", "-t", &format!("={handle}")])
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("running {}", self.program))?;
         ensure!(
-            out.status.success() || !self.has_session(handle)?,
-            "tmux couldn't stop session {handle}: {}",
+            self.session_id(handle)?.is_none(),
+            "tmux did not confirm stopping {handle}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
-        Ok(())
+        Ok(StopReceipt::Gone)
     }
 
     fn status(&self, handle: &str) -> Result<Option<bool>> {
-        ensure!(
-            valid_name(handle),
-            "{handle:?} isn't a tmux session this adapter made"
-        );
-        self.has_session(handle).map(Some)
+        self.session_id(handle).map(|id| Some(id.is_some()))
     }
 }
 
@@ -399,6 +464,12 @@ mod tests {
                 "MARSHAL_AGENT_ID=launch-1",
                 "--",
                 "env",
+                "-u",
+                "MYKO_POSTGRES_URL",
+                "-u",
+                "MARSHAL_AUTH_POSTGRES_URL",
+                "-u",
+                "MARSHAL_AUTH_CLIENT_SECRET",
                 "--",
                 "claude"
             ])
@@ -419,7 +490,7 @@ mod tests {
     fn a_missing_folder_or_a_bad_name_starts_nothing() {
         let t = Tmux::new("/nonexistent/tmux");
         let mut req = LaunchRequest {
-            version: 1,
+            version: crate::PROTOCOL_VERSION,
             harness: "claude".into(),
             argv: v(&["claude"]),
             cwd: "/nonexistent/folder".into(),

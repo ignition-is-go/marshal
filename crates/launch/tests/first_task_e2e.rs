@@ -13,7 +13,7 @@
 //!   shows in the tmux pane.
 //!
 //! The daemon is a real one via `common::daemon::RealDaemon`
-//! (`MARSHAL_E2E_DAEMON` names the binary), in memory, on 127.0.0.1 test
+//! (`MARSHAL_E2E_DAEMON` names a binary built from this checkout), in memory, on 127.0.0.1 test
 //! ports, never 6155/6156.
 //!
 //! Wiring: a throwaway folder under `~/src` (already trusted by Claude, so
@@ -131,6 +131,11 @@ fn an_unattended_claude_wakes_for_its_first_task_and_acts_on_it() {
     );
     let folder = Folder(parent.join(format!(".marshal-first-task-e2e-{}", std::process::id())));
     std::fs::create_dir_all(folder.0.join(".claude")).unwrap();
+    let config = folder.0.join("marshal-config");
+    std::fs::create_dir_all(config.join("marshal")).unwrap();
+    std::fs::write(config.join("marshal/daemon-address"), &d.address).unwrap();
+    // SAFETY: the single fixture sets its environment before starting threads.
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", config) };
     std::fs::write(folder.0.join(".claude/settings.json"), hooks(&shim)).unwrap();
     let cwd = std::fs::canonicalize(&folder.0).unwrap();
 
@@ -142,6 +147,15 @@ fn an_unattended_claude_wakes_for_its_first_task_and_acts_on_it() {
         .with_shim(vec![shim.display().to_string()]);
     let name = format!("first-task-e2e-{}", std::process::id());
     let pane = || {
+        let sessions = server.sessions();
+        let Some(handle) = sessions.first() else {
+            return String::new();
+        };
+        assert_eq!(
+            sessions.len(),
+            1,
+            "expected one launched private tmux session"
+        );
         let out = server
             .tmux()
             .args([
@@ -151,7 +165,7 @@ fn an_unattended_claude_wakes_for_its_first_task_and_acts_on_it() {
                 "-S",
                 "-500",
                 "-t",
-                &format!("={name}:"),
+                &format!("={handle}:"),
             ])
             .stderr(Stdio::null())
             .output()

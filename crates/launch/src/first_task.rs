@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use hyphae::{Cell, CellImmutable, Gettable};
 use marshal_entities::{
-    DeleteSession, DeleteSessionResult, HostInfo, RegisterSession, SendMessage, SendMessageResult,
-    Session, SessionId,
+    DeleteSession, DeleteSessionResult, HostInfo, RegisterSession, SendLaunchTask,
+    SendMessageResult, Session, SessionId,
 };
 
 use crate::join::Roster;
 
 /// The `kind` on the launcher's short-lived roster row.
-pub const LAUNCHER_KIND: &str = "launcher";
+pub use marshal_entities::LAUNCHER_SESSION_KIND as LAUNCHER_KIND;
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
@@ -38,24 +38,17 @@ pub fn labelled(task: &str, launcher_host: &str, operator: Option<&str>, agent_i
 }
 
 /// The launcher's row. Built from JSON so fields the entity gains later default.
-pub fn launcher_session(
-    id: &str,
-    host: &str,
-    cwd: &str,
-    operator: Option<&str>,
-) -> Result<Session> {
+pub fn launcher_session(id: &str, host: &str, cwd: &str) -> Result<Session> {
     let now = chrono_ms();
-    let mut v = serde_json::json!({
+    let v = serde_json::json!({
         "id": id,
         "pid": std::process::id(),
         "cwd": cwd,
         "kind": LAUNCHER_KIND,
+        "channelsEnabled": false,
         "connectedAt": now,
         "lastActivityAt": now,
     });
-    if let Some(o) = operator {
-        v["operator"] = o.into();
-    }
     let mut s: Session = serde_json::from_value(v).context("building the launcher's roster row")?;
     s.host = Some(HostInfo {
         name: host.into(),
@@ -96,26 +89,26 @@ where
 
 /// Send `body` to `to` under a fresh `launcher` row, and remove the row after.
 /// Returns the message id.
-pub async fn send(
+pub async fn send_for_launch(
     roster: &Roster,
     to: &str,
     body: String,
     host: &str,
-    operator: Option<&str>,
+    launch_id: &str,
 ) -> Result<String> {
     let client = roster.client();
     let id = uuid::Uuid::new_v4().to_string();
     let cwd = std::env::current_dir()
         .map(|d| d.display().to_string())
         .unwrap_or_default();
-    let session = launcher_session(&id, host, &cwd, operator)?;
-    let registered = client.send_command::<RegisterSession, ()>(&RegisterSession {
-        session: session.clone(),
-    });
-    await_command(registered, REGISTER_TIMEOUT)
-        .await
-        .map_err(|e| anyhow!("couldn't register the launcher's session: {e}"))?;
+    let session = launcher_session(&id, host, &cwd)?;
     let result = async {
+        let registered = client.send_command::<RegisterSession, ()>(&RegisterSession {
+            session: session.clone(),
+        });
+        await_command(registered, REGISTER_TIMEOUT)
+            .await
+            .map_err(|e| anyhow!("couldn't register the launcher's session: {e}"))?;
         let started = Instant::now();
         while !roster.sessions().iter().any(|s| s.id == session.id) {
             if started.elapsed() > REGISTER_TIMEOUT {
@@ -123,16 +116,14 @@ pub async fn send(
             }
             tokio::time::sleep(POLL).await;
         }
-        let sent = client.send_command::<SendMessage, SendMessageResult>(&SendMessage {
+        let sent = client.send_command::<SendLaunchTask, SendMessageResult>(&SendLaunchTask {
+            launch_id: launch_id.to_string(),
             to_session_id: SessionId(Arc::from(to)),
-            response_required: false,
             body,
-            // The sender is this connection's own row, so no self-identification.
-            as_session: None,
         });
-        let sent = await_command(sent, SEND_TIMEOUT)
-            .await
-            .map_err(|e| anyhow!("the daemon didn't take the first task: {e}"))?;
+        let sent = await_command(sent, SEND_TIMEOUT).await.map_err(|e| {
+            anyhow!("the daemon did not confirm persistence of the first task: {e}")
+        })?;
         Ok(sent.message_id.0.to_string())
     }
     .await;
@@ -158,10 +149,11 @@ mod tests {
 
     #[test]
     fn the_launchers_row_is_kind_launcher_with_its_host() {
-        let s = launcher_session("id-1", "build-03", "/w", Some("op")).unwrap();
+        let s = launcher_session("id-1", "build-03", "/w").unwrap();
         assert_eq!(s.kind.as_deref(), Some(LAUNCHER_KIND));
         assert_eq!(s.host.unwrap().name, "build-03");
-        assert_eq!(s.operator.as_deref(), Some("op"));
+        assert_eq!(s.operator, None);
+        assert_eq!(s.channels_enabled, Some(false));
         assert_eq!(s.agent_id, None);
         assert_eq!(s.client_id, None);
     }

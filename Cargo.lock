@@ -3289,6 +3289,7 @@ dependencies = [
  "hyphae",
  "log",
  "marshal-entities",
+ "marshal-launch",
  "myko",
  "myko-auth",
  "myko-server",
@@ -3318,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-launch"
-version = "0.60.2"
+version = "0.60.5"
 dependencies = [
  "anyhow",
  "gethostname",
@@ -3326,6 +3327,7 @@ dependencies = [
  "marshal-entities",
  "myko",
  "myko-server",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
@@ -3335,7 +3337,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-launch-ssh"
-version = "0.60.2"
+version = "0.60.5"
 dependencies = [
  "anyhow",
  "marshal-launch",

@@ -1,5 +1,5 @@
 //! marshal-launch against a real `marshal-daemon` (`MARSHAL_E2E_DAEMON`, for
-//! example upstream's release asset), with a stand-in harness that makes
+//! example a build from this checkout), with a stand-in harness that makes
 //! Claude's hook calls through a real `marshal-shim` (`MARSHAL_E2E_SHIM`, of
 //! this tree's version).
 //!
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use hyphae::Gettable;
 use marshal_entities::{GetAllMessageReads, GetAllMessages, GetAllSessions};
 use marshal_launch::tmux::Tmux;
-use marshal_launch::{Adapter, Plan};
+use marshal_launch::{LaunchBackend, Plan};
 use myko::client::{ConnectionStatus, MykoClient};
 
 use common::daemon::RealDaemon;
@@ -64,12 +64,12 @@ fn a_real_daemon_sees_the_launch_join_read_its_task_and_leave() {
     let cwd = root.join("work");
     let config = root.join("config");
     std::fs::create_dir_all(&cwd).unwrap();
-    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(config.join("marshal")).unwrap();
+    std::fs::write(config.join("marshal/daemon-address"), &daemon.address).unwrap();
     let cwd = std::fs::canonicalize(&cwd).unwrap();
 
     // The launcher passes these to a local agent (its environment): the hook
-    // listener on its test port, and a config dir with no daemon-address file,
-    // so neither the shim nor the check reads the user's own. This test binary
+    // listener on its test port, and a config dir pointing at this daemon. This test binary
     // runs only this test, and sets them before starting any thread of its own.
     unsafe {
         std::env::set_var("MARSHAL_BASE_URL", &daemon.hook_url);
@@ -111,7 +111,7 @@ fn a_real_daemon_sees_the_launch_join_read_its_task_and_leave() {
         .unwrap_or_else(|e| panic!("launch: {e:#}\nDaemon log:\n{}", daemon.log_text()));
 
     // The joined row is the hook-registered one, carrying this launch's id.
-    let pane = server.pane("real-agent");
+    let pane = server.pane(&outcome.launched.handle);
     assert!(
         pane.contains(&format!(" {} {}]", outcome.agent_id, cwd.display())),
         "{pane}"
@@ -159,7 +159,7 @@ fn a_real_daemon_sees_the_launch_join_read_its_task_and_leave() {
             .any(|r| r.message_id.0.as_ref() == message_id && r.session_id.0.as_ref() == session_id)
     });
     wait_for("the task didn't reach the agent's turn", &daemon, || {
-        server.pane("real-agent").contains("say ready")
+        server.pane(&outcome.launched.handle).contains("say ready")
     });
     // The launcher's own row is gone once it has sent.
     let sender = m.from_session_id.0.to_string();
@@ -173,7 +173,7 @@ fn a_real_daemon_sees_the_launch_join_read_its_task_and_leave() {
     wait_for("the agent's row wasn't cleared after stop", &daemon, || {
         !sessions.get().iter().any(|s| s.id.0.as_ref() == session_id)
     });
-    assert_eq!(tmux.status("real-agent").unwrap(), Some(false));
+    assert_eq!(tmux.status(&outcome.launched.handle).unwrap(), Some(false));
 
     drop(client);
     let _ = std::fs::remove_dir_all(&root);

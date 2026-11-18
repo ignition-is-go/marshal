@@ -1,19 +1,21 @@
-//! `ExternalAdapter` against `tests/fixtures/marshal-launch-fake`: discovery
+//! `ExternalBackend` against `tests/fixtures/marshal-launch-fake`: discovery
 //! on PATH, the JSON round trip, and each failure reason reaching the user.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use marshal_launch::{Adapter, ExternalAdapter, LaunchRequest, PROTOCOL_VERSION};
+use marshal_launch::{
+    ExternalBackend, LaunchBackend, LaunchRequest, PROTOCOL_VERSION, StopReceipt,
+};
 
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn fake() -> ExternalAdapter {
+fn fake() -> ExternalBackend {
     let path = std::env::join_paths([PathBuf::from("/nonexistent"), fixtures()]).unwrap();
-    ExternalAdapter::find_in("fake", &path).unwrap()
+    ExternalBackend::find_in("fake", &path).unwrap()
 }
 
 fn req(options: &[&str]) -> LaunchRequest {
@@ -41,12 +43,12 @@ fn finds_the_adapter_on_path_and_says_when_it_is_missing() {
     let a = fake();
     assert_eq!(a.name(), "fake");
     assert_eq!(a.program(), fixtures().join("marshal-launch-fake"));
-    let e = ExternalAdapter::find_in("nope", &OsString::from(fixtures())).unwrap_err();
+    let e = ExternalBackend::find_in("nope", &OsString::from(fixtures())).unwrap_err();
     assert_eq!(
         e.to_string(),
         "no `nope` adapter: there is no executable marshal-launch-nope on PATH"
     );
-    assert!(ExternalAdapter::find_in("../fake", &OsString::from(fixtures())).is_err());
+    assert!(ExternalBackend::find_in("../fake", &OsString::from(fixtures())).is_err());
 }
 
 #[test]
@@ -74,11 +76,23 @@ fn launch_sends_the_request_and_reads_where_it_started() {
 
 #[test]
 fn stop_and_status() {
-    fake().stop("fake-ok").unwrap();
+    let request = req(&[]);
+    assert_eq!(fake().recovery_handle(&request).unwrap(), "fake-ok");
+    assert!(fake().recover(&request).unwrap().is_none());
+    assert!(matches!(
+        fake().stop("fake-ok").unwrap(),
+        StopReceipt::Stopped
+    ));
+    assert!(matches!(
+        fake().stop("fake-gone").unwrap(),
+        StopReceipt::Gone
+    ));
     assert_eq!(fake().status("fake-ok").unwrap(), Some(true));
     assert_eq!(fake().status("fake-gone").unwrap(), Some(false));
     // No status verb (exit 2) is "can't tell"; any other failure is an error.
     assert_eq!(fake().status("fake-no-status").unwrap(), None);
+    assert_eq!(fake().status("fake-null").unwrap(), None);
+    assert!(fake().stop("fake-declined").is_err());
     let e = fake()
         .status("fake-fail=unreachable")
         .unwrap_err()
@@ -153,7 +167,7 @@ fn launch_failures_say_how() {
         ("not-object", "answered [1,2], not a JSON object"),
         (
             "wrong-version",
-            "answered in contract version 2; this launcher speaks 1",
+            "answered in contract version 99; this launcher speaks 2",
         ),
         ("no-host", "answered without the contract's fields"),
     ] {

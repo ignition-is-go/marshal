@@ -1,5 +1,5 @@
 #!/bin/sh
-# A fake marshal-launch adapter for the launcher's tests (contract v1).
+# A fake marshal-launch adapter for the launcher's tests (contract v2).
 # It starts nothing. What it does is chosen by the request:
 #   check/launch: an option `--fail=<reason>` in the request's options;
 #   stop/status:  the handle (`fake-ok`, `fake-gone`, `fake-no-status`, or
@@ -11,6 +11,10 @@ opt() { printf '%s' "$req" | grep -o "\"--$1=[^\"]*\"" | head -n 1 | sed "s/^\"-
 log=$(opt log)
 [ -n "$log" ] && printf '%s %s\n' "$verb" "$req" >> "$log"
 reason=$(opt fail)
+case "$verb" in
+  recover) echo '{"version":2,"handle":"fake-ok"}'; exit 0 ;;
+  inspect) exit 2 ;;
+esac
 case "$verb" in stop|status)
   handle=$(printf '%s' "$req" | grep -o '"handle":"[^"]*"' | sed 's/^"handle":"//; s/"$//')
   case "$handle" in fake-fail=*) reason=${handle#fake-fail=} ;; esac
@@ -32,17 +36,26 @@ case "$reason" in
   killed) kill -9 $$ ;;
   not-json) echo "started it, probably"; exit 0 ;;
   not-object) echo '[1,2]'; exit 0 ;;
-  wrong-version) echo '{"version":2,"handle":"h","host":"fake-host","cwd":"/w","where":"x"}'; exit 0 ;;
-  no-host) echo '{"version":1,"handle":"h","cwd":"/w","where":"x"}'; exit 0 ;;
+  wrong-version) echo '{"version":99,"handle":"h","host":"fake-host","cwd":"/w","where":"x"}'; exit 0 ;;
+  no-host) echo '{"version":2,"handle":"h","cwd":"/w","where":"x"}'; exit 0 ;;
   *) fail "fake adapter: unknown --fail=$reason" 4 ;;
 esac
 
 echo "fake adapter: $verb ok" >&2
 case "$verb" in
-  check) echo '{"version":1}' ;;
-  launch) echo '{"version":1,"handle":"fake-ok","host":"fake-host","cwd":"/work/app","where":"fake-host fake:app","attach":"true"}' ;;
-  stop) echo '{"version":1}' ;;
+  check) echo '{"version":2}' ;;
+  launch) echo '{"version":2,"handle":"fake-ok","host":"fake-host","cwd":"/work/app","where":"fake-host fake:app","attach":"true"}' ;;
+  stop)
+    case "$handle" in
+      fake-gone) echo '{"version":2,"state":"gone"}' ;;
+      fake-declined) echo '{"version":2,"state":"declined"}' ;;
+      *) echo '{"version":2,"state":"stopped"}' ;;
+    esac ;;
   status)
-    case "$handle" in fake-gone) echo '{"version":1,"running":false}' ;; *) echo '{"version":1,"running":true}' ;; esac ;;
+    case "$handle" in
+      fake-gone) echo '{"version":2,"running":false}' ;;
+      fake-null) echo '{"version":2,"running":null}' ;;
+      *) echo '{"version":2,"running":true}' ;;
+    esac ;;
   *) fail "usage: marshal-launch-fake <check|launch|stop|status>" 2 ;;
 esac

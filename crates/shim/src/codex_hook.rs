@@ -476,8 +476,13 @@ fn wrap_long_lines(text: &str, max: usize) -> String {
 /// context. The long-lived bridge calls this from `thread/started`, before the
 /// first prompt; normal lifecycle hooks remain responsible for context
 /// injection and inbox acknowledgement.
-pub(crate) fn register_session(base: &str, session_id: &str, cwd: &str) -> Option<String> {
-    let body = registration_body(session_id, cwd, agent_id_from_env().as_deref());
+pub(crate) fn register_session(
+    base: &str,
+    session_id: &str,
+    cwd: &str,
+    agent_id: Option<&str>,
+) -> Option<String> {
+    let body = registration_body(session_id, cwd, agent_id);
     let path = format!(
         "/hook/session-register?host={}&operator={}&harness=codex",
         url_q(&short_host()),

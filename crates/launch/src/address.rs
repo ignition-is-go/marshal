@@ -19,7 +19,7 @@ pub const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
 /// daemon address's host.
 pub const HOOK_PORT: u16 = 6156;
 /// The only adapter allowed a loopback launch address.
-pub const LOCAL_ADAPTER: &str = "tmux";
+pub const LOCAL_BACKEND: &str = "tmux";
 
 /// The launch address, first found of: `--daemon`, the `launch-address` config
 /// file, the `daemon-address` config file, `MARSHAL_DAEMON_ADDRESS`,
@@ -31,23 +31,37 @@ pub fn resolve(
     env: Option<String>,
     legacy_env: Option<String>,
 ) -> String {
+    resolve_configured(flag, launch_file, daemon_file, env, legacy_env)
+        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.into())
+}
+
+fn resolve_configured(
+    flag: Option<String>,
+    launch_file: Option<String>,
+    daemon_file: Option<String>,
+    env: Option<String>,
+    legacy_env: Option<String>,
+) -> Option<String> {
     [flag, launch_file, daemon_file, env, legacy_env]
         .into_iter()
         .flatten()
         .map(|a| a.trim().to_string())
         .find(|a| !a.is_empty())
-        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string())
 }
 
-/// [`resolve`] from this process's flag, config files and environment.
-pub fn from_environment(flag: Option<String>) -> String {
-    resolve(
+/// Configured address, without assuming a default listener or port.
+pub fn configured_from_environment(flag: Option<String>) -> Option<String> {
+    resolve_configured(
         flag,
         read_config("launch-address"),
         read_config("daemon-address"),
         std::env::var("MARSHAL_DAEMON_ADDRESS").ok(),
         std::env::var("MYKO_ADDRESS").ok(),
     )
+}
+
+pub fn from_environment(flag: Option<String>) -> String {
+    configured_from_environment(flag).unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.into())
 }
 
 /// The first non-empty line of `marshal/<name>` in the first config dir that has it.
@@ -167,9 +181,9 @@ pub fn is_loopback_host(host: &str) -> bool {
 /// Refuse a loopback launch address for any adapter but `tmux`, before
 /// anything starts: an agent elsewhere would reach its own machine, not the
 /// daemon, and the launch would only time out.
-pub fn check_for_adapter(adapter: &str, address: &str) -> Result<()> {
+pub fn check_for_backend(adapter: &str, address: &str) -> Result<()> {
     let (host, _) = host_port(address)?;
-    if adapter != LOCAL_ADAPTER && is_loopback_host(&host) {
+    if adapter != LOCAL_BACKEND && is_loopback_host(&host) {
         bail!(
             "the launch address {address} is loopback, which only reaches this machine, so the \
              {adapter} adapter wasn't run and nothing was started. Pass --daemon <url> or write \
@@ -181,14 +195,14 @@ pub fn check_for_adapter(adapter: &str, address: &str) -> Result<()> {
 }
 
 /// Refuse a loopback hook base (`MARSHAL_BASE_URL`) for any adapter but `tmux`,
-/// before anything starts, for the same reason as [`check_for_adapter`]: the
+/// before anything starts, for the same reason as [`check_for_backend`]: the
 /// agent's hooks would dial its own machine and the agent would never join.
-pub fn check_hook_base_for_adapter(adapter: &str, hook_base: Option<&str>) -> Result<()> {
+pub fn check_hook_base_for_backend(adapter: &str, hook_base: Option<&str>) -> Result<()> {
     let Some(base) = hook_base.map(str::trim).filter(|b| !b.is_empty()) else {
         return Ok(());
     };
     let (host, _) = http_host_port(base)?;
-    if adapter != LOCAL_ADAPTER && is_loopback_host(&host) {
+    if adapter != LOCAL_BACKEND && is_loopback_host(&host) {
         bail!(
             "MARSHAL_BASE_URL {base} is loopback, which only reaches this machine, so the \
              {adapter} adapter wasn't run and nothing was started. Set it to the daemon's hook \
@@ -292,8 +306,8 @@ mod tests {
             "http://[::1]:26156",
             "http://0.0.0.0:6156",
         ] {
-            assert!(check_hook_base_for_adapter("tmux", Some(b)).is_ok(), "{b}");
-            let err = check_hook_base_for_adapter("ssh", Some(b))
+            assert!(check_hook_base_for_backend("tmux", Some(b)).is_ok(), "{b}");
+            let err = check_hook_base_for_backend("ssh", Some(b))
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -301,10 +315,10 @@ mod tests {
                 "{err}"
             );
         }
-        assert!(check_hook_base_for_adapter("ssh", Some("http://192.0.2.1:26156")).is_ok());
-        assert!(check_hook_base_for_adapter("ssh", None).is_ok());
-        assert!(check_hook_base_for_adapter("ssh", Some(" ")).is_ok());
-        assert!(check_hook_base_for_adapter("ssh", Some("ws://h:1")).is_err());
+        assert!(check_hook_base_for_backend("ssh", Some("http://192.0.2.1:26156")).is_ok());
+        assert!(check_hook_base_for_backend("ssh", None).is_ok());
+        assert!(check_hook_base_for_backend("ssh", Some(" ")).is_ok());
+        assert!(check_hook_base_for_backend("ssh", Some("ws://h:1")).is_err());
     }
 
     #[test]
@@ -376,15 +390,15 @@ mod tests {
             "ws://0.0.0.0:6155",
             "ws://[::]:6155",
         ] {
-            assert!(check_for_adapter("tmux", a).is_ok(), "{a}");
-            let err = check_for_adapter("ssh", a).unwrap_err().to_string();
+            assert!(check_for_backend("tmux", a).is_ok(), "{a}");
+            let err = check_for_backend("ssh", a).unwrap_err().to_string();
             assert!(
                 err.contains("loopback") && err.contains("nothing was started"),
                 "{err}"
             );
         }
-        assert!(check_for_adapter("ssh", "ws://marshal.mesh:6155").is_ok());
-        assert!(check_for_adapter("ssh", "nonsense").is_err());
+        assert!(check_for_backend("ssh", "ws://marshal.mesh:6155").is_ok());
+        assert!(check_for_backend("ssh", "nonsense").is_err());
     }
 
     #[test]

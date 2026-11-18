@@ -1,17 +1,17 @@
-//! `marshal-launch <adapter> <harness>`: start an agent and wait for it to join.
+//! `marshal-launch <backend> <harness>`: start an agent and wait for it to join.
 //! See docs/agent-launcher.md.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
-use marshal_launch::{Adapter, ExternalAdapter, Plan, address, record, tmux};
+use marshal_launch::{address, api, new_agent_id, tmux};
 
 const USAGE: &str =
-    "usage: marshal-launch <adapter> <claude|codex> [--cwd <dir>] [--name <label>] \
-[--task <text>] [--daemon <url>] [--timeout <secs>] [--no-check] [-- <adapter options>]
+    "usage: marshal-launch <backend> <claude|codex> [--cwd <dir>] [--name <label>] \
+[--task <text>] [--daemon <url>] [--timeout <secs>] [--no-check] [--id <launch-id>] [-- <backend options>]
        marshal-launch list [--daemon <url>]
-       marshal-launch stop <name|agent_id>";
+       marshal-launch get|stop <launch-id>";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,6 +21,7 @@ struct Args {
     cwd: Option<String>,
     name: Option<String>,
     daemon: Option<String>,
+    launch_id: Option<String>,
     timeout: Duration,
     check: bool,
     options: Vec<String>,
@@ -38,6 +39,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
         cwd: None,
         name: None,
         daemon: None,
+        launch_id: None,
         timeout: DEFAULT_TIMEOUT,
         check: true,
         options: vec![],
@@ -53,6 +55,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
             "--cwd" => a.cwd = Some(value()?),
             "--name" => a.name = Some(value()?),
             "--daemon" => a.daemon = Some(value()?),
+            "--id" => a.launch_id = Some(value()?),
             "--timeout" => {
                 let secs: u64 = value()?
                     .parse()
@@ -76,178 +79,102 @@ fn parse_args(args: &[String]) -> Result<Args> {
     Ok(a)
 }
 
-/// The built-in tmux adapter, or `marshal-launch-<name>` found on `PATH`.
-fn adapter_for(name: &str) -> Result<Box<dyn Adapter>> {
-    match name {
-        address::LOCAL_ADAPTER => Ok(Box::new(tmux::Tmux::default())),
-        other => Ok(Box::new(ExternalAdapter::find(other)?)),
+fn service_base(daemon: Option<String>) -> Result<String> {
+    if let Some(daemon) = daemon {
+        if daemon.starts_with("http://") || daemon.starts_with("https://") {
+            return Ok(daemon);
+        }
+        return api::service_url(&daemon);
+    }
+    match std::env::var("MARSHAL_LAUNCH_API") {
+        Ok(base) => Ok(base),
+        Err(_) => api::service_url(&address::from_environment(None)),
     }
 }
 
-fn run(mut args: Args) -> Result<()> {
-    let adapter = adapter_for(&args.adapter)?;
-    let local = adapter.name() == address::LOCAL_ADAPTER;
-    let cwd = match args.cwd.take() {
-        Some(c) => c,
-        None if local => std::env::current_dir()
-            .context("reading the current directory")?
-            .display()
-            .to_string(),
-        None => bail!("--cwd is needed for the {} adapter", args.adapter),
+fn run(args: Args) -> Result<()> {
+    let base = service_base(args.daemon)?;
+    let cwd = match args.cwd {
+        Some(cwd) => cwd,
+        None if args.adapter == address::LOCAL_BACKEND => {
+            std::env::current_dir()?.display().to_string()
+        }
+        None => bail!("--cwd is needed for the {} backend", args.adapter),
     };
-    let name = match args.name.take() {
-        Some(n) => n,
-        None => tmux::default_name(&args.harness, &PathBuf::from(&cwd)),
-    };
-    let plan = plan_for(
-        args,
-        cwd,
-        name,
-        address::from_environment,
-        record::default_path()?,
-    );
-    let outcome = runtime()?.block_on(marshal_launch::launch(adapter.as_ref(), &plan))?;
-    let attach = outcome
-        .launched
-        .attach
-        .as_deref()
-        .map(|a| format!(". Attach: {a}"))
-        .unwrap_or_default();
-    println!(
-        "{} ({}) joined from {}{attach}",
-        outcome.joined.nickname, outcome.joined.session_id, outcome.launched.r#where
-    );
-    if let Some(id) = outcome.task_message_id {
-        println!("first task sent as message {id}");
+    let name = args
+        .name
+        .unwrap_or_else(|| tmux::default_name(&args.harness, &PathBuf::from(&cwd)));
+    let launch_id = args.launch_id.unwrap_or_else(new_agent_id);
+    eprintln!("launch {launch_id}");
+    let response: api::LaunchView = runtime()?.block_on(api::call(
+        &base,
+        api::LAUNCH_PATH,
+        &api::StartLaunch {
+            launch_id,
+            backend: args.adapter,
+            harness: args.harness,
+            cwd,
+            name,
+            options: args.options,
+            check: args.check,
+            timeout_secs: args.timeout.as_secs(),
+            first_task: args.task,
+        },
+    ))?;
+    report(&response)
+}
+
+fn report(view: &api::LaunchView) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(view)?);
+    if let Some(error) = &view.error {
+        bail!("{error}");
     }
     Ok(())
 }
 
-/// The plan for a launch. The launcher waits for the join on the same daemon
-/// it hands the agent (`--daemon`, or the launch-address resolution), never on
-/// a separately resolved local address, which may be another daemon.
-fn plan_for(
-    args: Args,
-    cwd: String,
-    name: String,
-    resolve: impl Fn(Option<String>) -> String,
-    records: PathBuf,
-) -> Plan {
-    let launch_address = resolve(args.daemon);
-    Plan {
-        harness: args.harness,
-        cwd,
-        name,
-        daemon_address: launch_address.clone(),
-        launch_address,
-        timeout: args.timeout,
-        check: args.check,
-        options: args.options,
-        task: args.task,
-        records: Some(records),
-    }
-}
-
 fn runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("building tokio runtime")
 }
 
-/// What `list` says of one launch's process, from its adapter.
-fn process_state(l: &record::Launch) -> String {
-    match adapter_for(&l.adapter).and_then(|a| a.status(&l.handle)) {
-        Ok(Some(true)) => "running".into(),
-        Ok(Some(false)) => "exited".into(),
-        Ok(None) => "unknown".into(),
-        Err(e) => format!("unknown ({e})"),
-    }
-}
-
-/// Each launch's roster state comes from the daemon it was launched against
-/// (recorded with it), or from `--daemon` when given. A record without one
-/// uses the local daemon address.
-fn list(daemon: Option<String>) -> Result<()> {
-    let store = record::Store::open_default()?;
-    let launches = store.list()?;
-    if launches.is_empty() {
-        println!("no launches recorded in {}", store.path().display());
-        return Ok(());
-    }
-    let rt = runtime()?;
-    let mut rosters: std::collections::BTreeMap<String, Result<marshal_launch::join::Roster>> =
-        Default::default();
-    for l in &launches {
-        let address = daemon
-            .clone()
-            .or_else(|| l.daemon.clone())
-            .unwrap_or_else(|| address::from_environment(None));
-        let roster = rosters.entry(address.clone()).or_insert_with(|| {
-            let r = rt.block_on(marshal_launch::join::Roster::connect(&address));
-            if let Err(e) = &r {
-                eprintln!("roster state unknown at {address}: {e:#}");
-            }
-            r
-        });
-        let on_roster = match roster {
-            Ok(r) => {
-                let sessions = r.sessions();
-                let launched = marshal_launch::Launched {
-                    handle: l.handle.clone(),
-                    host: l.host.clone(),
-                    cwd: l.cwd.clone(),
-                    r#where: l.r#where.clone(),
-                    attach: None,
-                };
-                match marshal_launch::join::find(&sessions, &l.agent_id, &launched) {
-                    marshal_launch::join::Join::Joined(s) => format!("on the roster as {}", s.id.0),
-                    _ if l.session_id.is_some() => "joined, now off the roster".into(),
-                    _ => "not on the roster".into(),
-                }
-            }
-            Err(_) => "roster unknown".into(),
-        };
-        println!(
-            "{}\t{}\t{} {}\t{}\t{}\t{}",
-            l.name,
-            l.agent_id,
-            l.adapter,
-            l.harness,
-            l.r#where,
-            process_state(l),
-            on_roster
-        );
-    }
-    Ok(())
-}
-
-fn stop(key: &str) -> Result<()> {
-    let store = record::Store::open_default()?;
-    let launches = store.list()?;
-    let l = record::find(&launches, key)?;
-    adapter_for(&l.adapter)?
-        .stop(&l.handle)
-        .with_context(|| format!("stopping {} at {}", l.name, l.r#where))?;
-    store.remove(&l.agent_id)?;
-    println!(
-        "stopped {} ({}) at {}; its roster row clears when the harness exits",
-        l.name, l.agent_id, l.r#where
-    );
-    Ok(())
-}
-
 fn dispatch(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
-        Some("list") => match &args[1..] {
-            [] => list(None),
-            [flag, url] if flag == "--daemon" => list(Some(url.clone())),
-            _ => bail!("list takes only --daemon <url>\n{USAGE}"),
-        },
-        Some("stop") => match &args[1..] {
-            [key] => stop(key),
-            _ => bail!("stop takes one name or agent id\n{USAGE}"),
-        },
+        Some("list") => {
+            let daemon = match &args[1..] {
+                [] => None,
+                [flag, url] if flag == "--daemon" => Some(url.clone()),
+                _ => bail!("list takes only --daemon <url>\n{USAGE}"),
+            };
+            let launches: Vec<api::LaunchView> = runtime()?.block_on(api::call(
+                &service_base(daemon)?,
+                api::LIST_LAUNCHES_PATH,
+                &serde_json::json!({}),
+            ))?;
+            println!("{}", serde_json::to_string_pretty(&launches)?);
+            Ok(())
+        }
+        Some(operation @ ("get" | "stop")) => {
+            let (key, daemon) = match &args[1..] {
+                [key] => (key, None),
+                [key, flag, url] if flag == "--daemon" => (key, Some(url.clone())),
+                _ => bail!("{operation} takes a launch ID and optional --daemon <url>\n{USAGE}"),
+            };
+            let path = if operation == "get" {
+                api::GET_LAUNCH_PATH
+            } else {
+                api::STOP_LAUNCH_PATH
+            };
+            let view: api::LaunchView = runtime()?.block_on(api::call(
+                &service_base(daemon)?,
+                path,
+                &api::LaunchKey {
+                    launch_id: key.clone(),
+                },
+            ))?;
+            report(&view)
+        }
         _ => parse_args(args).and_then(run),
     }
 }
@@ -303,20 +230,6 @@ mod tests {
     }
 
     #[test]
-    fn the_launcher_watches_the_daemon_it_hands_the_agent() {
-        let args = parse_args(&v(&["ssh", "claude", "--daemon", "ws://192.0.2.1:26155"])).unwrap();
-        // The local resolution would give another daemon; the join wait must not use it.
-        let resolve = |flag: Option<String>| flag.unwrap_or_else(|| "ws://localhost:6155".into());
-        let plan = plan_for(args, "/w".into(), "n".into(), resolve, PathBuf::from("/r"));
-        assert_eq!(plan.launch_address, "ws://192.0.2.1:26155");
-        assert_eq!(plan.daemon_address, "ws://192.0.2.1:26155");
-        let args = parse_args(&v(&["tmux", "claude"])).unwrap();
-        let plan = plan_for(args, "/w".into(), "n".into(), resolve, PathBuf::from("/r"));
-        assert_eq!(plan.daemon_address, "ws://localhost:6155");
-        assert_eq!(plan.launch_address, plan.daemon_address);
-    }
-
-    #[test]
     fn refuses_anything_it_doesnt_know_including_harness_flags() {
         assert!(parse_args(&v(&[])).is_err());
         assert!(parse_args(&v(&["tmux"])).is_err());
@@ -324,15 +237,6 @@ mod tests {
         assert!(parse_args(&v(&["tmux", "claude", "--cwd"])).is_err());
         assert!(parse_args(&v(&["tmux", "claude", "--timeout", "0"])).is_err());
         assert!(parse_args(&v(&["tmux", "claude", "--dangerously-skip-permissions"])).is_err());
-        let missing = adapter_for("no-such-adapter-here")
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(
-            missing.contains("marshal-launch-no-such-adapter-here"),
-            "{missing}"
-        );
-        assert!(adapter_for("../evil").is_err());
         assert!(dispatch(&v(&["list", "x"])).is_err());
         assert!(dispatch(&v(&["list", "--daemon"])).is_err());
         assert!(dispatch(&v(&["stop"])).is_err());

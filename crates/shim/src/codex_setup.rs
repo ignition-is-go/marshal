@@ -55,15 +55,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         .or_else(|| std::env::var(crate::ADDRESS_ENV).ok())
         .or_else(crate::read_address_from_config_file)
         .unwrap_or_else(|| "ws://localhost:6155".to_string());
-    let host = ws
-        .strip_prefix("ws://")
-        .or_else(|| ws.strip_prefix("wss://"))
-        .unwrap_or("localhost:6155")
-        .split(['/', ':'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("localhost");
-    let hook_base = format!("http://{host}:6156");
+    let hook_base = crate::codex_hook::registration_base(&ws);
+    validate_hook_base(&hook_base)?;
 
     let home = codex_home(home_override)?;
     std::fs::create_dir_all(&home)?;
@@ -143,6 +136,90 @@ fn codex_home(override_: Option<String>) -> anyhow::Result<PathBuf> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("cannot locate home dir (set HOME or --codex-home)"))?;
     Ok(PathBuf::from(home).join(".codex"))
+}
+
+fn validate_hook_base(base: &str) -> anyhow::Result<()> {
+    let valid = base.strip_prefix("http://").is_some_and(|authority| {
+        !authority.is_empty()
+            && authority
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-_:[]".contains(&byte))
+    });
+    anyhow::ensure!(valid, "the Marshal hook URL must be http://HOST[:PORT]");
+    Ok(())
+}
+
+pub(crate) fn check_launch_wiring(daemon: &str, hook_base: &str) -> anyhow::Result<()> {
+    validate_hook_base(hook_base)?;
+    let path = codex_home(None)?.join("config.toml");
+    let config = std::fs::read_to_string(&path)?;
+    check_managed_wiring(&config, daemon, hook_base).map_err(|error| {
+        anyhow::anyhow!(
+            "{error} in {}; rerun marshal-shim codex-setup for this daemon before launching Codex",
+            path.display()
+        )
+    })
+}
+
+fn check_managed_wiring(config: &str, daemon: &str, hook_base: &str) -> anyhow::Result<()> {
+    let block = config
+        .split_once(CFG_BEGIN)
+        .and_then(|(_, section)| section.split_once(CFG_END))
+        .map(|(block, _)| block)
+        .ok_or_else(|| anyhow::anyhow!("missing managed Marshal wiring"))?;
+    let configured_daemon = block
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("env = { MARSHAL_DAEMON_ADDRESS = ")
+        })
+        .and_then(|value| {
+            serde_json::Deserializer::from_str(value)
+                .into_iter::<String>()
+                .next()
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        configured_daemon
+            .as_deref()
+            .map(|address| address.trim_end_matches('/'))
+            == Some(daemon.trim_end_matches('/')),
+        "the Marshal MCP server is configured for a different WebSocket endpoint"
+    );
+
+    let events = [
+        "session-start",
+        "session-end",
+        "prompt-submit",
+        "pre-tool-use",
+        "post-tool-use",
+    ];
+    let mut present = [false; 5];
+    for command in block.lines().filter_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        matches!(key.trim(), "command" | "command_windows").then_some(value.trim())
+    }) {
+        let Ok(command) = serde_json::from_str::<String>(command) else {
+            continue;
+        };
+        let Some((_, invocation)) = command.rsplit_once(" codex-hook ") else {
+            continue;
+        };
+        let (event, endpoint) = invocation.split_once(' ').unwrap_or((invocation, ""));
+        let Some(index) = events.iter().position(|name| *name == event) else {
+            continue;
+        };
+        let endpoint = endpoint.trim_matches(['\'', '"']).trim_end_matches('/');
+        anyhow::ensure!(
+            endpoint == hook_base.trim_end_matches('/'),
+            "the Codex {event} hook is configured for a different endpoint"
+        );
+        present[index] = true;
+    }
+    for (event, is_present) in events.into_iter().zip(present) {
+        anyhow::ensure!(is_present, "missing the Codex {event} hook");
+    }
+    Ok(())
 }
 
 /// Copy this binary to a stable per-user location and best-effort add that dir to
@@ -270,6 +347,13 @@ struct HookCmds {
 
 fn hook_commands(exe: &str, hook_base: &str, windows: bool) -> HookCmds {
     let exe = shell_quote_executable(exe, windows);
+    let bracketed_url;
+    let hook_base = if hook_base.contains('[') {
+        bracketed_url = shell_quote_executable(hook_base, windows);
+        bracketed_url.as_str()
+    } else {
+        hook_base
+    };
     HookCmds {
         ss: format!("{exe} codex-hook session-start {hook_base}"),
         end: format!("{exe} codex-hook session-end {hook_base}"),
@@ -505,6 +589,31 @@ mod tests {
             pre: "shim codex-hook pre-tool-use http://host:6156".into(),
             post: "shim codex-hook post-tool-use http://host:6156".into(),
         }
+    }
+
+    #[test]
+    fn managed_launch_wiring_requires_mcp_and_lifecycle_endpoints_to_agree() {
+        let daemon = "ws://host:6155";
+        let hook_base = "http://host:26156";
+        let hooks = hook_commands("/usr/bin/marshal-shim", hook_base, false);
+        let config = format!(
+            "{CFG_BEGIN}\n{}{CFG_END}",
+            config_block("shim", daemon, &hooks)
+        );
+        assert!(check_managed_wiring(&config, daemon, hook_base).is_ok());
+        assert!(check_managed_wiring(&config, "ws://host:6155/wrong", hook_base).is_err());
+        let old = config.replace(
+            "codex-hook prompt-submit http://host:26156",
+            "codex-hook prompt-submit http://host:6156",
+        );
+        assert!(
+            check_managed_wiring(&old, daemon, hook_base)
+                .unwrap_err()
+                .to_string()
+                .contains("prompt-submit")
+        );
+        assert!(validate_hook_base("https://host:26156").is_err());
+        assert!(validate_hook_base("http://host;false").is_err());
     }
 
     #[test]

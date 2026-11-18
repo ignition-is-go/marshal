@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use marshal_launch::PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
 fn fixture(name: &str) -> PathBuf {
@@ -73,12 +74,12 @@ impl Env {
 
     fn request(&self, argv: &[&str]) -> Value {
         json!({
-            "version": 1,
+            "version": PROTOCOL_VERSION,
             "harness": "claude",
             "argv": argv,
             "cwd": self.path("work"),
             "name": "launch-test",
-            "agent_id": "launch-test-1",
+            "launch_id": "launch-test-1",
             "marshal_version": marshal_launch_ssh::VERSION,
             "env": {
                 "MARSHAL_AGENT_ID": "launch-test-1",
@@ -146,20 +147,14 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
     let l = stdout_json(&e.run("launch", &req, &[]));
     let work = std::fs::canonicalize(e.path("work")).unwrap();
     let host = String::from_utf8(Command::new("uname").arg("-n").output().unwrap().stdout).unwrap();
-    assert_eq!(l["version"], 1);
-    assert_eq!(l["handle"], "target-1 launch-test");
+    assert_eq!(l["version"], PROTOCOL_VERSION);
+    assert_eq!(l["handle"], "target-1 marshal-launch-test-1");
     assert_eq!(l["host"], host.trim());
     assert_eq!(l["cwd"], work.display().to_string());
     assert_eq!(l["where"], format!("{} tmux:launch-test", host.trim()));
-    // The attach command names the tmux the launch used by its full path,
-    // since a non-login ssh shell's PATH may not hold it.
-    assert_eq!(
-        l["attach"],
-        format!(
-            "ssh -t target-1 '{}' attach -t '=launch-test'",
-            which("tmux")
-        )
-    );
+    let attach = l["attach"].as_str().unwrap();
+    assert!(attach.contains(&which("tmux")));
+    assert!(attach.contains("=marshal-launch-test-1"));
     // The response parses as the launcher's type.
     let _: marshal_launch::Launched = serde_json::from_value(l.clone()).unwrap();
 
@@ -178,23 +173,88 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
         )
     );
 
-    // A second launch under the same name starts nothing.
-    let again = e.run("launch", &req, &[]);
-    assert!(!again.status.success());
-    assert!(
-        stderr(&again).contains("already has a tmux session named launch-test"),
-        "{}",
-        stderr(&again)
+    assert_eq!(
+        stdout_json(&e.run("recover", &req, &[]))["handle"],
+        l["handle"]
+    );
+    assert_eq!(
+        stdout_json(&e.run("inspect", &req, &[]))["launched"]["handle"],
+        l["handle"]
+    );
+    assert_eq!(stdout_json(&e.run("launch", &req, &[])), l);
+
+    let h = json!({"version": PROTOCOL_VERSION, "handle": l["handle"]});
+    assert_eq!(stdout_json(&e.run("status", &h, &[]))["running"], true);
+    assert_eq!(stdout_json(&e.run("stop", &h, &[]))["state"], "stopped");
+    assert_eq!(stdout_json(&e.run("status", &h, &[]))["running"], false);
+
+    let mut replacement = req.clone();
+    replacement["launch_id"] = json!("launch-replacement");
+    let other = stdout_json(&e.run("launch", &replacement, &[]));
+    let other_handle = json!({"version": PROTOCOL_VERSION, "handle": other["handle"]});
+    assert_eq!(stdout_json(&e.run("stop", &h, &[]))["state"], "gone");
+    assert_eq!(
+        stdout_json(&e.run("status", &other_handle, &[]))["running"],
+        true
     );
 
-    let h = json!({"version": 1, "handle": "target-1 launch-test"});
-    assert_eq!(stdout_json(&e.run("status", &h, &[]))["running"], true);
-    stdout_json(&e.run("stop", &h, &[]));
-    assert_eq!(stdout_json(&e.run("status", &h, &[]))["running"], false);
-    // Stopping what's gone is not an error.
-    let gone = e.run("stop", &h, &[]);
-    assert!(gone.status.success());
-    assert!(stderr(&gone).contains("nothing to stop"));
+    e.bin("tmux", "echo inaccessible >&2; exit 1");
+    assert!(!e.run("stop", &other_handle, &[]).status.success());
+    std::fs::remove_file(e.path("bin/tmux")).unwrap();
+    assert_eq!(
+        stdout_json(&e.run("status", &other_handle, &[]))["running"],
+        true
+    );
+    assert_eq!(
+        stdout_json(&e.run("stop", &other_handle, &[]))["state"],
+        "stopped"
+    );
+}
+
+#[test]
+fn stop_rechecks_process_ownership_inside_tmux() {
+    if !have_tmux() {
+        return;
+    }
+    let e = Env::new();
+    let req = e.request(&["sh", "-c", "sleep 60"]);
+    let launch = stdout_json(&e.run("launch", &req, &[]));
+    let handle = json!({"version": PROTOCOL_VERSION, "handle": launch["handle"]});
+    let real = which("tmux");
+    e.bin("tmux", &format!(r#"
+        case "$1" in
+          if-shell|kill-session)
+            "{real}" set-environment -t '=marshal-launch-test-1' MARSHAL_LAUNCH_KEY different-owner ;;
+        esac
+        exec "{real}" "$@"
+    "#));
+    let stop = e.run("stop", &handle, &[]);
+    assert!(
+        !stop.status.success(),
+        "stop succeeded after the ownership marker changed"
+    );
+    assert!(
+        e.tmux(&["has-session", "-t", "=marshal-launch-test-1"])
+            .status
+            .success()
+    );
+
+    std::fs::remove_file(e.path("bin/tmux")).unwrap();
+    assert!(
+        e.tmux(&[
+            "set-environment",
+            "-t",
+            "=marshal-launch-test-1",
+            "MARSHAL_LAUNCH_KEY",
+            "marshal-launch-test-1"
+        ])
+        .status
+        .success()
+    );
+    assert_eq!(
+        stdout_json(&e.run("stop", &handle, &[]))["state"],
+        "stopped"
+    );
 }
 
 #[test]
@@ -209,7 +269,7 @@ fn launch_refuses_loopback_and_starts_nothing() {
         assert!(o.stdout.is_empty());
     }
     assert!(
-        !e.tmux(&["has-session", "-t", "=launch-test"])
+        !e.tmux(&["has-session", "-t", "=marshal-launch-test-1"])
             .status
             .success()
     );
@@ -227,7 +287,7 @@ fn an_unreachable_target_starts_nothing_and_says_so() {
     let err = stderr(&o);
     assert!(err.contains("No route to host"), "{err}");
     assert!(
-        err.contains("can't reach target-1 over ssh; nothing was started"),
+        err.contains("ssh to target-1 did not return a result"),
         "{err}"
     );
 }
@@ -386,6 +446,100 @@ fn check_accepts_claude_wired_by_hand_once_it_has_the_wait_hook() {
     let err = stderr(&e.run("check", &e.request(&["claude"]), &[]));
     assert!(err.contains("can't reach the daemon at"), "{err}");
     assert!(!err.contains("Claude"), "{err}");
+}
+
+#[test]
+fn preflight_never_executes_project_controlled_shim() {
+    if !have_json_reader() {
+        return;
+    }
+    let e = Env::new();
+    e.bin(
+        "marshal-shim",
+        &format!("echo 'marshal-shim {}'", marshal_launch_ssh::VERSION),
+    );
+    e.bin("claude", "echo '[]'");
+    std::fs::create_dir_all(e.path("work/.claude")).unwrap();
+    std::fs::write(
+        e.path("work/.claude/settings.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"command":"./marshal-shim claude-hook wait"}]}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        e.path("work/.mcp.json"),
+        r#"{"mcpServers":{"marshal":{"command":"./marshal-shim"}}}"#,
+    )
+    .unwrap();
+    e.bin("project-shim", "touch EXECUTED; echo 'marshal-shim 0.0.0'");
+    std::fs::copy(e.path("bin/project-shim"), e.path("work/marshal-shim")).unwrap();
+    let out = e.run("check", &e.request(&["claude"]), &[]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("outside the trusted marshal-shim installation"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!e.path("work/EXECUTED").exists());
+}
+
+#[test]
+fn codex_preflight_compares_hook_routes_without_exporting_config() {
+    let e = Env::new();
+    e.bin(
+        "marshal-shim",
+        &format!("echo 'marshal-shim {}'", marshal_launch_ssh::VERSION),
+    );
+    let dir = e.path("home/codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("config.toml");
+    let transcript = e.path("transcript");
+    let env = [
+        ("CODEX_HOME", dir.to_str().unwrap()),
+        ("FAKE_SSH_TRANSCRIPT", transcript.to_str().unwrap()),
+    ];
+    let mut request = e.request(&["marshal-shim", "codex-run"]);
+    request["harness"] = json!("codex");
+    let config = |hook, end| {
+        format!(
+            r#"# >>> marshal (managed by marshal-shim codex-setup) >>>
+[mcp_servers.marshal]
+command = "marshal-shim"
+env = {{ MARSHAL_DAEMON_ADDRESS = "ws://marshal.invalid:6155", TOKEN = "SYNTHETIC_SECRET" }}
+[[hooks.SessionStart]]
+command = "marshal-shim codex-hook session-start {hook}"
+{end}
+[mcp_servers.unrelated.env]
+TOKEN = "UNRELATED_SECRET"
+"#
+        )
+    };
+    let end = "# <<< marshal (managed by marshal-shim codex-setup) <<<";
+    std::fs::write(&file, config("http://marshal.invalid:6156", end)).unwrap();
+    let out = e.run("check", &request, &env);
+    assert!(
+        stderr(&out).contains("can't reach the daemon"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("Codex"), "{}", stderr(&out));
+    std::fs::write(&file, config("http://other.invalid:6156", end)).unwrap();
+    let out = e.run("check", &request, &env);
+    assert!(
+        stderr(&out).contains("target a different hook URL"),
+        "{}",
+        stderr(&out)
+    );
+
+    std::fs::write(&file, config("http://marshal.invalid:6156", "")).unwrap();
+    let out = e.run("check", &request, &env);
+    assert!(
+        stderr(&out).contains("no complete marshal block"),
+        "{}",
+        stderr(&out)
+    );
+    let sent = std::fs::read_to_string(transcript).unwrap();
+    assert!(!sent.contains("SYNTHETIC_SECRET"));
+    assert!(!sent.contains("UNRELATED_SECRET"));
 }
 
 /// The shim there takes MARSHAL_BASE_URL from the target's own environment
@@ -584,15 +738,19 @@ fn status_stop_and_attach_work_when_the_login_shell_is_zsh() {
         ("FAKE_SSH_LOGIN_SHELL", zsh.as_str()),
     ];
     let l = stdout_json(&e.run("launch", &e.request(&["sh", "-c", "sleep 60"]), &shell));
-    let h = json!({"version": 1, "handle": l["handle"]});
+    let h = json!({"version": PROTOCOL_VERSION, "handle": l["handle"]});
     assert_eq!(stdout_json(&e.run("status", &h, &shell))["running"], true);
 
-    // The attach command, minus `ssh -t <dest>`, is what the target's zsh
-    // runs. Checked with has-session, which needs no terminal.
-    let remote = l["attach"]
-        .as_str()
-        .unwrap()
-        .strip_prefix("ssh -t target-1 ")
+    let attach = l["attach"].as_str().unwrap();
+    let parsed = Command::new("sh")
+        .args([
+            "-c",
+            &format!(r#"ssh() {{ shift 3; printf '%s' "$1"; }}; {attach}"#),
+        ])
+        .output()
+        .unwrap();
+    assert!(parsed.status.success());
+    let remote = String::from_utf8(parsed.stdout)
         .unwrap()
         .replace(" attach ", " has-session ");
     let in_zsh = |cmd: &str| {
@@ -657,14 +815,14 @@ fn the_token_file_is_read_on_the_target_and_never_carried() {
     let cmd = e.tmux(&[
         "list-panes",
         "-t",
-        "=launch-test",
+        "=marshal-launch-test-1",
         "-F",
         "#{pane_start_command}",
     ]);
     let cmd = String::from_utf8_lossy(&cmd.stdout);
     assert!(cmd.contains("claude-oauth-token"), "{cmd}");
     assert!(!cmd.contains(secret), "{cmd}");
-    let h = json!({"version": 1, "handle": "target-1 launch-test"});
+    let h = json!({"version": PROTOCOL_VERSION, "handle": "target-1 marshal-launch-test-1"});
     stdout_json(&e.run("stop", &h, &[]));
 
     // Without the file, check names it and launch starts nothing.
@@ -686,7 +844,7 @@ fn the_token_file_is_read_on_the_target_and_never_carried() {
         stderr(&l)
     );
     assert!(
-        !e.tmux(&["has-session", "-t", "=launch-test"])
+        !e.tmux(&["has-session", "-t", "=marshal-launch-test-1"])
             .status
             .success()
     );
@@ -702,7 +860,7 @@ fn launch_on_macos_notes_local_network_privacy() {
     }
     let e = Env::new();
     let req = e.request(&["sh", "-c", "sleep 60"]);
-    let h = json!({"version": 1, "handle": "target-1 launch-test"});
+    let h = json!({"version": PROTOCOL_VERSION, "handle": "target-1 marshal-launch-test-1"});
     let o = e.run("launch", &req, &[]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(!stderr(&o).contains("NECP"), "{}", stderr(&o));

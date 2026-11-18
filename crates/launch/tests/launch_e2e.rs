@@ -23,12 +23,34 @@ use common::cell::{Cell, free_port};
 use marshal_entities::GetAllMessages;
 use marshal_launch::record::Store;
 use marshal_launch::tmux::{Tmux, this_host};
-use marshal_launch::{Adapter, MARSHAL_VERSION, Plan};
+use marshal_launch::{LaunchBackend, MARSHAL_VERSION, Plan};
 
 const WAIT: Duration = Duration::from_secs(10);
 
+fn run_with_isolated_home(test: &str) -> bool {
+    const ISOLATED: &str = "MARSHAL_LAUNCH_E2E_ISOLATED";
+    if std::env::var_os(ISOLATED).is_some() {
+        return true;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(ISOLATED, "1")
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env_remove("MARSHAL_BASE_URL")
+        .env_remove("MARSHAL_HOST")
+        .status()
+        .unwrap();
+    assert!(status.success(), "isolated test {test} failed");
+    false
+}
+
 #[test]
 fn launch_join_first_task_record_and_stop() {
+    if !run_with_isolated_home("launch_join_first_task_record_and_stop") {
+        return;
+    }
     let Some(server) = common::PrivateTmux::new("e2e") else {
         return;
     };
@@ -85,7 +107,10 @@ fn launch_join_first_task_record_and_stop() {
     // The stub shows the id and launch address it was given, in the folder asked for.
     let started = Instant::now();
     let (agent_id, given_address) = loop {
-        let text = server.pane("e2e-agent");
+        let text = server
+            .sessions()
+            .first()
+            .map_or_else(String::new, |name| server.pane(name));
         if let Some(line) = text.lines().find(|l| l.starts_with("[stub ")) {
             let parts: Vec<&str> = line
                 .trim_start_matches("[stub ")
@@ -120,6 +145,7 @@ fn launch_join_first_task_record_and_stop() {
     assert_eq!(outcome.agent_id, agent_id);
     assert_eq!(outcome.joined.session_id, "launched-agent");
     assert_eq!(outcome.launched.host, this_host());
+    assert_eq!(server.sessions(), [outcome.launched.handle.clone()]);
     assert_eq!(outcome.launched.cwd, cwd.display().to_string());
 
     // The first task: one direct message, labelled, from a launcher row that's gone now.
@@ -170,7 +196,7 @@ fn launch_join_first_task_record_and_stop() {
     assert_eq!(tmux.status(&recorded[0].handle).unwrap(), Some(true));
     tmux.stop(&recorded[0].handle).unwrap();
     store.remove(&agent_id).unwrap();
-    assert_eq!(tmux.status("e2e-agent").unwrap(), Some(false));
+    assert_eq!(tmux.status(&outcome.launched.handle).unwrap(), Some(false));
     assert!(store.list().unwrap().is_empty());
 
     // An unreachable daemon starts nothing.
@@ -188,7 +214,7 @@ fn launch_join_first_task_record_and_stop() {
         format!("{err:#}").contains("nothing was started"),
         "{err:#}"
     );
-    assert_eq!(tmux.status("e2e-unreachable").unwrap(), Some(false));
+    assert!(server.sessions().is_empty());
     assert!(store.list().unwrap().is_empty());
 
     std::fs::remove_dir_all(&root).unwrap();
@@ -206,6 +232,9 @@ fn lan_ip() -> Option<std::net::IpAddr> {
 /// fails naming the hook listener before anything starts, rather than timing out.
 #[test]
 fn an_exposed_daemon_with_a_loopback_hook_port_is_named() {
+    if !run_with_isolated_home("an_exposed_daemon_with_a_loopback_hook_port_is_named") {
+        return;
+    }
     let Some(server) = common::PrivateTmux::new("hook") else {
         return;
     };
@@ -255,5 +284,5 @@ fn an_exposed_daemon_with_a_loopback_hook_port_is_named() {
         started.elapsed() < plan.timeout,
         "it waited out the timeout: {err}"
     );
-    assert_eq!(tmux.status("e2e-hook").unwrap(), Some(false));
+    assert!(server.sessions().is_empty());
 }

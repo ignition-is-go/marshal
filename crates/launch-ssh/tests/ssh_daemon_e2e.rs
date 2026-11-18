@@ -3,7 +3,7 @@
 //! `marshal_launch::launch` drives `marshal-launch-ssh` (found on PATH as an
 //! external adapter) through `tests/fixtures/fake-ssh`, so the adapter's real
 //! remote scripts run on this machine as the "target". The daemon is the
-//! released v0.60.2 binary (`MARSHAL_E2E_DAEMON`), in memory, on test ports
+//! binary built from this revision (`MARSHAL_E2E_DAEMON`), in memory, on test ports
 //! bound to this machine's non-loopback address, never 6155/6156.
 //!
 //! The harness is a stub `claude` that does what Claude's hooks do: it runs
@@ -20,7 +20,7 @@
 //! inherits this process's environment, which the test sets.
 //!
 //! ```text
-//! MARSHAL_E2E_DAEMON=~/.cache/marshal-release-0.60.2/marshal-daemon-x86_64-unknown-linux-gnu \
+//! MARSHAL_E2E_DAEMON=<target>/debug/marshal-daemon \
 //! MARSHAL_E2E_SHIM=<target>/debug/marshal-shim \
 //! cargo test -p marshal-launch-ssh --test ssh_daemon_e2e -- --ignored --nocapture
 //! ```
@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use marshal_launch::{Adapter, ExternalAdapter, Plan};
+use marshal_launch::{ExternalBackend, LaunchBackend, Plan};
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
@@ -136,6 +136,8 @@ impl Drop for Target {
     fn drop(&mut self) {
         let _ = Command::new("tmux")
             .arg("kill-server")
+            .env("TMUX_TMPDIR", self.tmux.path())
+            .env_remove("TMUX")
             .stderr(std::process::Stdio::null())
             .status();
         let _ = std::fs::remove_dir_all(&self.root);
@@ -201,7 +203,7 @@ fn the_ssh_adapter_registers_through_the_hook_listener_and_names_a_loopback_one(
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("MARSHAL_HOST");
     }
-    let ssh = ExternalAdapter::find_in("ssh", std::ffi::OsStr::new(&path)).unwrap();
+    let ssh = ExternalBackend::find_in("ssh", std::ffi::OsStr::new(&path)).unwrap();
     assert_eq!(ssh.program(), adapter_dir.join("marshal-launch-ssh"));
 
     // Both listeners on the reachable address.
@@ -226,7 +228,10 @@ fn the_ssh_adapter_registers_through_the_hook_listener_and_names_a_loopback_one(
     assert_eq!(outcome.joined.session_id, target.read("session-id").trim());
     assert_eq!(outcome.launched.host, host.trim());
     assert_eq!(outcome.launched.cwd, work.display().to_string());
-    assert_eq!(outcome.launched.handle, "target-1 ssh-proof");
+    assert_eq!(
+        outcome.launched.handle,
+        format!("target-1 marshal-{}", outcome.agent_id)
+    );
     assert!(
         outcome.agent_id.starts_with("launch-"),
         "{}",
@@ -286,8 +291,14 @@ fn the_ssh_adapter_registers_through_the_hook_listener_and_names_a_loopback_one(
         started.elapsed() < Duration::from_secs(30),
         "it waited out the timeout"
     );
-    assert_eq!(
-        ssh.status("target-1 ssh-loopback-hook").unwrap(),
-        Some(false)
+    let listed = Command::new("tmux")
+        .arg("list-sessions")
+        .env("TMUX_TMPDIR", target.tmux.path())
+        .env_remove("TMUX")
+        .output()
+        .expect("query the private tmux server");
+    assert!(
+        listed.stdout.is_empty(),
+        "unreachable hook listener started a session"
     );
 }

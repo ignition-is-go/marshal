@@ -2,13 +2,14 @@
 //!
 //! See `docs/agent-launcher.md`. The launcher owns the parts of a launch that
 //! don't depend on where the agent runs (its id, its environment, waiting for
-//! it to join, its first task). An [`Adapter`] does only the part that does:
+//! it to join, its first task). An [`LaunchBackend`] does only the part that does:
 //! run this command, with these environment variables, over there.
 //!
 //! The shared types come first, so the built-in tmux adapter and the external
 //! `marshal-launch-<name>` adapters agree on them.
 
 pub mod address;
+pub mod api;
 pub mod external;
 pub mod first_task;
 pub mod join;
@@ -21,10 +22,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub use external::ExternalAdapter;
+pub use external::ExternalBackend;
 
 /// The version of the adapter request/response contract this crate speaks.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// What the launcher hands an adapter for `check` and `launch`.
 ///
@@ -42,6 +43,7 @@ pub struct LaunchRequest {
     /// A label for the launch (tmux session name, VM name, ...).
     pub name: String,
     /// The `launch-<uuid>` id the agent's roster row will carry.
+    #[serde(rename = "launch_id")]
     pub agent_id: String,
     /// The launcher's own version. `check` requires the target's `marshal-shim`
     /// to have the same major.minor ([`same_major_minor`]).
@@ -71,20 +73,38 @@ pub struct Launched {
     pub attach: Option<String>,
 }
 
-/// Something that can start an agent somewhere.
-///
-/// An adapter is never asked whether the agent joined; the roster answers that.
-pub trait Adapter {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopReceipt {
+    Stopped,
+    Gone,
+}
+
+/// Starts a worker and manages it by its recovery handle.
+/// Marshal observes roster registration separately.
+pub trait LaunchBackend: Send + Sync {
     /// The adapter's name, as in `marshal-launch <name> ...`.
     fn name(&self) -> &str;
     /// Confirm the target can run this request, starting nothing.
     fn check(&self, req: &LaunchRequest) -> Result<()>;
+    /// Derive a stable status and stop handle before starting the worker.
+    fn recovery_handle(&self, req: &LaunchRequest) -> Result<String>;
     /// Start the request's `argv` in its `cwd` with its `env` added.
     fn launch(&self, req: &LaunchRequest) -> Result<Launched>;
+    /// Observe launch metadata using the stable handle after a lost start response.
+    fn recover(&self, _req: &LaunchRequest) -> Result<Option<Launched>> {
+        Ok(None)
+    }
     /// Stop what `handle` names.
-    fn stop(&self, handle: &str) -> Result<()>;
+    fn stop(&self, handle: &str) -> Result<StopReceipt>;
     /// Whether what `handle` names is still running; `None` if the adapter can't tell.
     fn status(&self, handle: &str) -> Result<Option<bool>>;
+}
+
+pub fn backend_for(name: &str) -> Result<Box<dyn LaunchBackend>> {
+    match name {
+        address::LOCAL_BACKEND => Ok(Box::new(tmux::Tmux::default())),
+        other => Ok(Box::new(ExternalBackend::find(other)?)),
+    }
 }
 
 /// This build's version, sent as the request's `marshal_version`.
@@ -147,7 +167,7 @@ pub fn harness_argv(harness: &str) -> Result<Vec<String>> {
 /// Settings passed from the launcher's environment to any target. None is a secret.
 /// `MARSHAL_BASE_URL` is the daemon's hook listener when it isn't on port 6156 of
 /// the launch address's host. It travels with the launch address, and a
-/// non-local adapter is refused a loopback one ([`address::check_hook_base_for_adapter`]).
+/// non-local adapter is refused a loopback one ([`address::check_hook_base_for_backend`]).
 const PASSED_ENV: &[&str] = &[
     "MARSHAL_OPERATOR",
     "MARSHAL_WAITER_LOCK_WAIT_SECS",
@@ -215,33 +235,43 @@ pub struct Outcome {
     pub task_message_id: Option<String>,
 }
 
-/// Launch `plan` through `adapter` and wait for it to join. Nothing starts if
-/// the launch address or hook base is loopback for a non-local adapter, if the daemon can't
-/// be reached, or if the adapter's `check` fails.
-pub async fn launch(adapter: &dyn Adapter, plan: &Plan) -> Result<Outcome> {
-    let local = adapter.name() == address::LOCAL_ADAPTER;
-    address::check_for_adapter(adapter.name(), &plan.launch_address)?;
-    let agent_id = new_agent_id();
-    let req = LaunchRequest {
+fn prepare(adapter: &dyn LaunchBackend, plan: &Plan, agent_id: &str) -> Result<LaunchRequest> {
+    let local = adapter.name() == address::LOCAL_BACKEND;
+    address::check_for_backend(adapter.name(), &plan.launch_address)?;
+    let mut req = LaunchRequest {
         version: PROTOCOL_VERSION,
         harness: plan.harness.clone(),
         argv: harness_argv(&plan.harness)?,
         cwd: plan.cwd.clone(),
         name: plan.name.clone(),
-        agent_id: agent_id.clone(),
+        agent_id: agent_id.into(),
         marshal_version: MARSHAL_VERSION.into(),
         env: launch_env(
             |k| std::env::var(k).ok(),
             local,
             &plan.launch_address,
-            &agent_id,
+            agent_id,
         ),
         options: plan.options.clone(),
     };
-    address::check_hook_base_for_adapter(
+    if req.harness == "codex" {
+        req.env.remove("MARSHAL_AGENT_ID");
+        req.env.insert("MARSHAL_LAUNCH_ID".into(), agent_id.into());
+    }
+    address::check_hook_base_for_backend(
         adapter.name(),
         req.env.get("MARSHAL_BASE_URL").map(String::as_str),
     )?;
+    Ok(req)
+}
+
+/// Launch `plan` through `adapter` and wait for it to join. Nothing starts if
+/// the launch address or hook base is loopback for a non-local adapter, if the daemon can't
+/// be reached, or if the adapter's `check` fails.
+pub async fn launch(adapter: &dyn LaunchBackend, plan: &Plan) -> Result<Outcome> {
+    let agent_id = new_agent_id();
+    let req = prepare(adapter, plan, &agent_id)?;
+    let local = adapter.name() == address::LOCAL_BACKEND;
     // The address checks above need no daemon, so a refused launch fails at once.
     let roster = join::Roster::connect(&plan.daemon_address).await?;
     if plan.check {
@@ -256,7 +286,7 @@ pub async fn launch(adapter: &dyn Adapter, plan: &Plan) -> Result<Outcome> {
     }
     let launched = adapter
         .launch(&req)
-        .with_context(|| format!("the {} adapter started nothing", adapter.name()))?;
+        .with_context(|| format!("the {} backend did not confirm startup", adapter.name()))?;
     let store = plan.records.as_ref().map(record::Store::at);
     if let Some(store) = &store {
         // Recorded before the wait, so a launch that never joins can be stopped.
@@ -290,9 +320,7 @@ pub async fn launch(adapter: &dyn Adapter, plan: &Plan) -> Result<Outcome> {
         launched.r#where,
         plan.timeout.as_secs()
     );
-    let joined = roster
-        .wait(adapter, &agent_id, &launched, plan.timeout)
-        .await?;
+    let joined = roster.wait(&agent_id, &launched, plan.timeout).await?;
     if let Some(store) = &store
         && let Err(e) = store.joined(&agent_id, &joined.session_id)
     {
@@ -304,12 +332,12 @@ pub async fn launch(adapter: &dyn Adapter, plan: &Plan) -> Result<Outcome> {
             let operator = std::env::var("MARSHAL_OPERATOR").ok();
             let host = tmux::this_host();
             let body = first_task::labelled(task, &host, operator.as_deref(), &agent_id);
-            let id = first_task::send(
+            let id = first_task::send_for_launch(
                 &roster,
                 &joined.session_id,
                 body,
                 &host,
-                operator.as_deref(),
+                &agent_id,
             )
             .await
             .with_context(|| {
@@ -351,12 +379,12 @@ mod tests {
         assert_eq!(
             v,
             json!({
-                "version": 1,
+                "version": PROTOCOL_VERSION,
                 "harness": "claude",
                 "argv": ["claude"],
                 "cwd": "~/work/app",
                 "name": "claude-app",
-                "agent_id": "launch-6f1c",
+                "launch_id": "launch-6f1c",
                 "marshal_version": "0.60.2",
                 "env": {"MARSHAL_AGENT_ID": "launch-6f1c"},
                 "options": ["--host", "build-03"],
@@ -431,7 +459,7 @@ mod tests {
     #[test]
     fn launched_reads_an_adapter_response_and_names_where() {
         let l: Launched = serde_json::from_value(json!({
-            "version": 1,
+            "version": PROTOCOL_VERSION,
             "handle": "h1",
             "host": "build-03",
             "cwd": "/home/u/work/app",

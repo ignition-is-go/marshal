@@ -1,4 +1,4 @@
-//! `marshal-launch-ssh <check|launch|stop|status>`: JSON request on stdin,
+//! `marshal-launch-ssh <recover|check|launch|inspect|stop|status>`: JSON request on stdin,
 //! JSON response on stdout, reasons on stderr. See the crate docs.
 
 use std::io::Read;
@@ -10,11 +10,11 @@ fn main() {
             println!("marshal-launch-ssh {}", marshal_launch_ssh::VERSION);
             return;
         }
-        "check" | "launch" | "stop" | "status" => {}
+        "recover" | "check" | "launch" | "inspect" | "stop" | "status" => {}
         _ => {
             eprintln!(
                 "marshal-launch-ssh: unknown verb `{verb}`\n\
-                 usage: marshal-launch-ssh <check|launch|stop|status>  (one JSON request on stdin)\n\
+                 usage: marshal-launch-ssh <recover|check|launch|inspect|stop|status>  (one JSON request on stdin)\n\
                  A marshal-launch adapter; see docs/agent-launcher.md."
             );
             std::process::exit(2);

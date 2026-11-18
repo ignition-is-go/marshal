@@ -36,6 +36,19 @@ impl PrivateTmux {
         c
     }
 
+    pub fn sessions(&self) -> Vec<String> {
+        let out = self
+            .tmux()
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// The pane's text, wrapped lines joined.
     pub fn pane(&self, name: &str) -> String {
         let out = self
