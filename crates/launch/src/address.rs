@@ -410,14 +410,21 @@ mod tests {
         let t = Duration::from_millis(500);
         let base = format!("http://127.0.0.1:{hook_port}/");
         probe(&address, Some(&base), t).unwrap();
-        drop(hook);
-        let err = probe(&address, Some(&base), t).unwrap_err().to_string();
+        let refused = tokio::net::TcpSocket::new_v4().unwrap();
+        refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let refused_port = refused.local_addr().unwrap().port();
+        let closed_base = format!("http://127.0.0.1:{refused_port}/");
+        let err = probe(&address, Some(&closed_base), t)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("hook listener") && err.contains("MARSHAL_HOOK_BIND"),
             "{err}"
         );
-        drop(daemon);
-        let err = probe(&address, Some(&base), t).unwrap_err().to_string();
+        let closed_address = format!("ws://127.0.0.1:{refused_port}");
+        let err = probe(&closed_address, Some(&base), t)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("daemon listener") && err.contains("MARSHAL_BIND"),
             "{err}"
