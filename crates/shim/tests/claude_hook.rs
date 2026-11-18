@@ -70,6 +70,10 @@ fn run_hook(args: &[&str], base: &str) -> String {
 }
 
 fn run_hook_with_agent(args: &[&str], base: &str, agent: Option<&str>) -> String {
+    run_hook_with_input(args, base, agent, HOOK_INPUT)
+}
+
+fn run_hook_with_input(args: &[&str], base: &str, agent: Option<&str>, input: &str) -> String {
     let mut command = Command::new(SHIM);
     command.env_remove("MARSHAL_AGENT_ID");
     if let Some(agent) = agent {
@@ -87,7 +91,7 @@ fn run_hook_with_agent(args: &[&str], base: &str, agent: Option<&str>) -> String
         .stdin
         .take()
         .unwrap()
-        .write_all(HOOK_INPUT.as_bytes())
+        .write_all(input.as_bytes())
         .unwrap();
     let out = child.wait_with_output().expect("wait");
     assert!(out.status.success(), "claude-hook must exit 0");
@@ -100,6 +104,29 @@ fn additional_context(stdout: &str, event: &str) -> String {
     let out = &v["hookSpecificOutput"];
     assert_eq!(out["hookEventName"], event, "wrong hookEventName: {v}");
     out["additionalContext"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn codex_hooks_route_by_the_active_descendant_thread() {
+    let input = r#"{"session_id":"parent","cwd":"/repo","subagent":{"agent_id":"fork","agent_type":"default"}}"#;
+    for event in ["prompt-submit", "pre-tool-use", "post-tool-use"] {
+        let (base, seen) = fake_hook_listener("");
+        run_hook_with_input(&["codex-hook", event], &base, Some("launcher-id"), input);
+        let seen = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&seen.body).unwrap();
+        assert_eq!(body["session_id"], "fork", "{event}");
+        assert_eq!(body["agent_id"], "launcher-id", "{event}");
+    }
+    for (mode, input, expected) in [
+        ("codex-hook", HOOK_INPUT, "itest-claude"),
+        ("claude-hook", input, "parent"),
+    ] {
+        let (base, seen) = fake_hook_listener("");
+        run_hook_with_input(&[mode, "prompt-submit"], &base, None, input);
+        let seen = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&seen.body).unwrap();
+        assert_eq!(body["session_id"], expected, "{mode}");
+    }
 }
 
 #[test]

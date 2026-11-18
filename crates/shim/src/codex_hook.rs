@@ -75,10 +75,18 @@ pub fn run_for(harness: Harness, ep: &str, base_override: Option<&str>) {
     let _ = std::io::stdin().read_to_string(&mut input);
     let v: serde_json::Value =
         serde_json::from_str(input.trim()).unwrap_or(serde_json::Value::Null);
-    let sid = v.get("session_id").and_then(|s| s.as_str()).unwrap_or("");
-    if sid.is_empty() {
-        return; // no session → nothing to surface
-    }
+    // Codex uses the root session ID for spawned descendants. Their thread
+    // ID is in subagent.agent_id, the same identity used by MCP tool calls.
+    let id = match (harness, v.get("subagent")) {
+        (Harness::Codex, Some(subagent)) if !subagent.is_null() => subagent.get("agent_id"),
+        _ => v.get("session_id"),
+    };
+    let Some(sid) = id
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    else {
+        return;
+    };
     let cwd = v.get("cwd").and_then(|s| s.as_str()).unwrap_or("");
 
     let base = resolve_base(base_override);
