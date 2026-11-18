@@ -87,14 +87,24 @@ where
     }
 }
 
-/// Send `body` to `to` under a fresh `launcher` row, and remove the row after.
-/// Returns the message id.
+/// Send a first task under a short-lived launcher session.
 pub async fn send_for_launch(
     roster: &Roster,
     to: &str,
     body: String,
     host: &str,
     launch_id: &str,
+) -> Result<String> {
+    send_with_intent(roster, to, body, host, launch_id, || Ok(())).await
+}
+
+pub(crate) async fn send_with_intent(
+    roster: &Roster,
+    to: &str,
+    body: String,
+    host: &str,
+    launch_id: &str,
+    record_intent: impl FnOnce() -> Result<()>,
 ) -> Result<String> {
     let client = roster.client();
     let id = uuid::Uuid::new_v4().to_string();
@@ -116,6 +126,7 @@ pub async fn send_for_launch(
             }
             tokio::time::sleep(POLL).await;
         }
+        record_intent()?;
         let sent = client.send_command::<SendLaunchTask, SendMessageResult>(&SendLaunchTask {
             launch_id: launch_id.to_string(),
             to_session_id: SessionId(Arc::from(to)),

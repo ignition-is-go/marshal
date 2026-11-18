@@ -89,19 +89,23 @@ impl Env {
         })
     }
 
-    fn tmux(&self, args: &[&str]) -> Output {
-        Command::new("tmux")
+    fn tmux_command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new("tmux");
+        command
             .args(args)
             .env("TMUX_TMPDIR", self.path("tmux"))
-            .env_remove("TMUX")
-            .output()
-            .unwrap()
+            .env_remove("TMUX");
+        command
+    }
+
+    fn tmux(&self, args: &[&str]) -> Output {
+        self.tmux_command(args).output().expect("run fixture tmux")
     }
 }
 
 impl Drop for Env {
     fn drop(&mut self) {
-        let _ = self.tmux(&["kill-server"]);
+        let _ = self.tmux_command(&["kill-server"]).output();
     }
 }
 
@@ -260,28 +264,34 @@ fn stop_rechecks_process_ownership_inside_tmux() {
 #[test]
 fn launch_refuses_loopback_and_starts_nothing() {
     let e = Env::new();
+    let transcript = e.path("ssh-transcript");
+    let env = [("FAKE_SSH_TRANSCRIPT", transcript.to_str().unwrap())];
     let mut req = e.request(&["true"]);
     req["env"]["MARSHAL_DAEMON_ADDRESS"] = json!("ws://localhost:6155");
     for verb in ["check", "launch"] {
-        let o = e.run(verb, &req, &[]);
+        let o = e.run(verb, &req, &env);
         assert_eq!(o.status.code(), Some(1));
         assert!(stderr(&o).contains("loopback"), "{}", stderr(&o));
         assert!(o.stdout.is_empty());
     }
     assert!(
-        !e.tmux(&["has-session", "-t", "=marshal-launch-test-1"])
-            .status
-            .success()
+        !transcript.exists(),
+        "the request reached the fake SSH target"
     );
 }
 
 #[test]
 fn an_unreachable_target_starts_nothing_and_says_so() {
     let e = Env::new();
+    let tmux_invoked = e.path("tmux-invoked");
+    e.bin("tmux", r#": > "$FAKE_TMUX_INVOKED"; exit 1"#);
     let o = e.run(
         "launch",
         &e.request(&["true"]),
-        &[("FAKE_SSH_UNREACHABLE", "1")],
+        &[
+            ("FAKE_SSH_UNREACHABLE", "1"),
+            ("FAKE_TMUX_INVOKED", tmux_invoked.to_str().unwrap()),
+        ],
     );
     assert_eq!(o.status.code(), Some(1));
     let err = stderr(&o);
@@ -289,6 +299,10 @@ fn an_unreachable_target_starts_nothing_and_says_so() {
     assert!(
         err.contains("ssh to target-1 did not return a result"),
         "{err}"
+    );
+    assert!(
+        !tmux_invoked.exists(),
+        "the request started tmux on the fake target"
     );
 }
 

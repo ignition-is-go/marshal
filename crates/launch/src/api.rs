@@ -53,6 +53,7 @@ pub enum ProcessState {
 pub enum TaskState {
     NotRequested,
     Pending,
+    DeliveryUncertain { message_id: String },
     Stored { message_id: String },
     Acknowledged { message_id: String },
 }
@@ -254,16 +255,18 @@ impl Service {
             return Ok(entry.view);
         }
         entry.view.error = None;
+        let cancellation = operation.cancelled.clone();
         let result = tokio::select! {
             biased;
             _ = operation.cancelled.wait_for(|value| *value) => {
                 Err(anyhow::anyhow!("stop requested while launch was in progress"))
             }
-            result = self.advance(&path, &mut entry, backend.as_ref()) => result,
+            result = self.advance(&path, &mut entry, backend.as_ref(), &cancellation) => result,
         };
         if let Err(error) = result {
             entry.view.error = Some(format!("{error:#}"));
         }
+        entry.stop_requested |= *cancellation.borrow();
         Self::save(&path, &entry)?;
         Ok(entry.view)
     }
@@ -273,6 +276,7 @@ impl Service {
         path: &Path,
         entry: &mut Record,
         backend: &dyn LaunchBackend,
+        cancellation: &watch::Receiver<bool>,
     ) -> Result<()> {
         if !entry.attempted {
             if entry.request.check {
@@ -289,9 +293,13 @@ impl Service {
                     )?;
                 }
             }
-            entry.attempted = true;
-            entry.view.process = ProcessState::Unknown;
-            Self::save(path, entry)?;
+            {
+                let stop_requested = cancellation.borrow();
+                ensure!(!*stop_requested, "stop requested before backend launch");
+                entry.attempted = true;
+                entry.view.process = ProcessState::Unknown;
+                Self::save(path, entry)?;
+            }
             let launched = backend.launch(&entry.backend_request)?;
             ensure!(
                 launched.handle == entry.handle,
@@ -345,12 +353,23 @@ impl Service {
         if let Some(task) = &entry.request.first_task {
             let host = crate::tmux::this_host();
             let body = first_task::labelled(task, &host, None, &entry.request.launch_id);
-            let message_id = first_task::send_for_launch(
+            let session_id = entry.view.session_id.clone().context("no joined session")?;
+            let launch_id = entry.request.launch_id.clone();
+            let message_id = marshal_entities::launch_task_message_id(&launch_id)
+                .context("invalid launch ID")?
+                .0
+                .to_string();
+            let record_dispatch = || {
+                entry.view.task = TaskState::DeliveryUncertain { message_id };
+                Self::save(path, entry)
+            };
+            let message_id = first_task::send_with_intent(
                 &roster,
-                entry.view.session_id.as_deref().unwrap(),
+                &session_id,
                 body,
                 &host,
-                &entry.request.launch_id,
+                &launch_id,
+                record_dispatch,
             )
             .await?;
             entry.view.task = TaskState::Stored { message_id };
@@ -443,7 +462,7 @@ impl Service {
         if matches!(
             (&entry.view.task, &task),
             (
-                TaskState::Pending,
+                TaskState::Pending | TaskState::DeliveryUncertain { .. },
                 TaskState::Stored { .. } | TaskState::Acknowledged { .. }
             ) | (TaskState::Stored { .. }, TaskState::Acknowledged { .. })
         ) {
@@ -489,4 +508,114 @@ pub async fn call<Request: Serialize + ?Sized, Response: serde::de::DeserializeO
         String::from_utf8_lossy(&body)
     );
     serde_json::from_slice(&body).context("decoding launch API response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StopDuringPreflight {
+        stop: watch::Sender<bool>,
+    }
+
+    impl LaunchBackend for StopDuringPreflight {
+        fn name(&self) -> &str {
+            "preflight-stop"
+        }
+
+        fn check(&self, _request: &LaunchRequest) -> Result<()> {
+            self.stop.send(true).unwrap();
+            Ok(())
+        }
+
+        fn recovery_handle(&self, _request: &LaunchRequest) -> Result<String> {
+            Ok("worker".into())
+        }
+
+        fn launch(&self, _request: &LaunchRequest) -> Result<Launched> {
+            panic!("stop during preflight must prevent the launch call")
+        }
+
+        fn stop(&self, _handle: &str) -> Result<StopReceipt> {
+            panic!("no worker was started")
+        }
+
+        fn status(&self, _handle: &str) -> Result<Option<bool>> {
+            panic!("no worker was started")
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_during_preflight_prevents_claiming_or_starting_a_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let launch_id = crate::new_agent_id();
+        let service = Service::new(
+            directory.path().into(),
+            "ws://127.0.0.1:1".into(),
+            "ws://127.0.0.1:1".into(),
+            None,
+        );
+        let path = service.path(&launch_id).unwrap();
+        let request = StartLaunch {
+            launch_id: launch_id.clone(),
+            backend: "preflight-stop".into(),
+            harness: "claude".into(),
+            cwd: "/work".into(),
+            name: "worker".into(),
+            options: vec![],
+            check: true,
+            timeout_secs: 1,
+            first_task: None,
+        };
+        let mut entry = Record {
+            backend_request: LaunchRequest {
+                version: crate::PROTOCOL_VERSION,
+                harness: request.harness.clone(),
+                argv: vec!["claude".into()],
+                cwd: request.cwd.clone(),
+                name: request.name.clone(),
+                agent_id: launch_id.clone(),
+                marshal_version: crate::MARSHAL_VERSION.into(),
+                env: Default::default(),
+                options: vec![],
+            },
+            view: LaunchView {
+                launch_id,
+                backend: request.backend.clone(),
+                name: request.name.clone(),
+                process: ProcessState::NotStarted,
+                launched: None,
+                session_id: None,
+                task: TaskState::NotRequested,
+                error: None,
+            },
+            request,
+            handle: "worker".into(),
+            attempted: false,
+            stop_requested: false,
+        };
+        Service::save(&path, &entry).unwrap();
+        let (stop, cancellation) = watch::channel(false);
+
+        let error = service
+            .advance(
+                &path,
+                &mut entry,
+                &StopDuringPreflight { stop },
+                &cancellation,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("stop requested before backend launch")
+        );
+        assert!(!entry.attempted);
+        assert_eq!(entry.view.process, ProcessState::NotStarted);
+        let stored = Service::load(&path).unwrap().unwrap();
+        assert!(!stored.attempted);
+        assert_eq!(stored.view.process, ProcessState::NotStarted);
+    }
 }

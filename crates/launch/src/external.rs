@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::{LaunchBackend, LaunchRequest, Launched, PROTOCOL_VERSION, StopReceipt};
 
@@ -240,6 +240,22 @@ impl LaunchBackend for ExternalBackend {
     }
 }
 
+const MAX_SUBPROCESS_STREAM_BYTES: u64 = 1024 * 1024;
+
+async fn capture(stream: impl AsyncRead + Unpin, name: &str) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    stream
+        .take(MAX_SUBPROCESS_STREAM_BYTES + 1)
+        .read_to_end(&mut output)
+        .await
+        .with_context(|| format!("reading subprocess {name}"))?;
+    anyhow::ensure!(
+        output.len() as u64 <= MAX_SUBPROCESS_STREAM_BYTES,
+        "subprocess {name} exceeded {MAX_SUBPROCESS_STREAM_BYTES} bytes"
+    );
+    Ok(output)
+}
+
 /// Run a subprocess without blocking indefinitely on stdin, output, or exit.
 pub fn run_bounded(command: Command, input: Vec<u8>, timeout: Duration) -> Result<Output> {
     std::thread::spawn(move || {
@@ -254,22 +270,30 @@ pub fn run_bounded(command: Command, input: Vec<u8>, timeout: Duration) -> Resul
                 .kill_on_drop(true)
                 .spawn()?;
             let mut stdin = child.stdin.take().context("opening subprocess stdin")?;
-            let (output, written) = tokio::time::timeout(timeout, async move {
-                tokio::join!(child.wait_with_output(), async move {
-                    let result = stdin.write_all(&input).await;
-                    drop(stdin);
-                    result
-                })
+            let stdout = child.stdout.take().context("opening subprocess stdout")?;
+            let stderr = child.stderr.take().context("opening subprocess stderr")?;
+            let (status, stdout, stderr, ()) = tokio::time::timeout(timeout, async {
+                tokio::try_join!(
+                    async { child.wait().await.context("waiting for subprocess") },
+                    capture(stdout, "stdout"),
+                    capture(stderr, "stderr"),
+                    async move {
+                        if let Err(error) = stdin.write_all(&input).await
+                            && error.kind() != std::io::ErrorKind::BrokenPipe
+                        {
+                            return Err(error).context("writing to subprocess");
+                        }
+                        Ok(())
+                    }
+                )
             })
             .await
-            .with_context(|| format!("subprocess exceeded {}s", timeout.as_secs()))?;
-            let output = output?;
-            if let Err(error) = written
-                && error.kind() != std::io::ErrorKind::BrokenPipe
-            {
-                return Err(error).context("writing to subprocess");
-            }
-            Ok(output)
+            .with_context(|| format!("subprocess exceeded {}s", timeout.as_secs()))??;
+            Ok(Output {
+                status,
+                stdout,
+                stderr,
+            })
         })
     })
     .join()
@@ -291,6 +315,30 @@ fn is_executable(p: &Path) -> bool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_subprocess_output_fails_on_either_stream() {
+        for (script, stream) in [
+            ("head -c 1048577 /dev/zero", "stdout"),
+            ("head -c 1048577 /dev/zero >&2", "stderr"),
+        ] {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            let error = match run_bounded(command, Vec::new(), Duration::from_secs(3)) {
+                Ok(output) => panic!(
+                    "oversized {stream} accepted ({} stdout and {} stderr bytes)",
+                    output.stdout.len(),
+                    output.stderr.len()
+                ),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("subprocess {stream} exceeded"))
+            );
+        }
+    }
 
     #[test]
     fn a_hung_adapter_child_does_not_hold_the_caller() {

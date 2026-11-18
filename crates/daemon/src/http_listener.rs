@@ -228,42 +228,44 @@ fn launch_response(
                 let Some(id) = marshal_entities::launch_task_message_id(&view.launch_id) else {
                     return view;
                 };
-                let messages = messages.get_or_init(|| {
-                    cmd.exec_query(marshal_entities::GetAllMessages {})
-                        .unwrap_or_default()
-                });
-                if !messages.iter().any(|message| {
-                    message.id == id
-                        && message
-                            .to_session_id
-                            .as_ref()
-                            .is_some_and(|to| to.0.as_ref() == session)
-                }) {
-                    return view;
-                }
                 id.0.to_string()
             }
-            TaskState::Stored { message_id } => message_id.clone(),
+            TaskState::DeliveryUncertain { message_id } | TaskState::Stored { message_id } => {
+                message_id.clone()
+            }
             TaskState::NotRequested | TaskState::Acknowledged { .. } => return view,
         };
         let reads = reads.get_or_init(|| {
             cmd.exec_query(marshal_entities::GetAllMessageReads {})
                 .unwrap_or_default()
         });
-        let task = if reads.iter().any(|read| {
+        let acknowledged = reads.iter().any(|read| {
             read.session_id.0.as_ref() == session && read.message_id.0.as_ref() == message_id
-        }) {
+        });
+        let task = if acknowledged {
             TaskState::Acknowledged { message_id }
+        } else if matches!(view.task, TaskState::Stored { .. }) {
+            return view;
         } else {
+            let messages = messages.get_or_init(|| {
+                cmd.exec_query(marshal_entities::GetAllMessages {})
+                    .unwrap_or_default()
+            });
+            if !messages.iter().any(|message| {
+                message.id.0.as_ref() == message_id
+                    && message
+                        .to_session_id
+                        .as_ref()
+                        .is_some_and(|to| to.0.as_ref() == session)
+            }) {
+                return view;
+            }
             TaskState::Stored { message_id }
         };
-        if task != view.task {
-            if let Err(error) = launches.record_task_receipt(&view.launch_id, session, task.clone())
-            {
-                log::debug!("[launch] could not record task receipt: {error:#}");
-            }
-            view.task = task;
+        if let Err(error) = launches.record_task_receipt(&view.launch_id, session, task.clone()) {
+            log::debug!("[launch] could not record task receipt: {error:#}");
         }
+        view.task = task;
         view
     };
     let result = match path {

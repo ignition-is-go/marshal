@@ -63,7 +63,8 @@ response is lost, the backend can inspect that handle and recover metadata for
 a still-running worker. A launch that is absent or whose state is unknown
 retains its record. To start a replacement, use a fresh launch ID after
 resolving the original attempt. Stop is idempotent. An uncertain stop can be
-retried by the same ID.
+retried by the same ID. If the daemon disconnects during stop, retry
+the stop request after reconnecting.
 
 Records live in the daemon's `MARSHAL_LAUNCH_STATE` directory. The defaults are
 `$MARSHAL_STATE_DIR/launches`, `$XDG_STATE_HOME/marshal/launches`, then
@@ -72,18 +73,22 @@ a persistent directory where launches should survive daemon restart. One
 daemon owns each launch state directory.
 
 Process state, roster registration, and task state are separate fields in
-the response. A task can be pending, stored, or acknowledged. Acknowledged
-means the session's inbox reported delivery. It does not report whether
-the worker acted on the task. A launch correlation ID is not a credential.
-The first task is addressed to the exact joined session and has a stable
-message ID so a retry does not send it twice.
+the response. A task can be pending, delivery uncertain, stored, or
+acknowledged. Acknowledged means the session's inbox reported delivery.
+A launch correlation ID is not a credential.
+Marshal records the first task's stable message ID before sending it to
+the exact joined session. If a restart interrupts that send, Marshal
+recovers the task state from any surviving message or inbox receipt.
+Without a receipt, the task remains `delivery_uncertain` and Marshal
+skips redispatch on retry. The session may already have received it.
 
 ## Launch backends
 
 The Rust trait is `LaunchBackend`. Built-in tmux implements it directly.
 Marshal runs external backends as `marshal-launch-<name> <verb>` on the
 daemon's PATH. The subprocess receives one JSON object on stdin and returns
-one on stdout. Diagnostics go to stderr. The following is wire version 2.
+one on stdout. Diagnostics go to stderr. Each stream is capped at 1 MiB.
+The following is wire version 2.
 
 - `check` examines the target without starting a worker.
 - `recover` derives the stable backend handle for a request before startup.

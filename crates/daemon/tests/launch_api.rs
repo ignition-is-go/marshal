@@ -34,7 +34,13 @@ async fn recovered_start_keeps_its_worker_and_delivers_one_task() {
     std::fs::write(&backend, r#"#!/bin/sh
 cat >/dev/null
 case "$1" in
-    check) printf '{"version":2}\n' ;;
+    check)
+        if [ -f "$FIXTURE/hold-preflight" ]; then
+            touch "$FIXTURE/in-preflight"
+            while [ -f "$FIXTURE/hold-preflight" ]; do sleep 0.01; done
+        fi
+        printf '{"version":2}\n'
+        ;;
     recover) printf '{"version":2,"handle":"fixture-worker"}\n' ;;
     launch)
         printf 'started\n' >> "$FIXTURE/attempts"; touch "$FIXTURE/running"
@@ -112,26 +118,43 @@ esac
     assert!(uncertain.error.is_some());
     assert!(root.path().join("running").exists());
     drop(daemon);
-    let _daemon = start_daemon().await;
+    let daemon = start_daemon().await;
     let observed: LaunchView = api::call(&base, GET_LAUNCH_PATH, &key).await.unwrap();
     assert_eq!(observed.process, ProcessState::Running);
 
     let client = reqwest::Client::new();
     let payload = json!({"session_id":"worker-session","cwd":"/work","agent_id":request.launch_id});
-    client
-        .post(format!(
-            "{base}/hook/session-register?host=worker-node&harness=claude"
-        ))
-        .body(payload.to_string())
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+    let register = || {
+        client
+            .post(format!(
+                "{base}/hook/session-register?host=worker-node&harness=claude"
+            ))
+            .body(payload.to_string())
+            .send()
+    };
+    register().await.unwrap().error_for_status().unwrap();
     let recovered: LaunchView = api::call(&base, LAUNCH_PATH, &request).await.unwrap();
     assert!(recovered.error.is_none(), "{recovered:?}");
     assert_eq!(recovered.session_id.as_deref(), Some("worker-session"));
-    assert!(matches!(recovered.task, TaskState::Stored { .. }));
+    let TaskState::Stored { message_id } = &recovered.task else {
+        panic!("first task was not stored: {recovered:?}");
+    };
+    let journal = root
+        .path()
+        .join("state")
+        .join(format!("{}.json", key.launch_id));
+    let uncertain_task = TaskState::DeliveryUncertain {
+        message_id: message_id.clone(),
+    };
+    let lose_send_reply = || {
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+        record["view"]["task"] = serde_json::to_value(&uncertain_task).unwrap();
+        std::fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+    };
+    lose_send_reply();
+    let reconciled: LaunchView = api::call(&base, GET_LAUNCH_PATH, &key).await.unwrap();
+    assert_eq!(reconciled.task, recovered.task);
     let different = StartLaunch {
         cwd: "/another-project".into(),
         ..request.clone()
@@ -186,6 +209,31 @@ esac
             .count(),
         1
     );
+    lose_send_reply();
+    let reconciled: LaunchView = api::call(&base, GET_LAUNCH_PATH, &key).await.unwrap();
+    assert_eq!(reconciled.task, confirmed.task);
+
+    drop(daemon);
+    lose_send_reply();
+    let _daemon = start_daemon().await;
+    register().await.unwrap().error_for_status().unwrap();
+    let retry: LaunchView = api::call(&base, LAUNCH_PATH, &request).await.unwrap();
+    assert_eq!(retry.task, uncertain_task);
+    let reply = client
+        .post(format!(
+            "{base}/hook/prompt-submit?host=worker-node&harness=claude"
+        ))
+        .body(payload.to_string())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!reply.contains("handle this exactly once"), "{reply}");
+
     let stop_unavailable = root.path().join("stop-unavailable");
     std::fs::write(&stop_unavailable, "").unwrap();
     let failed_stop: LaunchView = api::call(&base, STOP_LAUNCH_PATH, &key).await.unwrap();
@@ -219,6 +267,51 @@ esac
     assert!(replayed_start.session_id.is_none());
     let stopped: LaunchView = api::call(&base, STOP_LAUNCH_PATH, &key).await.unwrap();
     assert_eq!(stopped.process, ProcessState::Stopped);
+
+    let attempts = root.path().join("attempts");
+    let before_preflight_stop = std::fs::read(&attempts).unwrap();
+    let hold_preflight = root.path().join("hold-preflight");
+    std::fs::write(&hold_preflight, "").unwrap();
+    let cancelled_request = StartLaunch {
+        launch_id: marshal_launch::new_agent_id(),
+        ..request.clone()
+    };
+    let cancelled_key = LaunchKey {
+        launch_id: cancelled_request.launch_id.clone(),
+    };
+    let start = api::call::<_, LaunchView>(&base, LAUNCH_PATH, &cancelled_request);
+    let cancel_preflight = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !root.path().join("in-preflight").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let stop = api::call::<_, LaunchView>(&base, STOP_LAUNCH_PATH, &cancelled_key);
+        tokio::pin!(stop);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut stop)
+                .await
+                .is_err()
+        );
+        std::fs::remove_file(&hold_preflight).unwrap();
+        stop.await.unwrap()
+    };
+    let (interrupted, stopped) = tokio::join!(start, cancel_preflight);
+    assert_eq!(
+        std::fs::read(&attempts).unwrap(),
+        before_preflight_stop,
+        "stop during preflight must prevent the backend launch call"
+    );
+    assert_eq!(stopped.process, ProcessState::Stopped);
+    assert!(
+        interrupted
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("stop requested")
+    );
 
     // Stop cancels a long roster wait instead of waiting for the join deadline.
     std::fs::write(root.path().join("confirm-start"), "").unwrap();
