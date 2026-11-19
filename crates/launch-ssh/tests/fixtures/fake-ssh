@@ -14,7 +14,11 @@ for a; do last=$a; done
 if [ -n "${FAKE_SSH_LOGIN_SHELL:-}" ]; then
   set -- "$FAKE_SSH_LOGIN_SHELL" -c "$last"
 else
-  set -- bash -s
+  case "$last" in
+    'bash -l -s') set -- bash -s ;;
+    'bash -lc '*) set -- bash -c "bash -c ${last#'bash -lc '}" ;;
+    *) set -- bash -c "$last" ;;
+  esac
 fi
 if [ -n "${FAKE_SSH_TRANSCRIPT:-}" ]; then
   out=$(mktemp); err=$(mktemp)

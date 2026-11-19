@@ -2,6 +2,8 @@
 //! standing in for ssh so the adapter's real remote scripts run on this
 //! machine. tmux runs on a private socket under a temp dir.
 
+#![cfg(unix)]
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -49,6 +51,10 @@ impl Env {
         let mut c = Command::new(env!("CARGO_BIN_EXE_marshal-launch-ssh"));
         c.arg(verb)
             .env("MARSHAL_LAUNCH_SSH", fixture("fake-ssh"))
+            .env(
+                "MARSHAL_LAUNCH_SSH_HELPER",
+                env!("CARGO_BIN_EXE_marshal-launch-ssh"),
+            )
             .env("HOME", self.path("home"))
             .env("TMUX_TMPDIR", self.path("tmux"))
             .env_remove("TMUX")
@@ -216,6 +222,74 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
 }
 
 #[test]
+fn missing_or_incompatible_helper_never_falls_back_to_raw_tmux() {
+    let e = Env::new();
+    let req = e.request(&["sh", "-c", "touch must-not-start; sleep 30"]);
+    let missing = e.run(
+        "launch",
+        &req,
+        &[("MARSHAL_LAUNCH_SSH_HELPER", "/no-such-marshal-helper")],
+    );
+    assert!(!missing.status.success());
+    assert!(
+        stderr(&missing).contains("install marshal-launch-ssh"),
+        "{}",
+        stderr(&missing)
+    );
+    e.bin(
+        "incompatible-helper",
+        "printf '%s\\n' '@@marshal-target {\"version\":2,\"helper_version\":\"wrong\"}'",
+    );
+    let helper = e.path("bin/incompatible-helper");
+    let incompatible = e.run(
+        "launch",
+        &req,
+        &[("MARSHAL_LAUNCH_SSH_HELPER", helper.to_str().unwrap())],
+    );
+    assert!(!incompatible.status.success());
+    assert!(
+        stderr(&incompatible).contains("version mismatch"),
+        "{}",
+        stderr(&incompatible)
+    );
+    assert!(!e.path("work/must-not-start").exists());
+    assert!(
+        !e.tmux(&["has-session", "-t", "=marshal-launch-test-1"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn daemon_credentials_are_removed_before_ssh_and_from_target_json() {
+    let e = Env::new();
+    let request_file = e.path("request.json");
+    e.bin("record-ssh", "[ -z \"${MYKO_POSTGRES_URL+present}\" ] || exit 73\ncat > \"$FAKE_REQUEST\"\nprintf '%s\\n' '@@marshal-target {\"version\":2,\"helper_version\":\"wrong\"}'");
+    let mut req = e.request(&["sh", "-c", "sleep 30"]);
+    req["env"]["MYKO_POSTGRES_URL"] = json!("synthetic-request-credential");
+    req["env"]["MARSHAL_AUTH_CLIENT_SECRET"] = json!("synthetic-client-secret");
+    let output = e.run(
+        "launch",
+        &req,
+        &[
+            (
+                "MARSHAL_LAUNCH_SSH",
+                e.path("bin/record-ssh").to_str().unwrap(),
+            ),
+            ("FAKE_REQUEST", request_file.to_str().unwrap()),
+            ("MYKO_POSTGRES_URL", "synthetic-process-credential"),
+        ],
+    );
+    assert!(!output.status.success());
+    let wire = std::fs::read_to_string(request_file).unwrap();
+    assert!(!wire.contains("synthetic-request-credential"));
+    assert!(!wire.contains("synthetic-client-secret"));
+    let wire: Value = serde_json::from_str(&wire).unwrap();
+    assert_eq!(wire["env"]["MARSHAL_AGENT_ID"], "launch-test-1");
+    assert_eq!(wire["argv"], req["argv"]);
+}
+
+#[test]
 fn stop_rechecks_process_ownership_inside_tmux() {
     if !have_tmux() {
         return;
@@ -226,10 +300,10 @@ fn stop_rechecks_process_ownership_inside_tmux() {
     let handle = json!({"version": PROTOCOL_VERSION, "handle": launch["handle"]});
     let real = which("tmux");
     e.bin("tmux", &format!(r#"
-        case "$1" in
+        for arg do case "$arg" in
           if-shell|kill-session)
             "{real}" set-environment -t '=marshal-launch-test-1' MARSHAL_LAUNCH_KEY different-owner ;;
-        esac
+        esac; done
         exec "{real}" "$@"
     "#));
     let stop = e.run("stop", &handle, &[]);
