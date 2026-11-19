@@ -188,11 +188,20 @@ async fn owned_session(server: &libtmux::Server, handle: &str) -> Result<Option<
 
 #[cfg(unix)]
 fn tmux_command(args: &[String]) -> libtmux::Command {
-    args[1..]
+    let worker = args
         .iter()
-        .fold(libtmux::Command::new(&args[0]), |command, arg| {
-            command.arg(arg)
-        })
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    args.iter().enumerate().skip(1).fold(
+        libtmux::Command::new(&args[0]),
+        |command, (index, arg)| {
+            if args[0] == "new-session" && (index > worker || args[index - 1] == "-e") {
+                command.sensitive_arg(arg)
+            } else {
+                command.arg(arg)
+            }
+        },
+    )
 }
 
 /// The process key is scoped to one launch. A display label is reusable.
@@ -394,16 +403,13 @@ impl LaunchBackend for Tmux {
             if out.success() {
                 return Ok(false);
             }
-            if matches!(
-                out.refusal_for("new-session"),
-                Some(libtmux::Error::SessionExists { .. })
-            ) {
+            let refusal = out
+                .refusal_for_public_target("new-session", &handle)
+                .context("tmux did not return a refusal for its failed launch")?;
+            if matches!(refusal, libtmux::Error::SessionExists { .. }) {
                 return Ok(true);
             }
-            bail!(
-                "tmux could not start the requested agent: {}",
-                out.stderr_lossy().trim()
-            );
+            Err(refusal.into())
         })?;
         if collision {
             return self
@@ -501,6 +507,54 @@ mod tests {
 
     fn v(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_diagnostics_redact_environment_and_worker_arguments_before_and_after_dispatch() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let token = "sk-ant-oat01-synthetic-timeout-secret";
+        let argument = "synthetic-private-worker-argument";
+        let args = new_session_args(
+            "marshal-redacted",
+            directory.path(),
+            &[("CLAUDE_CODE_OAUTH_TOKEN".into(), token.into())],
+            &v(&["sh", "-c", "sleep 30", argument]),
+        );
+        for before_dispatch in [true, false] {
+            let wrapper = directory.path().join("tmux-timeout");
+            let delayed = if before_dispatch { "-V" } else { "new-session" };
+            std::fs::write(&wrapper, format!("#!/bin/sh\nfor arg do\n[ \"$arg\" != '{delayed}' ] || sleep 2\ndone\nexec tmux \"$@\"\n")).unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let server = libtmux::Server::builder()
+                .tmux_executable(&wrapper)
+                .socket_path(directory.path().join("socket"))
+                .default_timeout(Duration::from_millis(500))
+                .build()
+                .unwrap();
+            let runtime = libtmux::blocking::Runtime::new().unwrap();
+            let error = runtime.run(server.cmd(tmux_command(&args))).unwrap_err();
+            assert!(
+                matches!(&error, libtmux::Error::Timeout { before_dispatch: actual, .. } if *actual == before_dispatch),
+                "{error:?}"
+            );
+            let error = anyhow::Error::from(error).context("starting agent");
+            for diagnostic in [
+                format!("{error}"),
+                format!("{error:#}"),
+                format!("{error:?}"),
+            ] {
+                assert!(!diagnostic.contains(token), "{diagnostic}");
+                assert!(!diagnostic.contains(argument), "{diagnostic}");
+            }
+            for source in error.chain() {
+                let diagnostic = format!("{source} {source:?}");
+                assert!(!diagnostic.contains(token), "{diagnostic}");
+                assert!(!diagnostic.contains(argument), "{diagnostic}");
+            }
+            runtime.run(server.shutdown()).unwrap();
+        }
     }
 
     #[test]
