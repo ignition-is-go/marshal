@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use marshal_launch::{
-    ExternalBackend, LaunchBackend, LaunchRequest, PROTOCOL_VERSION, StopReceipt,
-};
+use marshal_launch::{ExternalBackend, LaunchBackend, LaunchRequest, StopReceipt};
 
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -19,8 +17,7 @@ fn fake() -> ExternalBackend {
 }
 
 fn req(options: &[&str]) -> LaunchRequest {
-    LaunchRequest {
-        version: PROTOCOL_VERSION,
+    LaunchRequest::from(marshal_launch::ProcessRequest {
         harness: "claude".into(),
         argv: vec!["claude".into()],
         cwd: "~/work/app".into(),
@@ -35,7 +32,7 @@ fn req(options: &[&str]) -> LaunchRequest {
             ),
         ]),
         options: options.iter().map(|s| s.to_string()).collect(),
-    }
+    })
 }
 
 #[test]
@@ -167,7 +164,7 @@ fn launch_failures_say_how() {
         ("not-object", "answered [1,2], not a JSON object"),
         (
             "wrong-version",
-            "answered in contract version 99; this launcher speaks 2",
+            "answered in contract version 99; this launcher speaks 3",
         ),
         ("no-host", "answered without the contract's fields"),
     ] {
