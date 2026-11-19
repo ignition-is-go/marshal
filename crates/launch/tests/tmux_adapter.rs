@@ -113,7 +113,7 @@ fn workers_strip_daemon_credentials_from_new_and_running_tmux_servers() {
             |tmux, key| tmux.with_client_env(*key, "synthetic"),
         );
         let work = tempfile::tempdir().unwrap();
-        let req = LaunchRequest {
+        let req = LaunchRequest::from(marshal_launch::ProcessRequest {
             version: PROTOCOL_VERSION,
             harness: "claude".into(),
             argv: [
@@ -130,7 +130,7 @@ fn workers_strip_daemon_credentials_from_new_and_running_tmux_servers() {
                 ("MYKO_POSTGRES_URL".to_string(), "synthetic-request".to_string()),
             ].into(),
             options: vec![],
-        };
+        });
         let launched = t.launch(&req).unwrap();
         let mut pane = String::new();
         for _ in 0..20 {
