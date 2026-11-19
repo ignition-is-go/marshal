@@ -51,6 +51,7 @@ jobs:
 
         with:
           save-if: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+          cache-targets: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
       - name: Set up Cargo Flux and ROSE cache
         uses: ignition-is-go/cargo-flux@ae2ffa5f4420add3ab3c98665a4b5c0374bf2a5b
         with:
@@ -134,6 +135,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+          cache-targets: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
       - name: Set up Cargo Flux and ROSE cache
         uses: ignition-is-go/cargo-flux@ae2ffa5f4420add3ab3c98665a4b5c0374bf2a5b
         with:
@@ -235,6 +237,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+          cache-targets: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
       - name: Set up Cargo Flux and ROSE cache
         uses: ignition-is-go/cargo-flux@ae2ffa5f4420add3ab3c98665a4b5c0374bf2a5b
         with:
