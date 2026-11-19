@@ -104,7 +104,7 @@ esac
             provider: marshal_launch::ManagedIntent::Pulse {
                 environment_id: "development".into(),
                 preset_id: "codex-account".into(),
-                workspace: marshal_launch::PulseWorkspace::Session,
+                workspace: marshal_launch::PulseWorkspace::Session {},
             },
         },
         launch_id: marshal_launch::new_agent_id(),
@@ -185,7 +185,7 @@ esac
             provider: marshal_launch::ManagedIntent::Pulse {
                 environment_id: "development".into(),
                 preset_id: "another-preset".into(),
-                workspace: marshal_launch::PulseWorkspace::Session,
+                workspace: marshal_launch::PulseWorkspace::Session {},
             },
         },
         ..request.clone()

@@ -44,8 +44,8 @@ pub enum ManagedIntent {
     deny_unknown_fields
 )]
 pub enum PulseWorkspace {
-    Session,
-    PulseRoot,
+    Session {},
+    PulseRoot {},
     ExistingDirectory {
         path: String,
         display_name: Option<String>,
@@ -246,6 +246,25 @@ mod tests {
             "ws://marshal.mesh:6155"
         );
         assert!(!process.env.contains_key("MARSHAL_BASE_URL"));
+    }
+
+    #[test]
+    fn workspace_selectors_reject_unexpected_launch_fields() {
+        for provider in ["session", "pulseRoot"] {
+            for (field, value) in [
+                ("argv", json!(["sh"])),
+                ("env", json!({"TOKEN": "secret"})),
+                ("path", json!("/unexpected")),
+                ("other", json!(true)),
+            ] {
+                let mut wire = json!({"provider": provider});
+                wire[field] = value;
+                assert!(
+                    serde_json::from_value::<PulseWorkspace>(wire).is_err(),
+                    "accepted {provider}.{field}"
+                );
+            }
+        }
     }
 
     #[test]
