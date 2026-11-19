@@ -121,7 +121,7 @@ pub struct Target {
     pub daemon: HostPort,
     pub hook: HostPort,
     /// `--oauth-token-file`: a file on the target holding Claude's long-lived
-    /// token. The agent's shell reads it there into CLAUDE_CODE_OAUTH_TOKEN,
+    /// token. `target_worker` reads it there into CLAUDE_CODE_OAUTH_TOKEN,
     /// so the token never leaves the target or enters a request or log.
     pub token_file: Option<String>,
 }
@@ -1126,9 +1126,6 @@ pub fn parse_handle(h: &str) -> Result<Handle> {
     })
 }
 
-/// Run `script` with `bash -l -s` on `dest`. stderr passes through to the
-/// user; stdout is returned. Fails if ssh can't reach `dest` (exit 255) or the
-/// script exits nonzero.
 fn ssh_command(dest: &str, remote_command: &str) -> Result<Command> {
     let ssh = std::env::var("MARSHAL_LAUNCH_SSH").unwrap_or_else(|_| "ssh".to_string());
     let mut words = ssh.split_whitespace();
