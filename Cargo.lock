@@ -3162,7 +3162,7 @@ dependencies = [
 [[package]]
 name = "libtmux"
 version = "0.1.2"
-source = "git+https://github.com/lucid-max/libtmux-rs?rev=bdb27dca6fbdeb535e4bce4cfc610d5492955605#bdb27dca6fbdeb535e4bce4cfc610d5492955605"
+source = "git+https://github.com/lucid-max/libtmux-rs?rev=ebf61d511fb3e7836792be4a63c9adb17b410050#ebf61d511fb3e7836792be4a63c9adb17b410050"
 dependencies = [
  "rustix",
  "thiserror 2.0.19",
