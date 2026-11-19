@@ -167,6 +167,11 @@ async fn sync_backend_preserves_literal_argv_inside_an_async_caller() {
         "quote'\"",
         "; touch injected",
         "$(touch injected)",
+        "",
+        ";",
+        "trailing;",
+        "backslash\\;",
+        "line\nbreak",
     ];
     let mut argv = [
         "sh",
@@ -335,4 +340,103 @@ fn concurrent_launches_converge_and_foreign_owner_is_never_stopped() {
             .success()
     );
     assert_eq!(t.stop(handle).unwrap(), StopReceipt::Stopped);
+}
+
+#[test]
+fn backend_errors_redact_environment_and_worker_arguments() {
+    use std::os::unix::fs::PermissionsExt;
+    for phase in ["refusal", "lookup-timeout", "create-timeout"] {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("tmux-redaction");
+        let secret = "sk-ant-oat01-synthetic-timeout-secret";
+        let argument = "synthetic-private-worker-argument";
+        let refusal = if phase == "create-timeout" {
+            "sleep 7"
+        } else {
+            "exit 1"
+        };
+        let lookup = if phase == "lookup-timeout" {
+            "sleep 7"
+        } else {
+            "exit 1"
+        };
+        std::fs::write(&executable, format!(
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in\n-V) echo 'tmux 3.4'; exit 0;;\nlist-sessions) echo 'no server running on fixture' >&2; {lookup};;\nnew-session) echo '{secret} {argument}' >&2; {refusal};;\nesac\ndone\nexit 1\n"
+        )).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let backend = Tmux::new(executable.display().to_string())
+            .with_socket(directory.path().join("socket"));
+        let request = LaunchRequest::from(marshal_launch::ProcessRequest {
+            harness: "claude".into(),
+            argv: ["sh", argument].map(str::to_owned).to_vec(),
+            cwd: directory.path().display().to_string(),
+            name: "redaction".into(),
+            agent_id: "redaction".into(),
+            marshal_version: MARSHAL_VERSION.into(),
+            env: [("CLAUDE_CODE_OAUTH_TOKEN".into(), secret.into())].into(),
+            options: vec![],
+        });
+        let error = backend.launch(&request).unwrap_err();
+        let tmux_error = error.downcast_ref::<agent_tmux::Error>().unwrap();
+        assert_eq!(
+            tmux_error.kind(),
+            if phase == "refusal" {
+                agent_tmux::ErrorKind::CommandFailed
+            } else {
+                agent_tmux::ErrorKind::Timeout
+            }
+        );
+        if phase == "create-timeout" {
+            assert!(tmux_error.effect_uncertain());
+        }
+        for diagnostic in [
+            format!("{error}"),
+            format!("{error:#}"),
+            format!("{error:?}"),
+        ] {
+            assert!(!diagnostic.contains(secret), "{diagnostic}");
+            assert!(!diagnostic.contains(argument), "{diagnostic}");
+        }
+        for source in error.chain() {
+            let diagnostic = format!("{source} {source:?}");
+            assert!(!diagnostic.contains(secret), "{diagnostic}");
+            assert!(!diagnostic.contains(argument), "{diagnostic}");
+        }
+    }
+}
+
+#[test]
+fn worker_with_no_arguments_runs_as_one_literal_program() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(server) = common::PrivateTmux::new("zero-args") else {
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let worker = work.path().join("worker with spaces;");
+    std::fs::write(&worker, "#!/bin/sh\nprintf '%s' \"$#\" > argc\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backend = Tmux::new("tmux").with_socket(&server.socket);
+    let request = LaunchRequest::from(marshal_launch::ProcessRequest {
+        harness: "claude".into(),
+        argv: vec![worker.display().to_string()],
+        cwd: work.path().display().to_string(),
+        name: "zero-args".into(),
+        agent_id: "zero-args".into(),
+        marshal_version: MARSHAL_VERSION.into(),
+        env: Default::default(),
+        options: vec![],
+    });
+    let launched = backend.launch(&request).unwrap();
+    let output = work.path().join("argc");
+    for _ in 0..50 {
+        if output.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read_to_string(output).unwrap(), "0");
+    assert_eq!(
+        backend.stop(&launched.handle).unwrap(),
+        StopReceipt::Stopped
+    );
 }

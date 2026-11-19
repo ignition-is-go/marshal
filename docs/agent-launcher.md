@@ -149,8 +149,8 @@ the binaries from the same checkout with
 SSH and tmux use a launch-specific session name and an ownership
 marker. The display name does not select the process to stop.
 
-Both session backends use `libtmux` directly through Marshal's native adapter.
-SSH sends contract-v2 JSON to `marshal-launch-ssh --target`; it never falls
+Both session backends use the published `agent-tmux` crate through Marshal's native adapter.
+SSH sends contract-v3 JSON to `marshal-launch-ssh --target`; it never falls
 back to shell commands that manage tmux. A missing or incompatible helper
 fails before launch. Set `MARSHAL_LAUNCH_SSH_HELPER` in the daemon service
 environment to an absolute target path when the helper is outside the target's
@@ -158,9 +158,11 @@ login PATH. Keep that setting available for later inspect and stop calls.
 The optional Claude token file is read inside the target worker process;
 the credential value stays out of requests, responses, and tmux arguments.
 
-Pulse Agents can implement an external backend using its own launch API.
-That backend will pass through the provider's lifecycle handle, and Marshal
-will separately record the worker's Marshal session.
+The external `marshal-launch-pulse` backend uses Pulse's managed launch API.
+It returns the provider's lifecycle handle. Marshal separately records the
+worker's Marshal session and delivers a first task after a unique roster join.
+The native tmux crate and the managed provider protocol have independent
+release boundaries.
 
 ## Managed launch intent
 

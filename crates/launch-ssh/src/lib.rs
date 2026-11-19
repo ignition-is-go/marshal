@@ -7,7 +7,7 @@
 //!
 //! Preflight gathers target configuration facts through `bash -l -s`.
 //! Session operations send contract-v3 JSON to the matching installed
-//! `marshal-launch-ssh --target` helper, which uses Marshal's native libtmux
+//! `marshal-launch-ssh --target` helper, which uses Marshal's native agent-tmux
 //! adapter. A missing or incompatible helper is an error.
 //!
 //! Options (after `--` on the `marshal-launch` command line):

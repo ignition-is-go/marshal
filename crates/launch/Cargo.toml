@@ -34,7 +34,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-libtmux = { version = "0.1.2", git = "https://github.com/lucid-max/libtmux-rs", rev = "ebf61d511fb3e7836792be4a63c9adb17b410050", default-features = false, features = ["blocking"] }
+agent-tmux = { version = "=0.1.0", default-features = false, features = ["blocking"] }
 
 [dev-dependencies]
 myko-server = { workspace = true }

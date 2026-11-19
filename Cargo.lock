@@ -9,6 +9,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-tmux"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63846027d28b2425269da9805cb9d1395eb6d08ec77a5e02a5c201bb01565aee"
+dependencies = [
+ "libc",
+ "tokio",
+]
+
+[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3160,16 +3170,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libtmux"
-version = "0.1.2"
-source = "git+https://github.com/lucid-max/libtmux-rs?rev=ebf61d511fb3e7836792be4a63c9adb17b410050#ebf61d511fb3e7836792be4a63c9adb17b410050"
-dependencies = [
- "rustix",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
 name = "lightningcss"
 version = "1.0.0-alpha.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3331,10 +3331,10 @@ dependencies = [
 name = "marshal-launch"
 version = "0.60.5"
 dependencies = [
+ "agent-tmux",
  "anyhow",
  "gethostname",
  "hyphae",
- "libtmux",
  "marshal-entities",
  "myko",
  "myko-server",
