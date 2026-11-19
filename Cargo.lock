@@ -6447,9 +6447,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tmux-session"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c111aaad77a6ca087768b9b14bfe9ed6ad03609a0b50f4f8d107b3347f74a1f"
+checksum = "fd32ec27e4fb28e8f3c2290880432c0638ea308300761fc377ae1f6dd49be391"
 dependencies = [
  "libc",
  "tokio",
