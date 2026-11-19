@@ -150,17 +150,30 @@ async fn owned_session(server: &libtmux::Server, handle: &str) -> Result<Option<
         handle.starts_with("marshal-") && valid_name(handle),
         "invalid tmux recovery handle"
     );
-    let session = match server.session(handle).await {
-        Ok(session) => session,
-        Err(libtmux::Error::ServerGone {
-            kind: libtmux::ServerGoneKind::NotRunning,
-            ..
-        }) => return Ok(None),
-        Err(libtmux::Error::ServerGone {
-            kind: libtmux::ServerGoneKind::Unreachable,
-            ..
-        }) if !server.socket_path().try_exists()? => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    let session = loop {
+        match server.session(handle).await {
+            Ok(session) => break session,
+            Err(libtmux::Error::ServerGone {
+                kind: libtmux::ServerGoneKind::NotRunning,
+                ..
+            }) => return Ok(None),
+            Err(
+                error @ libtmux::Error::ServerGone {
+                    kind: libtmux::ServerGoneKind::Unreachable,
+                    ..
+                },
+            ) => {
+                if !server.socket_path().try_exists()? {
+                    return Ok(None);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(error.into());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
     };
     let Some(session) = session else {
         return Ok(None);

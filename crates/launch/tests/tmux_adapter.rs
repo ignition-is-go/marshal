@@ -226,6 +226,35 @@ fn unreachable_existing_endpoint_is_not_reported_as_a_stopped_agent() {
 }
 
 #[test]
+fn existing_endpoint_is_retried_after_a_transient_connection_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(server) = common::PrivateTmux::new("startup-discovery") else {
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let t = Tmux::new("tmux").with_socket(&server.socket);
+    let req = LaunchRequest {
+        version: PROTOCOL_VERSION,
+        harness: "claude".into(),
+        argv: ["sh", "-c", "sleep 30"].map(str::to_owned).to_vec(),
+        cwd: work.path().display().to_string(),
+        name: "startup".into(),
+        agent_id: "startup-discovery".into(),
+        marshal_version: MARSHAL_VERSION.into(),
+        env: Default::default(),
+        options: vec![],
+    };
+    let launched = t.launch(&req).unwrap();
+    let wrapper = work.path().join("tmux-startup");
+    std::fs::write(&wrapper, format!("#!/bin/sh\nfor arg do\nif [ \"$arg\" = list-sessions ] && mkdir '{}' 2>/dev/null; then\necho 'error connecting to fixture (Connection refused)' >&2\nexit 1\nfi\ndone\nexec tmux \"$@\"\n", work.path().join("first-discovery").display())).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let racing = Tmux::new(wrapper.display().to_string()).with_socket(&server.socket);
+    assert_eq!(racing.status(&launched.handle).unwrap(), Some(true));
+    assert!(work.path().join("first-discovery").exists());
+    assert_eq!(t.stop(&launched.handle).unwrap(), StopReceipt::Stopped);
+}
+
+#[test]
 fn concurrent_launches_converge_and_foreign_owner_is_never_stopped() {
     let Some(server) = common::PrivateTmux::new("collision") else {
         return;
