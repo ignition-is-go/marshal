@@ -16,10 +16,12 @@ use std::{process::Command, time::Duration};
 use anyhow::Context;
 use anyhow::{Result, bail, ensure};
 
+#[cfg(unix)]
+use crate::ProcessRequest;
 use crate::external::DAEMON_CREDENTIAL_ENV;
 #[cfg(unix)]
 use crate::external::run_bounded;
-use crate::{LaunchBackend, LaunchRequest, Launched, ProcessRequest, StopReceipt};
+use crate::{LaunchBackend, LaunchRequest, Launched, StopReceipt};
 
 /// The longest tmux session name the adapter makes.
 pub const MAX_NAME: usize = 64;
@@ -636,8 +638,7 @@ mod tests {
     #[test]
     fn a_missing_folder_or_a_bad_name_starts_nothing() {
         let t = Tmux::new("/nonexistent/tmux");
-        let mut req = LaunchRequest {
-            version: crate::PROTOCOL_VERSION,
+        let mut req = LaunchRequest::from(crate::ProcessRequest {
             harness: "claude".into(),
             argv: v(&["claude"]),
             cwd: "/nonexistent/folder".into(),
@@ -646,14 +647,16 @@ mod tests {
             marshal_version: crate::MARSHAL_VERSION.into(),
             env: Default::default(),
             options: vec![],
-        };
+        });
         assert!(
             t.check(&req)
                 .unwrap_err()
                 .to_string()
                 .contains("isn't a folder")
         );
-        req.cwd = "/".into();
+        if let crate::BackendIntent::Process { cwd, .. } = &mut req.intent {
+            *cwd = "/".into();
+        }
         assert!(
             t.check(&req)
                 .unwrap_err()
@@ -664,7 +667,9 @@ mod tests {
         assert!(t.check(&req).is_err());
         assert!(t.launch(&req).is_err());
         req.name = "ok".into();
-        req.options = v(&["--host", "x"]);
+        if let crate::BackendIntent::Process { options, .. } = &mut req.intent {
+            *options = v(&["--host", "x"]);
+        }
         assert!(
             t.check(&req)
                 .unwrap_err()

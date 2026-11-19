@@ -106,7 +106,7 @@ impl From<ProcessRequest> for LaunchRequest {
             hook_base: request.env.remove("MARSHAL_BASE_URL"),
         };
         Self {
-            version: request.version,
+            version: crate::PROTOCOL_VERSION,
             name: request.name,
             agent_id: request.agent_id,
             marshal_version: request.marshal_version,
@@ -147,7 +147,6 @@ impl LaunchRequest {
             env.insert("MARSHAL_BASE_URL".into(), base.clone());
         }
         Ok(ProcessRequest {
-            version: self.version,
             name: self.name.clone(),
             agent_id: self.agent_id.clone(),
             marshal_version: self.marshal_version.clone(),
@@ -218,6 +217,35 @@ mod tests {
         let mut wire = managed();
         wire["first_task"] = json!("do work");
         assert!(serde_json::from_value::<LaunchRequest>(wire).is_err());
+    }
+
+    #[test]
+    fn first_task_belongs_to_the_api_request_only() {
+        let wire = json!({
+            "launch_id": "launch-0123456789abcdef0123456789abcdef", "backend": "pulse",
+            "name": "agent-work", "check": true, "timeout_secs": 60,
+            "first_task": "Run the failing test", "intent": managed()["intent"]
+        });
+        let request: crate::api::StartLaunch = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(request.first_task.as_deref(), Some("Run the failing test"));
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+    }
+
+    #[test]
+    fn process_coordination_comes_from_the_common_context() {
+        let mut wire = managed();
+        wire["context"]["hook_base"] = serde_json::Value::Null;
+        wire["intent"] = json!({
+            "kind": "process", "harness": "claude", "argv": ["claude"], "cwd": "/work", "options": [],
+            "env": {"MARSHAL_DAEMON_ADDRESS": "ws://wrong:6155", "MARSHAL_BASE_URL": "http://wrong:6156"}
+        });
+        let request: LaunchRequest = serde_json::from_value(wire).unwrap();
+        let process = request.process_request().unwrap();
+        assert_eq!(
+            process.env["MARSHAL_DAEMON_ADDRESS"],
+            "ws://marshal.mesh:6155"
+        );
+        assert!(!process.env.contains_key("MARSHAL_BASE_URL"));
     }
 
     #[test]

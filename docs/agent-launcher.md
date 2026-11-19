@@ -33,7 +33,7 @@ listener's existing trust model.
 
 | Path | Request | Response |
 | --- | --- | --- |
-| `/launch/v1/start` | Launch ID, backend, harness, working directory, display name, backend options, preflight choice, join timeout, optional first task | Launch record |
+| `/launch/v1/start` | Launch ID, backend, typed intent, display name, preflight choice, join timeout, optional first task | Launch record |
 | `/launch/v1/get` | `{"launch_id":"launch-…"}` | Launch record with backend status and any observed task acknowledgment |
 | `/launch/v1/list` | `{}` | Launch records with their last recorded process state |
 | `/launch/v1/stop` | `{"launch_id":"launch-…"}` | Launch record |
@@ -42,10 +42,11 @@ listener's existing trust model.
 {
   "launch_id": "launch-068e59ab16294023a4da6dd283b3deaa",
   "backend": "ssh",
-  "harness": "claude",
-  "cwd": "/home/agent/app",
   "name": "test-fix",
-  "options": ["--host", "build-03"],
+  "intent": {
+    "kind": "process", "harness": "claude", "cwd": "/home/agent/app",
+    "options": ["--host", "build-03"]
+  },
   "check": true,
   "timeout_secs": 60,
   "first_task": "Run the failing test"

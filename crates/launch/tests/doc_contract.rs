@@ -47,3 +47,11 @@ fn the_docs_launch_response_parses() {
         Some("ssh -t build-03 'tmux attach -t =marshal-launch-6f1c'")
     );
 }
+
+#[test]
+fn the_docs_start_request_parses() {
+    let wire = json_after("## Service API");
+    let request: marshal_launch::api::StartLaunch = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(request.first_task.as_deref(), Some("Run the failing test"));
+    assert_eq!(serde_json::to_value(request).unwrap(), wire);
+}

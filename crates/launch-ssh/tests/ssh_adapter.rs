@@ -43,13 +43,6 @@ impl Env {
     }
 
     fn run(&self, verb: &str, req: &Value, extra: &[(&str, &str)]) -> Output {
-        let request = if req.get("harness").is_some() {
-            let process: marshal_launch::ProcessRequest =
-                serde_json::from_value(req.clone()).unwrap();
-            serde_json::to_value(marshal_launch::LaunchRequest::from(process)).unwrap()
-        } else {
-            req.clone()
-        };
         let path = format!(
             "{}:{}",
             self.path("bin").display(),
@@ -80,7 +73,7 @@ impl Env {
             .stdin
             .take()
             .unwrap()
-            .write_all(request.to_string().as_bytes())
+            .write_all(req.to_string().as_bytes())
             .unwrap();
         child.wait_with_output().unwrap()
     }
@@ -88,17 +81,16 @@ impl Env {
     fn request(&self, argv: &[&str]) -> Value {
         json!({
             "version": PROTOCOL_VERSION,
-            "harness": "claude",
-            "argv": argv,
-            "cwd": self.path("work"),
             "name": "launch-test",
             "launch_id": "launch-test-1",
             "marshal_version": marshal_launch_ssh::VERSION,
-            "env": {
-                "MARSHAL_AGENT_ID": "launch-test-1",
-                "MARSHAL_DAEMON_ADDRESS": "ws://marshal.invalid:6155",
-            },
-            "options": ["--host", "target-1"],
+            "context": {"daemon_address": "ws://marshal.invalid:6155", "hook_base": null},
+            "intent": {
+                "kind": "process", "harness": "claude", "argv": argv,
+                "cwd": self.path("work"),
+                "env": {"MARSHAL_AGENT_ID": "launch-test-1"},
+                "options": ["--host", "target-1"]
+            }
         })
     }
 
@@ -273,8 +265,8 @@ fn daemon_credentials_are_removed_before_ssh_and_from_target_json() {
     let request_file = e.path("request.json");
     e.bin("record-ssh", "[ -z \"${MYKO_POSTGRES_URL+present}\" ] || exit 73\ncat > \"$FAKE_REQUEST\"\nprintf '%s\\n' '@@marshal-target {\"version\":2,\"helper_version\":\"wrong\"}'");
     let mut req = e.request(&["sh", "-c", "sleep 30"]);
-    req["env"]["MYKO_POSTGRES_URL"] = json!("synthetic-request-credential");
-    req["env"]["MARSHAL_AUTH_CLIENT_SECRET"] = json!("synthetic-client-secret");
+    req["intent"]["env"]["MYKO_POSTGRES_URL"] = json!("synthetic-request-credential");
+    req["intent"]["env"]["MARSHAL_AUTH_CLIENT_SECRET"] = json!("synthetic-client-secret");
     let output = e.run(
         "launch",
         &req,
@@ -293,7 +285,7 @@ fn daemon_credentials_are_removed_before_ssh_and_from_target_json() {
     assert!(!wire.contains("synthetic-client-secret"));
     let wire: Value = serde_json::from_str(&wire).unwrap();
     assert_eq!(wire["env"]["MARSHAL_AGENT_ID"], "launch-test-1");
-    assert_eq!(wire["argv"], req["argv"]);
+    assert_eq!(wire["argv"], req["intent"]["argv"]);
 }
 
 #[test]
@@ -348,7 +340,7 @@ fn launch_refuses_loopback_and_starts_nothing() {
     let transcript = e.path("ssh-transcript");
     let env = [("FAKE_SSH_TRANSCRIPT", transcript.to_str().unwrap())];
     let mut req = e.request(&["true"]);
-    req["env"]["MARSHAL_DAEMON_ADDRESS"] = json!("ws://localhost:6155");
+    req["context"]["daemon_address"] = json!("ws://localhost:6155");
     for verb in ["check", "launch"] {
         let o = e.run(verb, &req, &env);
         assert_eq!(o.status.code(), Some(1));
@@ -393,7 +385,7 @@ fn check_runs_its_probes_on_the_target_and_names_each_failure() {
     e.bin("marshal-shim", "echo 'marshal-shim 0.1.0'");
     e.bin("claude", "echo '[]'");
     let mut req = e.request(&["claude"]);
-    req["cwd"] = json!("~/no-such-folder");
+    req["intent"]["cwd"] = json!("~/no-such-folder");
     let o = e.run("check", &req, &[]);
     assert_eq!(o.status.code(), Some(1));
     let err = stderr(&o);
@@ -480,7 +472,7 @@ fn check_fails_when_the_targets_daemon_address_file_names_another_daemon() {
     let xdg = e.path("xdg");
     write(xdg.clone(), "ws://other:7000");
     let mut req = e.request(&["claude"]);
-    req["env"]["XDG_CONFIG_HOME"] = serde_json::json!(xdg);
+    req["intent"]["env"]["XDG_CONFIG_HOME"] = serde_json::json!(xdg);
     let err = stderr(&e.run("check", &req, &[]));
     assert!(err.contains("naming ws://other:7000"), "{err}");
 }
@@ -662,7 +654,7 @@ fn check_probes_the_hook_listener_the_targets_marshal_base_url_names() {
     }
     // The request's own MARSHAL_BASE_URL wins over the target's.
     let mut req = e.request(&["claude"]);
-    req["env"]["MARSHAL_BASE_URL"] = json!("http://chosen.invalid:7003");
+    req["context"]["hook_base"] = json!("http://chosen.invalid:7003");
     let err = stderr(&e.run(
         "check",
         &req,
@@ -692,9 +684,9 @@ fn check_reaches_listening_ports() {
     let hook = std::net::TcpListener::bind((ip, 0)).unwrap();
     let e = Env::new();
     let mut req = e.request(&["claude"]);
-    req["env"]["MARSHAL_DAEMON_ADDRESS"] =
+    req["context"]["daemon_address"] =
         json!(format!("ws://{ip}:{}", daemon.local_addr().unwrap().port()));
-    req["env"]["MARSHAL_BASE_URL"] =
+    req["context"]["hook_base"] =
         json!(format!("http://{ip}:{}", hook.local_addr().unwrap().port()));
     let err = stderr(&e.run("check", &req, &[]));
     assert!(err.contains("can't run this launch"), "{err}");
@@ -885,7 +877,7 @@ fn the_token_file_is_read_on_the_target_and_never_carried() {
         "-c",
         "printf '%s\\n' \"$CLAUDE_CODE_OAUTH_TOKEN\" > out; sleep 60",
     ]);
-    req["options"] = json!([
+    req["intent"]["options"] = json!([
         "--host",
         "target-1",
         "--oauth-token-file",

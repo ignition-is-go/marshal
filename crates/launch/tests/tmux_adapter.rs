@@ -24,7 +24,6 @@ fn launch_status_and_stop_on_a_private_tmux_server() {
         .with_shim(common::shim_at(MARSHAL_VERSION));
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let req = LaunchRequest::from(marshal_launch::ProcessRequest {
-        version: PROTOCOL_VERSION,
         harness: "claude".into(),
         argv: ["sh", "-c", "echo \"[$MARSHAL_AGENT_ID $PWD]\"; sleep 30"]
             .map(String::from)
@@ -114,7 +113,6 @@ fn workers_strip_daemon_credentials_from_new_and_running_tmux_servers() {
         );
         let work = tempfile::tempdir().unwrap();
         let req = LaunchRequest::from(marshal_launch::ProcessRequest {
-            version: PROTOCOL_VERSION,
             harness: "claude".into(),
             argv: [
                 "sh",
@@ -181,8 +179,7 @@ async fn sync_backend_preserves_literal_argv_inside_an_async_caller() {
     .map(str::to_owned)
     .to_vec();
     argv.extend(literal.map(str::to_owned));
-    let req = LaunchRequest {
-        version: PROTOCOL_VERSION,
+    let req = LaunchRequest::from(marshal_launch::ProcessRequest {
         harness: "claude".into(),
         argv,
         cwd: work.path().display().to_string(),
@@ -191,7 +188,7 @@ async fn sync_backend_preserves_literal_argv_inside_an_async_caller() {
         marshal_version: MARSHAL_VERSION.into(),
         env: Default::default(),
         options: vec![],
-    };
+    });
     let launched = t.launch(&req).unwrap();
     let output = work.path().join("literal-argv");
     for _ in 0..50 {
@@ -233,8 +230,7 @@ fn existing_endpoint_is_retried_after_a_transient_connection_refusal() {
     };
     let work = tempfile::tempdir().unwrap();
     let t = Tmux::new("tmux").with_socket(&server.socket);
-    let req = LaunchRequest {
-        version: PROTOCOL_VERSION,
+    let req = LaunchRequest::from(marshal_launch::ProcessRequest {
         harness: "claude".into(),
         argv: ["sh", "-c", "sleep 30"].map(str::to_owned).to_vec(),
         cwd: work.path().display().to_string(),
@@ -243,7 +239,7 @@ fn existing_endpoint_is_retried_after_a_transient_connection_refusal() {
         marshal_version: MARSHAL_VERSION.into(),
         env: Default::default(),
         options: vec![],
-    };
+    });
     let launched = t.launch(&req).unwrap();
     let wrapper = work.path().join("tmux-startup");
     std::fs::write(&wrapper, format!("#!/bin/sh\nfor arg do\nif [ \"$arg\" = list-sessions ] && mkdir '{}' 2>/dev/null; then\necho 'error connecting to fixture (Connection refused)' >&2\nexit 1\nfi\ndone\nexec tmux \"$@\"\n", work.path().join("first-discovery").display())).unwrap();
@@ -261,8 +257,7 @@ fn concurrent_launches_converge_and_foreign_owner_is_never_stopped() {
     };
     let work = tempfile::tempdir().unwrap();
     let t = Tmux::new("tmux").with_socket(&server.socket);
-    let req = LaunchRequest {
-        version: PROTOCOL_VERSION,
+    let req = LaunchRequest::from(marshal_launch::ProcessRequest {
         harness: "claude".into(),
         argv: ["sh", "-c", "printf 'started\\n' >> starts; sleep 30"]
             .map(str::to_owned)
@@ -273,7 +268,7 @@ fn concurrent_launches_converge_and_foreign_owner_is_never_stopped() {
         marshal_version: MARSHAL_VERSION.into(),
         env: Default::default(),
         options: vec![],
-    };
+    });
     let barrier = std::sync::Barrier::new(8);
     let launches = std::thread::scope(|scope| {
         let tasks: Vec<_> = (0..8)

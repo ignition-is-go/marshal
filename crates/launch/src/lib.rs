@@ -1,9 +1,9 @@
 //! `marshal-launch`: start an agent somewhere and see it join the roster.
 //!
-//! See `docs/agent-launcher.md`. The launcher owns the parts of a launch that
-//! don't depend on where the agent runs (its id, its environment, waiting for
-//! it to join, its first task). An [`LaunchBackend`] does only the part that does:
-//! run this command, with these environment variables, over there.
+//! Marshal owns launch identity, recovery records, roster correlation, and
+//! optional first-task delivery. A [`LaunchBackend`] executes process intent
+//! or delegates managed intent to the provider that owns its launch policy.
+//! Backends return the resolved worker location before Marshal waits for its row.
 //!
 //! The shared types come first, so the built-in tmux adapter and the external
 //! `marshal-launch-<name>` adapters agree on them.
@@ -34,10 +34,8 @@ pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Resolved process data consumed by process-only backends.
 /// The external wire contract is [`LaunchRequest`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessRequest {
-    /// Contract version; [`PROTOCOL_VERSION`].
-    pub version: u32,
     /// `claude` or `codex`.
     pub harness: String,
     /// The command to run, as given. Adapters add no flags to it.
@@ -47,7 +45,6 @@ pub struct ProcessRequest {
     /// A label for the launch (tmux session name, VM name, ...).
     pub name: String,
     /// The `launch-<uuid>` id the agent's roster row will carry.
-    #[serde(rename = "launch_id")]
     pub agent_id: String,
     /// The launcher's own version. `check` requires the target's `marshal-shim`
     /// to have the same major.minor ([`same_major_minor`]).
@@ -92,7 +89,7 @@ pub trait LaunchBackend: Send + Sync {
     fn check(&self, req: &LaunchRequest) -> Result<()>;
     /// Derive a stable status and stop handle before starting the worker.
     fn recovery_handle(&self, req: &LaunchRequest) -> Result<String>;
-    /// Start the request's `argv` in its `cwd` with its `env` added.
+    /// Start the selected intent and return its resolved worker location.
     fn launch(&self, req: &LaunchRequest) -> Result<Launched>;
     /// Observe launch metadata using the stable handle after a lost start response.
     fn recover(&self, _req: &LaunchRequest) -> Result<Option<Launched>> {
@@ -243,7 +240,6 @@ fn prepare(adapter: &dyn LaunchBackend, plan: &Plan, agent_id: &str) -> Result<L
     let local = adapter.name() == address::LOCAL_BACKEND;
     address::check_for_backend(adapter.name(), &plan.launch_address)?;
     let mut req = ProcessRequest {
-        version: PROTOCOL_VERSION,
         harness: plan.harness.clone(),
         argv: harness_argv(&plan.harness)?,
         cwd: plan.cwd.clone(),
@@ -369,7 +365,6 @@ mod tests {
     #[test]
     fn launch_request_serializes_with_the_contract_names() {
         let req = LaunchRequest::from(crate::ProcessRequest {
-            version: PROTOCOL_VERSION,
             harness: "claude".into(),
             argv: vec!["claude".into()],
             cwd: "~/work/app".into(),

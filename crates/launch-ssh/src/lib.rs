@@ -24,7 +24,8 @@ use marshal_launch::address::{host_port, is_loopback_host};
 use marshal_launch::external::{DAEMON_CREDENTIAL_ENV, run_bounded};
 use marshal_launch::tmux::session_key;
 use marshal_launch::{
-    LaunchBackend, LaunchRequest, Launched, PROTOCOL_VERSION, ProcessRequest, StopReceipt, check_shim_version,
+    LaunchBackend, LaunchRequest, Launched, PROTOCOL_VERSION, ProcessRequest, StopReceipt,
+    check_shim_version,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -942,7 +943,10 @@ pub fn run_target(verb: &str, input: &str) -> Result<Value> {
         request["helper_version"].as_str() == Some(VERSION),
         "incompatible target helper; install marshal-launch-ssh {VERSION} on this host"
     );
-    request.as_object_mut().context("target request must be an object")?.remove("helper_version");
+    request
+        .as_object_mut()
+        .context("target request must be an object")?
+        .remove("helper_version");
     let backend = marshal_launch::tmux::Tmux::new("tmux");
     let mut response = match verb {
         "check" | "launch" | "inspect" => {
@@ -952,7 +956,12 @@ pub fn run_target(verb: &str, input: &str) -> Result<Value> {
             req.env
                 .insert("MARSHAL_HOST".into(), marshal_launch::tmux::this_host());
             match target.token_file {
-                Some(file) if verb == "launch" && backend.recover(&LaunchRequest::from(req.clone()))?.is_none() => {
+                Some(file)
+                    if verb == "launch"
+                        && backend
+                            .recover(&LaunchRequest::from(req.clone()))?
+                            .is_none() =>
+                {
                     let metadata = std::fs::metadata(&file)
                         .with_context(|| format!("no readable, non-empty token file at {file}"))?;
                     anyhow::ensure!(
@@ -977,7 +986,9 @@ pub fn run_target(verb: &str, input: &str) -> Result<Value> {
                     backend.check(&LaunchRequest::from(req.clone()))?;
                     json!({})
                 }
-                "launch" => serde_json::to_value(backend.launch(&LaunchRequest::from(req.clone()))?)?,
+                "launch" => {
+                    serde_json::to_value(backend.launch(&LaunchRequest::from(req.clone()))?)?
+                }
                 _ => json!({"launched": backend.recover(&LaunchRequest::from(req.clone()))?}),
             }
         }
@@ -1034,7 +1045,11 @@ pub fn target_worker(_: &[String]) -> Result<()> {
 }
 
 fn remote_target(dest: &str, verb: &str, mut request: Value) -> Result<Value> {
-    if let Some(environment) = request.get_mut("intent").and_then(|intent| intent.get_mut("env")).and_then(Value::as_object_mut) {
+    if let Some(environment) = request
+        .get_mut("intent")
+        .and_then(|intent| intent.get_mut("env"))
+        .and_then(Value::as_object_mut)
+    {
         environment.retain(|key, _| !DAEMON_CREDENTIAL_ENV.contains(&key.as_str()));
     }
     let helper =
@@ -1161,7 +1176,11 @@ pub fn check(t: &Target, req: &ProcessRequest) -> Result<()> {
     let out = remote(&t.dest, &check_script(t, req))?;
     let failures = Probe::parse(&out).failures(t, req);
     if failures.is_empty() {
-        remote_target(&t.dest, "check", serde_json::to_value(LaunchRequest::from(req.clone()))?)?;
+        remote_target(
+            &t.dest,
+            "check",
+            serde_json::to_value(LaunchRequest::from(req.clone()))?,
+        )?;
         return Ok(());
     }
     let mut msg = format!("{} can't run this launch:", t.dest);
@@ -1181,7 +1200,11 @@ pub const MACOS_NOTE: &str = "note: on macOS, Local Network privacy can silently
      docs/agent-launcher.md";
 
 pub fn launch(t: &Target, req: &ProcessRequest) -> Result<Launched> {
-    let response = remote_target(&t.dest, "launch", serde_json::to_value(LaunchRequest::from(req.clone()))?)?;
+    let response = remote_target(
+        &t.dest,
+        "launch",
+        serde_json::to_value(LaunchRequest::from(req.clone()))?,
+    )?;
     if response["os"] == "Darwin" {
         eprintln!("{MACOS_NOTE}");
     }
@@ -1189,7 +1212,11 @@ pub fn launch(t: &Target, req: &ProcessRequest) -> Result<Launched> {
 }
 
 fn inspect(t: &Target, req: &ProcessRequest) -> Result<Option<Launched>> {
-    let response = remote_target(&t.dest, "inspect", serde_json::to_value(LaunchRequest::from(req.clone()))?)?;
+    let response = remote_target(
+        &t.dest,
+        "inspect",
+        serde_json::to_value(LaunchRequest::from(req.clone()))?,
+    )?;
     if response["launched"].is_null() {
         return Ok(None);
     }
@@ -1284,9 +1311,34 @@ mod tests {
         assert!(validate_dest("host;echo").is_err());
     }
 
+    #[test]
+    fn target_helper_rejects_managed_intent_and_old_wire_before_starting() {
+        let mut request = json!({
+            "version": PROTOCOL_VERSION, "helper_version": VERSION,
+            "name": "managed", "launch_id": "launch-0123456789abcdef0123456789abcdef",
+            "marshal_version": VERSION,
+            "context": {"daemon_address": "ws://marshal.mesh:6155", "hook_base": null},
+            "intent": {"kind": "managed", "provider": "pulse", "environment_id": "development", "preset_id": "codex-account", "workspace": {"provider": "session"}}
+        });
+        for verb in ["check", "launch", "inspect"] {
+            assert!(
+                run_target(verb, &request.to_string())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("only process")
+            );
+        }
+        request["version"] = json!(2);
+        assert!(
+            run_target("launch", &request.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("contract version 2")
+        );
+    }
+
     fn req(addr: &str) -> ProcessRequest {
         ProcessRequest {
-            version: PROTOCOL_VERSION,
             harness: "claude".into(),
             argv: vec!["claude".into()],
             cwd: "~/work/app".into(),

@@ -585,7 +585,6 @@ mod tests {
         };
         let mut entry = Record {
             backend_request: LaunchRequest::from(crate::ProcessRequest {
-                version: crate::PROTOCOL_VERSION,
                 harness: "claude".into(),
                 argv: vec!["claude".into()],
                 cwd: "/work".into(),
