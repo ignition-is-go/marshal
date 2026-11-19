@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::{
-    LaunchBackend, LaunchRequest, Launched, Plan, StopReceipt, address, backend_for, first_task,
-    join,
+    BackendIntent, LaunchBackend, LaunchContext, LaunchIntent, LaunchRequest, Launched, Plan,
+    StopReceipt, address, backend_for, first_task, join,
 };
 
 pub const LAUNCH_PATH: &str = "/launch/v1/start";
@@ -20,13 +20,12 @@ pub const STOP_LAUNCH_PATH: &str = "/launch/v1/stop";
 pub const LIST_LAUNCHES_PATH: &str = "/launch/v1/list";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StartLaunch {
     pub launch_id: String,
     pub backend: String,
-    pub harness: String,
-    pub cwd: String,
+    pub intent: LaunchIntent,
     pub name: String,
-    pub options: Vec<String>,
     pub check: bool,
     pub timeout_secs: u64,
     pub first_task: Option<String>,
@@ -192,33 +191,52 @@ impl Service {
                 entry
             }
             None => {
-                let plan = Plan {
-                    harness: request.harness.clone(),
-                    cwd: request.cwd.clone(),
-                    name: request.name.clone(),
-                    launch_address: self.launch_address.clone(),
-                    daemon_address: self.daemon_address.clone(),
-                    timeout: Duration::from_secs(request.timeout_secs),
-                    check: request.check,
-                    options: request.options.clone(),
-                    task: request.first_task.clone(),
-                    records: None,
+                let mut backend_request = match &request.intent {
+                    LaunchIntent::Process {
+                        harness,
+                        cwd,
+                        options,
+                    } => {
+                        let plan = Plan {
+                            harness: harness.clone(),
+                            cwd: cwd.clone(),
+                            name: request.name.clone(),
+                            launch_address: self.launch_address.clone(),
+                            daemon_address: self.daemon_address.clone(),
+                            timeout: Duration::from_secs(request.timeout_secs),
+                            check: request.check,
+                            options: options.clone(),
+                            task: request.first_task.clone(),
+                            records: None,
+                        };
+                        let mut prepared =
+                            crate::prepare(backend.as_ref(), &plan, &request.launch_id)?;
+                        if let BackendIntent::Process { env, .. } = &mut prepared.intent {
+                            env.remove("MARSHAL_OPERATOR");
+                        }
+                        prepared
+                    }
+                    LaunchIntent::Managed { provider } => {
+                        address::check_for_backend(backend.name(), &self.launch_address)?;
+                        LaunchRequest {
+                            version: crate::PROTOCOL_VERSION,
+                            name: request.name.clone(),
+                            agent_id: request.launch_id.clone(),
+                            marshal_version: crate::MARSHAL_VERSION.into(),
+                            context: LaunchContext {
+                                daemon_address: self.launch_address.clone(),
+                                hook_base: self.hook_base.clone(),
+                            },
+                            intent: BackendIntent::Managed {
+                                provider: provider.clone(),
+                            },
+                        }
+                    }
                 };
-                let mut backend_request =
-                    crate::prepare(backend.as_ref(), &plan, &request.launch_id)?;
-                backend_request.env.remove("MARSHAL_BASE_URL");
-                backend_request.env.remove("MARSHAL_OPERATOR");
-                if let Some(base) = &self.hook_base {
-                    backend_request
-                        .env
-                        .insert("MARSHAL_BASE_URL".into(), base.clone());
-                }
+                backend_request.context.hook_base = self.hook_base.clone();
                 address::check_hook_base_for_backend(
                     backend.name(),
-                    backend_request
-                        .env
-                        .get("MARSHAL_BASE_URL")
-                        .map(String::as_str),
+                    backend_request.context.hook_base.as_deref(),
                 )?;
                 let handle = backend.recovery_handle(&backend_request)?;
                 ensure!(
@@ -283,12 +301,8 @@ impl Service {
                 backend.check(&entry.backend_request)?;
                 if backend.name() == address::LOCAL_BACKEND {
                     address::probe(
-                        &entry.backend_request.env["MARSHAL_DAEMON_ADDRESS"],
-                        entry
-                            .backend_request
-                            .env
-                            .get("MARSHAL_BASE_URL")
-                            .map(String::as_str),
+                        &entry.backend_request.context.daemon_address,
+                        entry.backend_request.context.hook_base.as_deref(),
                         Duration::from_secs(3),
                     )?;
                 }
@@ -557,28 +571,30 @@ mod tests {
         );
         let path = service.path(&launch_id).unwrap();
         let request = StartLaunch {
+            intent: crate::LaunchIntent::Process {
+                harness: "claude".into(),
+                cwd: "/work".into(),
+                options: vec![],
+            },
             launch_id: launch_id.clone(),
             backend: "preflight-stop".into(),
-            harness: "claude".into(),
-            cwd: "/work".into(),
             name: "worker".into(),
-            options: vec![],
             check: true,
             timeout_secs: 1,
             first_task: None,
         };
         let mut entry = Record {
-            backend_request: LaunchRequest {
+            backend_request: LaunchRequest::from(crate::ProcessRequest {
                 version: crate::PROTOCOL_VERSION,
-                harness: request.harness.clone(),
+                harness: "claude".into(),
                 argv: vec!["claude".into()],
-                cwd: request.cwd.clone(),
+                cwd: "/work".into(),
                 name: request.name.clone(),
                 agent_id: launch_id.clone(),
                 marshal_version: crate::MARSHAL_VERSION.into(),
                 env: Default::default(),
                 options: vec![],
-            },
+            }),
             view: LaunchView {
                 launch_id,
                 backend: request.backend.clone(),

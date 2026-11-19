@@ -43,6 +43,13 @@ impl Env {
     }
 
     fn run(&self, verb: &str, req: &Value, extra: &[(&str, &str)]) -> Output {
+        let request = if req.get("harness").is_some() {
+            let process: marshal_launch::ProcessRequest =
+                serde_json::from_value(req.clone()).unwrap();
+            serde_json::to_value(marshal_launch::LaunchRequest::from(process)).unwrap()
+        } else {
+            req.clone()
+        };
         let path = format!(
             "{}:{}",
             self.path("bin").display(),
@@ -73,7 +80,7 @@ impl Env {
             .stdin
             .take()
             .unwrap()
-            .write_all(req.to_string().as_bytes())
+            .write_all(request.to_string().as_bytes())
             .unwrap();
         child.wait_with_output().unwrap()
     }

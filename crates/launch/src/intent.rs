@@ -1,0 +1,236 @@
+use std::collections::BTreeMap;
+
+use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::ProcessRequest;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContext {
+    pub daemon_address: String,
+    pub hook_base: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaunchIntent {
+    Process {
+        harness: String,
+        cwd: String,
+        options: Vec<String>,
+    },
+    Managed {
+        #[serde(flatten)]
+        provider: ManagedIntent,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ManagedIntent {
+    Pulse {
+        environment_id: String,
+        preset_id: String,
+        workspace: PulseWorkspace,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "provider",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum PulseWorkspace {
+    Session,
+    PulseRoot,
+    ExistingDirectory {
+        path: String,
+        display_name: Option<String>,
+    },
+    Pulse {
+        repositories: Vec<String>,
+        identity: WorkspaceIdentity,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum WorkspaceIdentity {
+    Name { name: String },
+    LeviTask { task_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BackendIntent {
+    Process {
+        harness: String,
+        argv: Vec<String>,
+        cwd: String,
+        env: BTreeMap<String, String>,
+        options: Vec<String>,
+    },
+    Managed {
+        #[serde(flatten)]
+        provider: ManagedIntent,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchRequest {
+    pub version: u32,
+    pub name: String,
+    #[serde(rename = "launch_id")]
+    pub agent_id: String,
+    pub marshal_version: String,
+    pub context: LaunchContext,
+    pub intent: BackendIntent,
+}
+
+impl From<ProcessRequest> for LaunchRequest {
+    fn from(mut request: ProcessRequest) -> Self {
+        let context = LaunchContext {
+            daemon_address: request
+                .env
+                .remove("MARSHAL_DAEMON_ADDRESS")
+                .unwrap_or_default(),
+            hook_base: request.env.remove("MARSHAL_BASE_URL"),
+        };
+        Self {
+            version: request.version,
+            name: request.name,
+            agent_id: request.agent_id,
+            marshal_version: request.marshal_version,
+            context,
+            intent: BackendIntent::Process {
+                harness: request.harness,
+                argv: request.argv,
+                cwd: request.cwd,
+                env: request.env,
+                options: request.options,
+            },
+        }
+    }
+}
+
+impl LaunchRequest {
+    pub fn process_request(&self) -> Result<ProcessRequest> {
+        let BackendIntent::Process {
+            harness,
+            argv,
+            cwd,
+            env,
+            options,
+        } = &self.intent
+        else {
+            bail!("this backend accepts only process launch intent");
+        };
+        let mut env = env.clone();
+        env.remove("MARSHAL_DAEMON_ADDRESS");
+        env.remove("MARSHAL_BASE_URL");
+        if !self.context.daemon_address.is_empty() {
+            env.insert(
+                "MARSHAL_DAEMON_ADDRESS".into(),
+                self.context.daemon_address.clone(),
+            );
+        }
+        if let Some(base) = &self.context.hook_base {
+            env.insert("MARSHAL_BASE_URL".into(), base.clone());
+        }
+        Ok(ProcessRequest {
+            version: self.version,
+            name: self.name.clone(),
+            agent_id: self.agent_id.clone(),
+            marshal_version: self.marshal_version.clone(),
+            harness: harness.clone(),
+            argv: argv.clone(),
+            cwd: cwd.clone(),
+            env,
+            options: options.clone(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::LaunchBackend;
+    use serde_json::json;
+
+    fn managed() -> serde_json::Value {
+        json!({
+            "version": crate::PROTOCOL_VERSION,
+            "name": "agent-work",
+            "launch_id": "launch-0123456789abcdef0123456789abcdef",
+            "marshal_version": crate::MARSHAL_VERSION,
+            "context": {"daemon_address": "ws://marshal.mesh:6155", "hook_base": "http://marshal.mesh:6156"},
+            "intent": {"kind": "managed", "provider": "pulse", "environment_id": "development", "preset_id": "codex-account", "workspace": {"provider": "session"}}
+        })
+    }
+
+    #[test]
+    fn managed_intent_round_trips_without_execution_or_task_fields() {
+        let wire = managed();
+        let request: LaunchRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+        assert!(
+            request
+                .process_request()
+                .unwrap_err()
+                .to_string()
+                .contains("only process")
+        );
+        assert!(
+            crate::tmux::Tmux::new("MUST_NOT_EXECUTE")
+                .recovery_handle(&request)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_intent_rejects_process_fields_unknown_providers_and_tasks() {
+        for (key, value) in [
+            ("argv", json!(["sh"])),
+            ("env", json!({})),
+            ("cwd", json!("/tmp")),
+            ("options", json!([])),
+            ("first_task", json!("do work")),
+        ] {
+            let mut wire = managed();
+            wire["intent"][key] = value;
+            assert!(
+                serde_json::from_value::<LaunchRequest>(wire).is_err(),
+                "accepted {key}"
+            );
+        }
+        let mut wire = managed();
+        wire["intent"]["provider"] = json!("unknown");
+        assert!(serde_json::from_value::<LaunchRequest>(wire).is_err());
+        let mut wire = managed();
+        wire["first_task"] = json!("do work");
+        assert!(serde_json::from_value::<LaunchRequest>(wire).is_err());
+    }
+
+    #[test]
+    fn pulse_workspace_selectors_match_the_pulse_contract() {
+        for wire in [
+            json!({"provider": "session"}),
+            json!({"provider": "pulseRoot"}),
+            json!({"provider": "existingDirectory", "path": "/scoped/work", "displayName": null}),
+            json!({"provider": "pulse", "repositories": ["repo"], "identity": {"kind": "name", "name": "work"}}),
+            json!({"provider": "pulse", "repositories": ["repo"], "identity": {"kind": "leviTask", "taskId": "lv-1234"}}),
+        ] {
+            let selector: PulseWorkspace = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(selector).unwrap(), wire);
+        }
+    }
+}

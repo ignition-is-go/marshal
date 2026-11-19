@@ -112,10 +112,12 @@ fn run(args: Args) -> Result<()> {
         &api::StartLaunch {
             launch_id,
             backend: args.adapter,
-            harness: args.harness,
-            cwd,
+            intent: marshal_launch::LaunchIntent::Process {
+                harness: args.harness,
+                cwd,
+                options: args.options,
+            },
             name,
-            options: args.options,
             check: args.check,
             timeout_secs: args.timeout.as_secs(),
             first_task: args.task,

@@ -12,7 +12,12 @@ pub mod address;
 pub mod api;
 pub mod external;
 pub mod first_task;
+pub mod intent;
 pub mod join;
+pub use intent::{
+    BackendIntent, LaunchContext, LaunchIntent, LaunchRequest, ManagedIntent, PulseWorkspace,
+    WorkspaceIdentity,
+};
 pub mod record;
 pub mod tmux;
 
@@ -25,13 +30,12 @@ use serde::{Deserialize, Serialize};
 pub use external::ExternalBackend;
 
 /// The version of the adapter request/response contract this crate speaks.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
-/// What the launcher hands an adapter for `check` and `launch`.
-///
-/// Serialized as the JSON object an external adapter reads on stdin.
+/// Resolved process data consumed by process-only backends.
+/// The external wire contract is [`LaunchRequest`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaunchRequest {
+pub struct ProcessRequest {
     /// Contract version; [`PROTOCOL_VERSION`].
     pub version: u32,
     /// `claude` or `codex`.
@@ -238,7 +242,7 @@ pub struct Outcome {
 fn prepare(adapter: &dyn LaunchBackend, plan: &Plan, agent_id: &str) -> Result<LaunchRequest> {
     let local = adapter.name() == address::LOCAL_BACKEND;
     address::check_for_backend(adapter.name(), &plan.launch_address)?;
-    let mut req = LaunchRequest {
+    let mut req = ProcessRequest {
         version: PROTOCOL_VERSION,
         harness: plan.harness.clone(),
         argv: harness_argv(&plan.harness)?,
@@ -262,7 +266,7 @@ fn prepare(adapter: &dyn LaunchBackend, plan: &Plan, agent_id: &str) -> Result<L
         adapter.name(),
         req.env.get("MARSHAL_BASE_URL").map(String::as_str),
     )?;
-    Ok(req)
+    Ok(req.into())
 }
 
 /// Launch `plan` through `adapter` and wait for it to join. Nothing starts if
@@ -280,7 +284,7 @@ pub async fn launch(adapter: &dyn LaunchBackend, plan: &Plan) -> Result<Outcome>
             .with_context(|| format!("the {} adapter's check failed", adapter.name()))?;
         if local {
             // The agent runs here, so this machine's view of both ports is the agent's.
-            let hook_base = req.env.get("MARSHAL_BASE_URL").map(String::as_str);
+            let hook_base = req.context.hook_base.as_deref();
             address::probe(&plan.launch_address, hook_base, Duration::from_secs(3))?;
         }
     }
@@ -316,7 +320,7 @@ pub async fn launch(adapter: &dyn LaunchBackend, plan: &Plan) -> Result<Outcome>
     }
     eprintln!(
         "started `{}` at {}; waiting up to {}s for it to join",
-        req.argv.join(" "),
+        plan.harness,
         launched.r#where,
         plan.timeout.as_secs()
     );
@@ -364,7 +368,7 @@ mod tests {
 
     #[test]
     fn launch_request_serializes_with_the_contract_names() {
-        let req = LaunchRequest {
+        let req = LaunchRequest::from(crate::ProcessRequest {
             version: PROTOCOL_VERSION,
             harness: "claude".into(),
             argv: vec!["claude".into()],
@@ -374,20 +378,24 @@ mod tests {
             marshal_version: "0.60.2".into(),
             env: BTreeMap::from([("MARSHAL_AGENT_ID".into(), "launch-6f1c".into())]),
             options: vec!["--host".into(), "build-03".into()],
-        };
+        });
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(
             v,
             json!({
                 "version": PROTOCOL_VERSION,
-                "harness": "claude",
-                "argv": ["claude"],
-                "cwd": "~/work/app",
                 "name": "claude-app",
                 "launch_id": "launch-6f1c",
                 "marshal_version": "0.60.2",
-                "env": {"MARSHAL_AGENT_ID": "launch-6f1c"},
-                "options": ["--host", "build-03"],
+                "context": {"daemon_address": "", "hook_base": null},
+                "intent": {
+                    "kind": "process",
+                    "harness": "claude",
+                    "argv": ["claude"],
+                    "cwd": "~/work/app",
+                    "env": {"MARSHAL_AGENT_ID": "launch-6f1c"},
+                    "options": ["--host", "build-03"]
+                }
             })
         );
         assert_eq!(serde_json::from_value::<LaunchRequest>(v).unwrap(), req);

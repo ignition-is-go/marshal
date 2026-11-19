@@ -19,7 +19,7 @@ fn fake() -> ExternalBackend {
 }
 
 fn req(options: &[&str]) -> LaunchRequest {
-    LaunchRequest {
+    LaunchRequest::from(marshal_launch::ProcessRequest {
         version: PROTOCOL_VERSION,
         harness: "claude".into(),
         argv: vec!["claude".into()],
@@ -35,7 +35,7 @@ fn req(options: &[&str]) -> LaunchRequest {
             ),
         ]),
         options: options.iter().map(|s| s.to_string()).collect(),
-    }
+    })
 }
 
 #[test]

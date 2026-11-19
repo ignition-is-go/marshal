@@ -23,7 +23,7 @@ fn launch_status_and_stop_on_a_private_tmux_server() {
         .with_socket(&server.socket)
         .with_shim(common::shim_at(MARSHAL_VERSION));
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let req = LaunchRequest {
+    let req = LaunchRequest::from(marshal_launch::ProcessRequest {
         version: PROTOCOL_VERSION,
         harness: "claude".into(),
         argv: ["sh", "-c", "echo \"[$MARSHAL_AGENT_ID $PWD]\"; sleep 30"]
@@ -35,7 +35,7 @@ fn launch_status_and_stop_on_a_private_tmux_server() {
         marshal_version: MARSHAL_VERSION.into(),
         env: [("MARSHAL_AGENT_ID".to_string(), "launch-t".to_string())].into(),
         options: vec![],
-    };
+    });
 
     let old = Tmux::new("tmux")
         .with_socket(&server.socket)

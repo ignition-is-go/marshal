@@ -32,34 +32,34 @@ async fn recovered_start_keeps_its_worker_and_delivers_one_task() {
     let root = tempfile::tempdir().unwrap();
     let backend = root.path().join("marshal-launch-fixture");
     std::fs::write(&backend, r#"#!/bin/sh
-cat >/dev/null
+cat > "$FIXTURE/request-$1.json"
 case "$1" in
     check)
         if [ -f "$FIXTURE/hold-preflight" ]; then
             touch "$FIXTURE/in-preflight"
             while [ -f "$FIXTURE/hold-preflight" ]; do sleep 0.01; done
         fi
-        printf '{"version":2}\n'
+        printf '{"version":3}\n'
         ;;
-    recover) printf '{"version":2,"handle":"fixture-worker"}\n' ;;
+    recover) printf '{"version":3,"handle":"fixture-worker"}\n' ;;
     launch)
         printf 'started\n' >> "$FIXTURE/attempts"; touch "$FIXTURE/running"
         [ -f "$FIXTURE/confirm-start" ] || exit 7
-        printf '{"version":2,"handle":"fixture-worker","host":"worker-node","cwd":"/work","where":"fixture"}\n'
+        printf '{"version":3,"handle":"fixture-worker","host":"worker-node","cwd":"/work","where":"fixture"}\n'
         ;;
     status)
         if [ -f "$FIXTURE/running" ]; then running=true; else running=false; fi
-        printf '{"version":2,"running":%s}\n' "$running"
+        printf '{"version":3,"running":%s}\n' "$running"
         ;;
     inspect)
-        printf '{"version":2,"launched":{"handle":"fixture-worker","host":"worker-node","cwd":"/work","where":"fixture"}}\n'
+        printf '{"version":3,"launched":{"handle":"fixture-worker","host":"worker-node","cwd":"/work","where":"fixture"}}\n'
         ;;
     stop)
         [ ! -f "$FIXTURE/stop-unavailable" ] || exit 9
         if [ -f "$FIXTURE/running" ]; then
-            rm "$FIXTURE/running"; printf '{"version":2,"state":"stopped"}\n'
+            rm "$FIXTURE/running"; printf '{"version":3,"state":"stopped"}\n'
         else
-            printf '{"version":2,"state":"gone"}\n'
+            printf '{"version":3,"state":"gone"}\n'
         fi
         ;;
     *) exit 7 ;;
@@ -100,12 +100,16 @@ esac
     let daemon = start_daemon().await;
     let base = format!("http://{hooks}");
     let request = StartLaunch {
+        intent: marshal_launch::LaunchIntent::Managed {
+            provider: marshal_launch::ManagedIntent::Pulse {
+                environment_id: "development".into(),
+                preset_id: "codex-account".into(),
+                workspace: marshal_launch::PulseWorkspace::Session,
+            },
+        },
         launch_id: marshal_launch::new_agent_id(),
         backend: "fixture".into(),
-        harness: "claude".into(),
-        cwd: "/work".into(),
         name: "worker".into(),
-        options: vec![],
         check: true,
         timeout_secs: 3,
         first_task: Some("handle this exactly once".into()),
@@ -117,6 +121,27 @@ esac
     assert_eq!(uncertain.process, ProcessState::Unknown);
     assert!(uncertain.error.is_some());
     assert!(root.path().join("running").exists());
+    let backend_request: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("request-launch.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        backend_request["intent"],
+        json!({
+            "kind": "managed", "provider": "pulse", "environment_id": "development",
+            "preset_id": "codex-account", "workspace": {"provider": "session"}
+        })
+    );
+    assert_eq!(
+        backend_request["context"]["daemon_address"],
+        "ws://marshal.example:6155"
+    );
+    for field in ["first_task", "harness", "argv", "cwd", "env", "options"] {
+        assert!(
+            backend_request.get(field).is_none(),
+            "backend received {field}"
+        );
+    }
+
     drop(daemon);
     let daemon = start_daemon().await;
     let observed: LaunchView = api::call(&base, GET_LAUNCH_PATH, &key).await.unwrap();

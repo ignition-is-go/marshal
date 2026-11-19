@@ -35,9 +35,14 @@ fn cli_submits_to_the_general_launch_api() {
         stream.read_exact(&mut body).unwrap();
         let request: StartLaunch = serde_json::from_slice(&body).unwrap();
         assert_eq!(request.backend, "ssh");
-        assert_eq!(request.harness, "claude");
-        assert_eq!(request.cwd, "/work/app");
-        assert_eq!(request.options, ["--host", "build-03"]);
+        assert_eq!(
+            request.intent,
+            marshal_launch::LaunchIntent::Process {
+                harness: "claude".into(),
+                cwd: "/work/app".into(),
+                options: vec!["--host".into(), "build-03".into()],
+            }
+        );
         assert_eq!(request.first_task.as_deref(), Some("say ready"));
         let body = json!({
             "launch_id": request.launch_id, "backend": "ssh", "name": request.name,
