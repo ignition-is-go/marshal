@@ -342,12 +342,24 @@ fn concurrent_launches_converge_and_foreign_owner_is_never_stopped() {
     assert_eq!(t.stop(handle).unwrap(), StopReceipt::Stopped);
 }
 
+fn fixture_program(directory: &std::path::Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = directory.join(name);
+    let mut body_path = executable.as_os_str().to_os_string();
+    body_path.push(".body");
+    std::fs::write(PathBuf::from(body_path), body).unwrap();
+    let driver = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/executable-driver");
+    let mut permissions = std::fs::metadata(&driver).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(&driver, permissions).unwrap();
+    std::os::unix::fs::symlink(driver, &executable).unwrap();
+    executable
+}
+
 #[test]
 fn backend_errors_redact_environment_and_worker_arguments() {
-    use std::os::unix::fs::PermissionsExt;
     for phase in ["refusal", "lookup-timeout", "create-timeout"] {
         let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("tmux-redaction");
         let secret = "sk-ant-oat01-synthetic-timeout-secret";
         let argument = "synthetic-private-worker-argument";
         let refusal = if phase == "create-timeout" {
@@ -360,10 +372,13 @@ fn backend_errors_redact_environment_and_worker_arguments() {
         } else {
             "exit 1"
         };
-        std::fs::write(&executable, format!(
-            "#!/bin/sh\nfor arg do\ncase \"$arg\" in\n-V) echo 'tmux 3.4'; exit 0;;\nlist-sessions) echo 'no server running on fixture' >&2; {lookup};;\nnew-session) echo '{secret} {argument}' >&2; {refusal};;\nesac\ndone\nexit 1\n"
-        )).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = fixture_program(
+            directory.path(),
+            "tmux-redaction",
+            &format!(
+                "for arg do\ncase \"$arg\" in\n-V) echo 'tmux 3.4'; exit 0;;\nlist-sessions) echo 'no server running on fixture' >&2; {lookup};;\nnew-session) echo '{secret} {argument}' >&2; {refusal};;\nesac\ndone\nexit 1\n"
+            ),
+        );
         let backend = Tmux::new(executable.display().to_string())
             .with_socket(directory.path().join("socket"));
         let request = LaunchRequest::from(marshal_launch::ProcessRequest {
@@ -407,14 +422,15 @@ fn backend_errors_redact_environment_and_worker_arguments() {
 
 #[test]
 fn worker_with_no_arguments_runs_as_one_literal_program() {
-    use std::os::unix::fs::PermissionsExt;
     let Some(server) = common::PrivateTmux::new("zero-args") else {
         return;
     };
     let work = tempfile::tempdir().unwrap();
-    let worker = work.path().join("worker with spaces;");
-    std::fs::write(&worker, "#!/bin/sh\nprintf '%s' \"$#\" > argc\nsleep 30\n").unwrap();
-    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let worker = fixture_program(
+        work.path(),
+        "worker with spaces;",
+        "printf '%s' \"$#\" > argc\nsleep 30\n",
+    );
     let backend = Tmux::new("tmux").with_socket(&server.socket);
     let request = LaunchRequest::from(marshal_launch::ProcessRequest {
         harness: "claude".into(),
