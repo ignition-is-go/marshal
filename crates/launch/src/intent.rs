@@ -13,17 +13,14 @@ pub struct LaunchContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaunchIntent {
     Process {
         harness: String,
         cwd: String,
         options: Vec<String>,
     },
-    Managed {
-        #[serde(flatten)]
-        provider: ManagedIntent,
-    },
+    Managed(ManagedIntent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,7 +66,7 @@ pub enum WorkspaceIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BackendIntent {
     Process {
         harness: String,
@@ -78,10 +75,7 @@ pub enum BackendIntent {
         env: BTreeMap<String, String>,
         options: Vec<String>,
     },
-    Managed {
-        #[serde(flatten)]
-        provider: ManagedIntent,
-    },
+    Managed(ManagedIntent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +240,61 @@ mod tests {
             "ws://marshal.mesh:6155"
         );
         assert!(!process.env.contains_key("MARSHAL_BASE_URL"));
+    }
+
+    #[test]
+    fn api_process_intent_rejects_execution_and_task_fields() {
+        let wire = json!({
+            "launch_id": "launch-0123456789abcdef0123456789abcdef", "backend": "tmux",
+            "name": "process", "check": true, "timeout_secs": 60,
+            "first_task": "Run the failing test",
+            "intent": {"kind": "process", "harness": "claude", "cwd": "/work", "options": []}
+        });
+        let request: crate::api::StartLaunch = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        for (field, value) in [
+            ("argv", json!(["sh", "-c", "unexpected"])),
+            ("env", json!({"TOKEN": "unexpected"})),
+            ("first_task", json!("unexpected")),
+            ("provider", json!("pulse")),
+            ("endpoint", json!("http://unexpected")),
+        ] {
+            let mut invalid = wire.clone();
+            invalid["intent"][field] = value;
+            assert!(
+                serde_json::from_value::<crate::api::StartLaunch>(invalid).is_err(),
+                "accepted process intent field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_process_intent_preserves_execution_fields_and_rejects_task_fields() {
+        let wire = json!({
+            "version": crate::PROTOCOL_VERSION, "name": "process",
+            "launch_id": "launch-0123456789abcdef0123456789abcdef",
+            "marshal_version": crate::MARSHAL_VERSION,
+            "context": {"daemon_address": "ws://marshal.mesh:6155", "hook_base": null},
+            "intent": {"kind": "process", "harness": "claude", "cwd": "/work", "options": [],
+                "argv": ["claude", "literal; $(touch forbidden)"], "env": {"FIXTURE_VALUE": "literal value"}}
+        });
+        let request: LaunchRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+        let process = request.process_request().unwrap();
+        assert_eq!(process.argv, ["claude", "literal; $(touch forbidden)"]);
+        assert_eq!(process.env["FIXTURE_VALUE"], "literal value");
+        for (field, value) in [
+            ("first_task", json!("unexpected")),
+            ("provider", json!("pulse")),
+            ("endpoint", json!("http://unexpected")),
+        ] {
+            let mut invalid = wire.clone();
+            invalid["intent"][field] = value;
+            assert!(
+                serde_json::from_value::<LaunchRequest>(invalid).is_err(),
+                "accepted backend process field {field}"
+            );
+        }
     }
 
     #[test]

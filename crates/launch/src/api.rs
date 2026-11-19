@@ -216,7 +216,7 @@ impl Service {
                         }
                         prepared
                     }
-                    LaunchIntent::Managed { provider } => {
+                    LaunchIntent::Managed(provider) => {
                         address::check_for_backend(backend.name(), &self.launch_address)?;
                         LaunchRequest {
                             version: crate::PROTOCOL_VERSION,
@@ -227,9 +227,7 @@ impl Service {
                                 daemon_address: self.launch_address.clone(),
                                 hook_base: self.hook_base.clone(),
                             },
-                            intent: BackendIntent::Managed {
-                                provider: provider.clone(),
-                            },
+                            intent: BackendIntent::Managed(provider.clone()),
                         }
                     }
                 };

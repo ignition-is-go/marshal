@@ -100,13 +100,11 @@ esac
     let daemon = start_daemon().await;
     let base = format!("http://{hooks}");
     let request = StartLaunch {
-        intent: marshal_launch::LaunchIntent::Managed {
-            provider: marshal_launch::ManagedIntent::Pulse {
-                environment_id: "development".into(),
-                preset_id: "codex-account".into(),
-                workspace: marshal_launch::PulseWorkspace::Session {},
-            },
-        },
+        intent: marshal_launch::LaunchIntent::Managed(marshal_launch::ManagedIntent::Pulse {
+            environment_id: "development".into(),
+            preset_id: "codex-account".into(),
+            workspace: marshal_launch::PulseWorkspace::Session {},
+        }),
         launch_id: marshal_launch::new_agent_id(),
         backend: "fixture".into(),
         name: "worker".into(),
@@ -181,13 +179,11 @@ esac
     let reconciled: LaunchView = api::call(&base, GET_LAUNCH_PATH, &key).await.unwrap();
     assert_eq!(reconciled.task, recovered.task);
     let different = StartLaunch {
-        intent: marshal_launch::LaunchIntent::Managed {
-            provider: marshal_launch::ManagedIntent::Pulse {
-                environment_id: "development".into(),
-                preset_id: "another-preset".into(),
-                workspace: marshal_launch::PulseWorkspace::Session {},
-            },
-        },
+        intent: marshal_launch::LaunchIntent::Managed(marshal_launch::ManagedIntent::Pulse {
+            environment_id: "development".into(),
+            preset_id: "another-preset".into(),
+            workspace: marshal_launch::PulseWorkspace::Session {},
+        }),
         ..request.clone()
     };
     let rejected = api::call::<_, LaunchView>(&base, LAUNCH_PATH, &different)
