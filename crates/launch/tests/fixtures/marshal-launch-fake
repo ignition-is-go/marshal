@@ -1,5 +1,4 @@
 #!/bin/sh
-# A fake marshal-launch adapter for the launcher's tests (contract v3).
 # It starts nothing. What it does is chosen by the request:
 #   check/launch: an option `--fail=<reason>` in the request's options;
 #   stop/status:  the handle (`fake-ok`, `fake-gone`, `fake-no-status`, or

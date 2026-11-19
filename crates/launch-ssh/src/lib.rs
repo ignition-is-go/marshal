@@ -6,7 +6,7 @@
 //! writes one on stdout. Anything on stderr is shown to the user.
 //!
 //! Preflight gathers target configuration facts through `bash -l -s`.
-//! Session operations send contract-v2 JSON to the matching installed
+//! Session operations send contract-v3 JSON to the matching installed
 //! `marshal-launch-ssh --target` helper, which uses Marshal's native libtmux
 //! adapter. A missing or incompatible helper is an error.
 //!
