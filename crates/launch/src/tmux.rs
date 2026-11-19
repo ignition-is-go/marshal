@@ -491,6 +491,7 @@ impl LaunchBackend for Tmux {
         )
     }
     fn recovery_handle(&self, req: &LaunchRequest) -> Result<String> {
+        req.process_request()?;
         session_key(&req.agent_id)
     }
     fn launch(&self, _: &LaunchRequest) -> Result<Launched> {

@@ -284,8 +284,8 @@ fn daemon_credentials_are_removed_before_ssh_and_from_target_json() {
     assert!(!wire.contains("synthetic-request-credential"));
     assert!(!wire.contains("synthetic-client-secret"));
     let wire: Value = serde_json::from_str(&wire).unwrap();
-    assert_eq!(wire["env"]["MARSHAL_AGENT_ID"], "launch-test-1");
-    assert_eq!(wire["argv"], req["intent"]["argv"]);
+    assert_eq!(wire["intent"]["env"]["MARSHAL_AGENT_ID"], "launch-test-1");
+    assert_eq!(wire["intent"]["argv"], req["intent"]["argv"]);
 }
 
 #[test]
@@ -585,7 +585,7 @@ fn codex_preflight_compares_hook_routes_without_exporting_config() {
         ("FAKE_SSH_TRANSCRIPT", transcript.to_str().unwrap()),
     ];
     let mut request = e.request(&["marshal-shim", "codex-run"]);
-    request["harness"] = json!("codex");
+    request["intent"]["harness"] = json!("codex");
     let config = |hook, end| {
         format!(
             r#"# >>> marshal (managed by marshal-shim codex-setup) >>>

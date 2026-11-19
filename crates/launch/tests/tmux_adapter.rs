@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use marshal_launch::tmux::{Tmux, this_host};
-use marshal_launch::{
-    LaunchBackend, LaunchRequest, MARSHAL_VERSION, PROTOCOL_VERSION, StopReceipt,
-};
+use marshal_launch::{LaunchBackend, LaunchRequest, MARSHAL_VERSION, StopReceipt};
 
 #[test]
 fn launch_status_and_stop_on_a_private_tmux_server() {

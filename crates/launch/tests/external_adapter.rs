@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use marshal_launch::{
-    ExternalBackend, LaunchBackend, LaunchRequest, PROTOCOL_VERSION, StopReceipt,
-};
+use marshal_launch::{ExternalBackend, LaunchBackend, LaunchRequest, StopReceipt};
 
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
