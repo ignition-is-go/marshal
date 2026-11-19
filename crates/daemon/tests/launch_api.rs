@@ -181,7 +181,13 @@ esac
     let reconciled: LaunchView = api::call(&base, GET_LAUNCH_PATH, &key).await.unwrap();
     assert_eq!(reconciled.task, recovered.task);
     let different = StartLaunch {
-        cwd: "/another-project".into(),
+        intent: marshal_launch::LaunchIntent::Managed {
+            provider: marshal_launch::ManagedIntent::Pulse {
+                environment_id: "development".into(),
+                preset_id: "another-preset".into(),
+                workspace: marshal_launch::PulseWorkspace::Session,
+            },
+        },
         ..request.clone()
     };
     let rejected = api::call::<_, LaunchView>(&base, LAUNCH_PATH, &different)

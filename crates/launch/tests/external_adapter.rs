@@ -167,7 +167,7 @@ fn launch_failures_say_how() {
         ("not-object", "answered [1,2], not a JSON object"),
         (
             "wrong-version",
-            "answered in contract version 99; this launcher speaks 2",
+            "answered in contract version 99; this launcher speaks 3",
         ),
         ("no-host", "answered without the contract's fields"),
     ] {
