@@ -141,7 +141,7 @@ the binaries from the same checkout with
 SSH and tmux use a launch-specific session name and an ownership
 marker. The display name does not select the process to stop.
 
-Both session backends use the published `agent-tmux` crate through Marshal's native adapter.
+Both session backends use the published `tmux-session` crate through Marshal's native adapter.
 SSH sends contract-v2 JSON to `marshal-launch-ssh --target`; it never falls
 back to shell commands that manage tmux. A missing or incompatible helper
 fails before launch. Set `MARSHAL_LAUNCH_SSH_HELPER` in the daemon service
