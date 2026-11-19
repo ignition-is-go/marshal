@@ -9,16 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agent-tmux"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63846027d28b2425269da9805cb9d1395eb6d08ec77a5e02a5c201bb01565aee"
-dependencies = [
- "libc",
- "tokio",
-]
-
-[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3331,7 +3321,6 @@ dependencies = [
 name = "marshal-launch"
 version = "0.60.5"
 dependencies = [
- "agent-tmux",
  "anyhow",
  "gethostname",
  "hyphae",
@@ -3342,6 +3331,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tmux-session",
  "tokio",
  "uuid",
 ]
@@ -6454,6 +6444,16 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tmux-session"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c111aaad77a6ca087768b9b14bfe9ed6ad03609a0b50f4f8d107b3347f74a1f"
+dependencies = [
+ "libc",
+ "tokio",
+]
 
 [[package]]
 name = "tokio"
