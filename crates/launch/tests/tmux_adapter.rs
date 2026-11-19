@@ -398,13 +398,13 @@ fn backend_errors_redact_environment_and_worker_arguments() {
             options: vec![],
         };
         let error = backend.launch(&request).unwrap_err();
-        let tmux_error = error.downcast_ref::<agent_tmux::Error>().unwrap();
+        let tmux_error = error.downcast_ref::<tmux_session::Error>().unwrap();
         assert_eq!(
             tmux_error.kind(),
             if phase == "refusal" {
-                agent_tmux::ErrorKind::CommandFailed
+                tmux_session::ErrorKind::CommandFailed
             } else {
-                agent_tmux::ErrorKind::Timeout
+                tmux_session::ErrorKind::Timeout
             }
         );
         if phase == "create-timeout" {
