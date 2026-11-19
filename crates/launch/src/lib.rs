@@ -1,10 +1,5 @@
 //! `marshal-launch`: start an agent somewhere and see it join the roster.
 //!
-//! Marshal owns launch identity, recovery records, roster correlation, and
-//! optional first-task delivery. A [`LaunchBackend`] executes process intent
-//! or delegates managed intent to the provider that owns its launch policy.
-//! Backends return the resolved worker location before Marshal waits for its row.
-//!
 //! The shared types come first, so the built-in tmux adapter and the external
 //! `marshal-launch-<name>` adapters agree on them.
 
