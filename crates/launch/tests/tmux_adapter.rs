@@ -157,3 +157,160 @@ fn workers_strip_daemon_credentials_from_new_and_running_tmux_servers() {
         t.stop(&launched.handle).unwrap();
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn sync_backend_preserves_literal_argv_inside_an_async_caller() {
+    let Some(server) = common::PrivateTmux::new("literal-argv") else {
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let t = Tmux::new("tmux").with_socket(&server.socket);
+    let literal = [
+        "space value",
+        "Unicode 雪",
+        "quote'\"",
+        "; touch injected",
+        "$(touch injected)",
+    ];
+    let mut argv = [
+        "sh",
+        "-c",
+        "printf '%s\\n' \"$@\" > literal-argv; sleep 30",
+        "sh",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    argv.extend(literal.map(str::to_owned));
+    let req = LaunchRequest {
+        version: PROTOCOL_VERSION,
+        harness: "claude".into(),
+        argv,
+        cwd: work.path().display().to_string(),
+        name: "literal".into(),
+        agent_id: "literal-argv".into(),
+        marshal_version: MARSHAL_VERSION.into(),
+        env: Default::default(),
+        options: vec![],
+    };
+    let launched = t.launch(&req).unwrap();
+    let output = work.path().join("literal-argv");
+    for _ in 0..50 {
+        if std::fs::read_to_string(&output).unwrap_or_default()
+            == format!("{}\n", literal.join("\n"))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(output).unwrap(),
+        format!("{}\n", literal.join("\n"))
+    );
+    assert!(!work.path().join("injected").exists());
+    assert_eq!(t.recover(&req).unwrap(), Some(launched.clone()));
+    assert_eq!(t.stop(&launched.handle).unwrap(), StopReceipt::Stopped);
+}
+
+#[test]
+fn unreachable_existing_endpoint_is_not_reported_as_a_stopped_agent() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("not-a-socket");
+    std::fs::write(&socket, b"occupied").unwrap();
+    let executable = directory.path().join("tmux-permission-denied");
+    std::fs::write(&executable, "#!/bin/sh\nfor arg do [ \"$arg\" != -V ] || { echo 'tmux 3.4'; exit 0; }; done\necho 'error connecting to fixture (Permission denied)' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let t = Tmux::new(executable.display().to_string()).with_socket(socket);
+    assert!(t.status("marshal-endpoint").is_err());
+    assert!(t.stop("marshal-endpoint").is_err());
+}
+
+#[test]
+fn concurrent_launches_converge_and_foreign_owner_is_never_stopped() {
+    let Some(server) = common::PrivateTmux::new("collision") else {
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let t = Tmux::new("tmux").with_socket(&server.socket);
+    let req = LaunchRequest {
+        version: PROTOCOL_VERSION,
+        harness: "claude".into(),
+        argv: ["sh", "-c", "printf 'started\\n' >> starts; sleep 30"]
+            .map(str::to_owned)
+            .to_vec(),
+        cwd: work.path().display().to_string(),
+        name: "collision".into(),
+        agent_id: "collision".into(),
+        marshal_version: MARSHAL_VERSION.into(),
+        env: Default::default(),
+        options: vec![],
+    };
+    let barrier = std::sync::Barrier::new(8);
+    let launches = std::thread::scope(|scope| {
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    t.launch(&req).unwrap()
+                })
+            })
+            .collect();
+        tasks
+            .into_iter()
+            .map(|task| task.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(launches.iter().all(|launch| launch == &launches[0]));
+    let starts = work.path().join("starts");
+    for _ in 0..50 {
+        if starts.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read_to_string(starts).unwrap(), "started\n");
+    let handle = &launches[0].handle;
+    assert!(
+        server
+            .tmux()
+            .args([
+                "set-environment",
+                "-t",
+                handle,
+                "MARSHAL_LAUNCH_KEY",
+                "foreign-owner"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        t.stop(handle)
+            .unwrap_err()
+            .to_string()
+            .contains("does not identify this launch")
+    );
+    assert!(
+        server
+            .tmux()
+            .args(["has-session", "-t", handle])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        server
+            .tmux()
+            .args([
+                "set-environment",
+                "-t",
+                handle,
+                "MARSHAL_LAUNCH_KEY",
+                handle
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(t.stop(handle).unwrap(), StopReceipt::Stopped);
+}

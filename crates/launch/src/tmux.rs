@@ -9,12 +9,16 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+#[cfg(unix)]
+use std::{process::Command, time::Duration};
 
-use anyhow::{Context, Result, bail, ensure};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{Result, bail, ensure};
 
-use crate::external::{DAEMON_CREDENTIAL_ENV, run_bounded};
+use crate::external::DAEMON_CREDENTIAL_ENV;
+#[cfg(unix)]
+use crate::external::run_bounded;
 use crate::{LaunchBackend, LaunchRequest, Launched, StopReceipt};
 
 /// The longest tmux session name the adapter makes.
@@ -68,18 +72,45 @@ impl Tmux {
         self
     }
 
-    fn tmux(&self) -> Command {
-        let mut c = Command::new(&self.program);
-        if let Some(s) = &self.socket {
-            c.arg("-S").arg(s);
-        }
-        c.envs(self.client_env.iter().map(|(k, v)| (k, v)));
-        for key in DAEMON_CREDENTIAL_ENV {
-            c.env_remove(key);
-        }
-        c
+    #[cfg(unix)]
+    fn with_server<T: Send>(
+        &self,
+        operation: impl FnOnce(&libtmux::Server, &libtmux::blocking::Runtime) -> Result<T> + Send,
+    ) -> Result<T> {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let runtime = libtmux::blocking::Runtime::new()?;
+                    let mut builder = libtmux::Server::builder()
+                        .tmux_executable(&self.program)
+                        .default_timeout(Duration::from_secs(5))
+                        .output_limits(
+                            libtmux::OutputLimits::default()
+                                .max_stdout_bytes(1024 * 1024)
+                                .max_stderr_bytes(1024 * 1024),
+                        );
+                    if let Some(socket) = &self.socket {
+                        builder = builder.socket_path(socket);
+                    }
+                    for (key, value) in &self.client_env {
+                        builder = builder.env(key, value);
+                    }
+                    for key in DAEMON_CREDENTIAL_ENV {
+                        builder = builder.env_remove(key);
+                    }
+                    let server = builder.env("LC_ALL", "C").build()?;
+                    let result = operation(&server, &runtime);
+                    let shutdown = runtime.run(server.shutdown());
+                    let value = result?;
+                    shutdown?;
+                    Ok(value)
+                })
+                .join()
+                .map_err(|_| anyhow::anyhow!("tmux operation thread panicked"))?
+        })
     }
 
+    #[cfg(unix)]
     fn observation(&self, req: &LaunchRequest, handle: String, cwd: String) -> Launched {
         let host = req
             .env
@@ -103,47 +134,52 @@ impl Tmux {
         }
     }
 
+    #[cfg(unix)]
     fn session_id(&self, handle: &str) -> Result<Option<String>> {
-        anyhow::ensure!(
-            handle.starts_with("marshal-") && valid_name(handle),
-            "invalid tmux recovery handle"
-        );
-        let mut tmux = self.tmux();
-        tmux.env("LC_ALL", "C")
-            .args(["list-sessions", "-F", "#{session_id} #{session_name}"]);
-        let out = run_bounded(tmux, Vec::new(), Duration::from_secs(5))?;
-        if !out.status.success() {
-            let error = String::from_utf8_lossy(&out.stderr);
-            if no_tmux_server(&error) {
-                return Ok(None);
-            }
-            bail!("could not inspect tmux: {}", error.trim());
-        }
-        let sessions = String::from_utf8(out.stdout).context("invalid tmux session list")?;
-        let Some(id) = sessions
-            .lines()
-            .filter_map(|line| line.split_once(' '))
-            .find_map(|(id, name)| (name == handle).then_some(id))
-        else {
-            return Ok(None);
-        };
-        let mut tmux = self.tmux();
-        tmux.args(["show-environment", "-t", id, "MARSHAL_LAUNCH_KEY"]);
-        let marker = run_bounded(tmux, Vec::new(), Duration::from_secs(5))?;
-        ensure!(
-            marker.status.success()
-                && String::from_utf8_lossy(&marker.stdout).trim()
-                    == format!("MARSHAL_LAUNCH_KEY={handle}"),
-            "tmux session {handle} does not identify this launch"
-        );
-        Ok(Some(id.to_owned()))
+        self.with_server(|server, runtime| {
+            Ok(runtime
+                .run(owned_session(server, handle))?
+                .map(|session| session.id().to_string()))
+        })
     }
 }
 
-fn no_tmux_server(error: &str) -> bool {
-    error.starts_with("no server running on ")
-        || (error.starts_with("error connecting to ")
-            && error.trim_end().ends_with("(No such file or directory)"))
+#[cfg(unix)]
+async fn owned_session(server: &libtmux::Server, handle: &str) -> Result<Option<libtmux::Session>> {
+    ensure!(
+        handle.starts_with("marshal-") && valid_name(handle),
+        "invalid tmux recovery handle"
+    );
+    let session = match server.session(handle).await {
+        Ok(session) => session,
+        Err(libtmux::Error::ServerGone {
+            kind: libtmux::ServerGoneKind::NotRunning,
+            ..
+        }) => return Ok(None),
+        Err(libtmux::Error::ServerGone {
+            kind: libtmux::ServerGoneKind::Unreachable,
+            ..
+        }) if !server.socket_path().try_exists()? => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let marker = session.environment("MARSHAL_LAUNCH_KEY").await?;
+    ensure!(
+        matches!(marker, Some(libtmux::EnvironmentEntry::Set(value)) if value.as_bytes() == handle.as_bytes()),
+        "tmux session {handle} does not identify this launch"
+    );
+    Ok(Some(session))
+}
+
+#[cfg(unix)]
+fn tmux_command(args: &[String]) -> libtmux::Command {
+    args[1..]
+        .iter()
+        .fold(libtmux::Command::new(&args[0]), |command, arg| {
+            command.arg(arg)
+        })
 }
 
 /// The process key is scoped to one launch. A display label is reusable.
@@ -203,6 +239,7 @@ pub fn expand_home(path: &str, home: Option<OsString>) -> PathBuf {
 }
 
 /// The folder the agent runs in, resolved as its roster row's `cwd` will show it.
+#[cfg(unix)]
 fn resolve_cwd(cwd: &str) -> Result<PathBuf> {
     let dir = expand_home(cwd, std::env::var_os("HOME"));
     let dir = std::fs::canonicalize(&dir)
@@ -259,6 +296,7 @@ pub fn on_path(program: &str, path: Option<OsString>) -> bool {
     path.is_some_and(|dirs| std::env::split_paths(&dirs).any(|d| d.join(program).is_file()))
 }
 
+#[cfg(unix)]
 impl LaunchBackend for Tmux {
     fn name(&self) -> &str {
         crate::address::LOCAL_BACKEND
@@ -337,50 +375,57 @@ impl LaunchBackend for Tmux {
         launch_env.insert("MARSHAL_LAUNCH_KEY".to_owned(), handle.clone());
         launch_env.insert("MARSHAL_LAUNCH_CWD".to_owned(), cwd.display().to_string());
         let env: Vec<_> = launch_env.into_iter().collect();
-        let mut tmux = self.tmux();
-        tmux.args(new_session_args(&handle, &cwd, &env, &req.argv));
-        let out = run_bounded(tmux, Vec::new(), Duration::from_secs(15))?;
-        if !out.status.success() {
-            if let Some(launched) = self.recover(req)? {
-                return Ok(launched);
+        let args = new_session_args(&handle, &cwd, &env, &req.argv);
+        let collision = self.with_server(|server, runtime| {
+            let out = runtime.run(server.cmd(tmux_command(&args)))?;
+            if out.success() {
+                return Ok(false);
+            }
+            if matches!(
+                out.refusal_for("new-session"),
+                Some(libtmux::Error::SessionExists { .. })
+            ) {
+                return Ok(true);
             }
             bail!(
-                "tmux couldn't start {}: {}",
-                req.argv.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
+                "tmux could not start the requested agent: {}",
+                out.stderr_lossy().trim()
             );
+        })?;
+        if collision {
+            return self
+                .recover(req)?
+                .context("tmux reported a duplicate launch but it could not be recovered");
         }
         Ok(self.observation(req, handle, cwd.display().to_string()))
     }
 
     fn recover(&self, req: &LaunchRequest) -> Result<Option<Launched>> {
         let handle = self.recovery_handle(req)?;
-        let Some(id) = self.session_id(&handle)? else {
-            return Ok(None);
-        };
-        let mut tmux = self.tmux();
-        tmux.args(["show-environment", "-t", &id, "MARSHAL_LAUNCH_CWD"]);
-        let out = run_bounded(tmux, Vec::new(), Duration::from_secs(5))?;
-        ensure!(
-            out.status.success(),
-            "could not recover tmux launch directory"
-        );
-        let output = String::from_utf8(out.stdout)?;
-        let cwd = output
-            .trim_end_matches('\n')
-            .strip_prefix("MARSHAL_LAUNCH_CWD=")
-            .context("tmux launch directory was not recorded")?;
-        Ok(Some(self.observation(req, handle, cwd.to_owned())))
+        self.with_server(|server, runtime| {
+            runtime.run(async {
+                let Some(session) = owned_session(server, &handle).await? else {
+                    return Ok(None);
+                };
+                let Some(libtmux::EnvironmentEntry::Set(cwd)) =
+                    session.environment("MARSHAL_LAUNCH_CWD").await?
+                else {
+                    bail!("tmux launch directory was not recorded");
+                };
+                let cwd =
+                    std::str::from_utf8(cwd.as_bytes()).context("invalid tmux launch directory")?;
+                Ok(Some(self.observation(req, handle, cwd.to_owned())))
+            })
+        })
     }
 
     fn stop(&self, handle: &str) -> Result<StopReceipt> {
         let Some(id) = self.session_id(handle)? else {
             return Ok(StopReceipt::Gone);
         };
-        let mut tmux = self.tmux();
         let owns_session = format!("#{{==:#{{MARSHAL_LAUNCH_KEY}},{handle}}}");
         let kill = format!(r#"kill-session -t "{id}" ; display-message -p marshal-stopped"#);
-        tmux.args([
+        let args = [
             "if-shell",
             "-F",
             "-t",
@@ -388,22 +433,52 @@ impl LaunchBackend for Tmux {
             &owns_session,
             &kill,
             "display-message -p marshal-mismatch",
-        ]);
-        let out = run_bounded(tmux, Vec::new(), Duration::from_secs(5))?;
-        let receipt = String::from_utf8_lossy(&out.stdout);
-        if out.status.success() && receipt.trim() == "marshal-stopped" {
+        ]
+        .map(str::to_owned);
+        let stopped = self.with_server(|server, runtime| {
+            let out = runtime.run(server.cmd(tmux_command(&args)))?;
+            Ok(out.success() && out.stdout() == b"marshal-stopped\n")
+        })?;
+        if stopped {
             return Ok(StopReceipt::Stopped);
         }
         ensure!(
             self.session_id(handle)?.is_none(),
-            "tmux did not confirm stopping {handle}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "tmux did not confirm stopping {handle}"
         );
         Ok(StopReceipt::Gone)
     }
 
     fn status(&self, handle: &str) -> Result<Option<bool>> {
         self.session_id(handle).map(|id| Some(id.is_some()))
+    }
+}
+
+#[cfg(not(unix))]
+impl LaunchBackend for Tmux {
+    fn name(&self) -> &str {
+        crate::address::LOCAL_BACKEND
+    }
+    fn check(&self, _: &LaunchRequest) -> Result<()> {
+        bail!(
+            "native tmux ({}) requires Unix; use the ssh backend for a Unix host",
+            self.program
+        )
+    }
+    fn recovery_handle(&self, req: &LaunchRequest) -> Result<String> {
+        session_key(&req.agent_id)
+    }
+    fn launch(&self, _: &LaunchRequest) -> Result<Launched> {
+        bail!("native tmux requires Unix")
+    }
+    fn recover(&self, _: &LaunchRequest) -> Result<Option<Launched>> {
+        bail!("native tmux requires Unix")
+    }
+    fn stop(&self, _: &str) -> Result<StopReceipt> {
+        bail!("native tmux requires Unix")
+    }
+    fn status(&self, _: &str) -> Result<Option<bool>> {
+        bail!("native tmux requires Unix")
     }
 }
 
@@ -486,6 +561,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_missing_folder_or_a_bad_name_starts_nothing() {
         let t = Tmux::new("/nonexistent/tmux");

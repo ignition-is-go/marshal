@@ -3160,6 +3160,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libtmux"
+version = "0.1.2"
+source = "git+https://github.com/lucid-max/libtmux-rs?rev=f7fb692798310aa5409497b8d603bfcd3ec141e0#f7fb692798310aa5409497b8d603bfcd3ec141e0"
+dependencies = [
+ "rustix",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "lightningcss"
 version = "1.0.0-alpha.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3324,6 +3334,7 @@ dependencies = [
  "anyhow",
  "gethostname",
  "hyphae",
+ "libtmux",
  "marshal-entities",
  "myko",
  "myko-server",
