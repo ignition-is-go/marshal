@@ -71,15 +71,15 @@ impl Tmux {
     #[cfg(unix)]
     fn with_server<T: Send>(
         &self,
-        operation: impl FnOnce(&agent_tmux::Tmux, &agent_tmux::Runtime) -> Result<T> + Send,
+        operation: impl FnOnce(&tmux_session::Tmux, &tmux_session::Runtime) -> Result<T> + Send,
     ) -> Result<T> {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    let runtime = agent_tmux::Runtime::new()?;
-                    let mut builder = agent_tmux::Tmux::builder()
+                    let runtime = tmux_session::Runtime::new()?;
+                    let mut builder = tmux_session::Tmux::builder()
                         .executable(OsString::from(&self.program))
-                        .limits(agent_tmux::Limits {
+                        .limits(tmux_session::Limits {
                             timeout: Duration::from_secs(5),
                             stdout_bytes: 1024 * 1024,
                             stderr_bytes: 1024 * 1024,
@@ -135,27 +135,27 @@ impl Tmux {
 
 #[cfg(unix)]
 async fn owned_session(
-    server: &agent_tmux::Tmux,
+    server: &tmux_session::Tmux,
     handle: &str,
-) -> Result<Option<agent_tmux::SessionSummary>> {
+) -> Result<Option<tmux_session::SessionSummary>> {
     match server.find_owned(&owned_target(handle)?).await? {
-        agent_tmux::OwnedLookup::Absent => Ok(None),
-        agent_tmux::OwnedLookup::Found(session) => Ok(Some(session)),
-        agent_tmux::OwnedLookup::Mismatch => {
+        tmux_session::OwnedLookup::Absent => Ok(None),
+        tmux_session::OwnedLookup::Found(session) => Ok(Some(session)),
+        tmux_session::OwnedLookup::Mismatch => {
             bail!("tmux session {handle} does not identify this launch")
         }
     }
 }
 
 #[cfg(unix)]
-fn owned_target(handle: &str) -> Result<agent_tmux::OwnedSession> {
+fn owned_target(handle: &str) -> Result<tmux_session::OwnedSession> {
     ensure!(
         handle.starts_with("marshal-") && valid_name(handle),
         "invalid tmux recovery handle"
     );
-    Ok(agent_tmux::OwnedSession::new(
-        agent_tmux::SessionName::new(handle)?,
-        agent_tmux::OwnershipMarker::new("MARSHAL_LAUNCH_KEY", handle)?,
+    Ok(tmux_session::OwnedSession::new(
+        tmux_session::SessionName::new(handle)?,
+        tmux_session::OwnershipMarker::new("MARSHAL_LAUNCH_KEY", handle)?,
     ))
 }
 
@@ -322,7 +322,7 @@ impl LaunchBackend for Tmux {
             launch_env.entry(identity.to_owned()).or_default();
         }
         launch_env.insert("MARSHAL_LAUNCH_CWD".to_owned(), cwd.display().to_string());
-        let mut pane_env = agent_tmux::PaneEnvironment::default();
+        let mut pane_env = tmux_session::PaneEnvironment::default();
         for (key, value) in launch_env {
             if !DAEMON_CREDENTIAL_ENV.contains(&key.as_str()) {
                 pane_env = pane_env.set(key, value);
@@ -331,16 +331,16 @@ impl LaunchBackend for Tmux {
         for key in DAEMON_CREDENTIAL_ENV {
             pane_env = pane_env.remove(key);
         }
-        let mut create = agent_tmux::CreateSession::new(
-            agent_tmux::SessionName::new(&handle)?,
-            agent_tmux::LiteralCommand::new(
+        let mut create = tmux_session::CreateSession::new(
+            tmux_session::SessionName::new(&handle)?,
+            tmux_session::LiteralCommand::new(
                 &req.argv[0],
                 req.argv[1..].iter().map(OsString::from),
                 cwd.clone(),
             )?,
         );
         create.pane_env = pane_env;
-        create.marker = Some(agent_tmux::OwnershipMarker::new(
+        create.marker = Some(tmux_session::OwnershipMarker::new(
             "MARSHAL_LAUNCH_KEY",
             &handle,
         )?);
@@ -352,7 +352,7 @@ impl LaunchBackend for Tmux {
                     cwd.display().to_string(),
                     server.attach_command(&session),
                 )),
-                Err(error) if error.kind() == agent_tmux::ErrorKind::DuplicateName => self
+                Err(error) if error.kind() == tmux_session::ErrorKind::DuplicateName => self
                     .recover(request)?
                     .context("tmux reported a duplicate launch but it could not be recovered"),
                 Err(error) => Err(error.into()),
@@ -368,7 +368,7 @@ impl LaunchBackend for Tmux {
                 let Some(session) = owned_session(server, &handle).await? else {
                     return Ok(None);
                 };
-                let agent_tmux::EnvEntry::Value(cwd) = server
+                let tmux_session::EnvEntry::Value(cwd) = server
                     .session_env(session.id, OsStr::new("MARSHAL_LAUNCH_CWD"))
                     .await?
                 else {
@@ -389,9 +389,9 @@ impl LaunchBackend for Tmux {
         let target = owned_target(handle)?;
         self.with_server(
             |server, runtime| match runtime.block_on(server.stop_owned(&target))? {
-                agent_tmux::StopOutcome::Stopped => Ok(StopReceipt::Stopped),
-                agent_tmux::StopOutcome::Gone => Ok(StopReceipt::Gone),
-                agent_tmux::StopOutcome::Mismatch => {
+                tmux_session::StopOutcome::Stopped => Ok(StopReceipt::Stopped),
+                tmux_session::StopOutcome::Gone => Ok(StopReceipt::Gone),
+                tmux_session::StopOutcome::Mismatch => {
                     bail!("tmux session {handle} does not identify this launch")
                 }
             },
