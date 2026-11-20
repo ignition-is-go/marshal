@@ -76,67 +76,119 @@ impl ManagedContext {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct OwnedGroup {
+#[derive(Clone, Debug)]
+pub(super) struct GroupIdentity {
     pid: u32,
     started: String,
 }
 
-impl OwnedGroup {
-    pub(super) fn capture(pid: u32) -> Result<Self> {
-        Ok(Self {
-            pid,
-            started: Self::start_time(pid)?,
-        })
+impl GroupIdentity {
+    fn stat(pid: u32) -> Result<Vec<String>> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+        Ok(stat
+            .rsplit_once(") ")
+            .context("invalid process stat")?
+            .1
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect())
     }
 
-    fn start_time(pid: u32) -> Result<String> {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-        let fields = stat.rsplit_once(") ").context("invalid process stat")?.1;
-        Ok(fields
-            .split_whitespace()
-            .nth(19)
-            .context("missing process start time")?
-            .to_owned())
+    fn capture(pid: u32) -> Result<Self> {
+        Ok(Self {
+            pid,
+            started: Self::stat(pid)?
+                .get(19)
+                .context("missing process start time")?
+                .clone(),
+        })
     }
 
     pub(super) fn argument(&self) -> String {
         format!("{}:{}", self.pid, self.started)
     }
 
-    pub(super) fn identity(pid: u32) -> Result<String> {
-        Ok(format!("{pid}:{}", Self::start_time(pid)?))
-    }
-
     pub(super) fn parse(value: &str) -> Result<Self> {
         let (pid, started) = value
             .split_once(':')
             .context("invalid owned server group")?;
-        let group = Self {
+        let identity = Self {
             pid: pid.parse()?,
             started: started.to_owned(),
         };
         anyhow::ensure!(
-            group.pid > 1
-                && Self::start_time(group.pid)? == group.started
-                && unsafe { libc::getpgid(group.pid as i32) } == group.pid as i32,
-            "owned server identity changed"
+            identity.pid > 1
+                && !identity.started.is_empty()
+                && identity.started.bytes().all(|b| b.is_ascii_digit()),
+            "invalid owned group identity"
         );
-        Ok(group)
+        Ok(identity)
     }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            Self::capture(self.pid)?.started == self.started
+                && unsafe { libc::getpgid(self.pid as i32) } == self.pid as i32,
+            "owned process group identity changed"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct OwnedGroup(GroupIdentity);
+
+impl OwnedGroup {
+    pub(super) fn capture(pid: u32) -> Result<Self> {
+        let identity = GroupIdentity::capture(pid)?;
+        identity.validate()?;
+        Ok(Self(identity))
+    }
+
+    pub(super) fn argument(&self) -> String {
+        self.0.argument()
+    }
+
+    pub(super) fn identity(pid: u32) -> Result<String> {
+        Ok(GroupIdentity::capture(pid)?.argument())
+    }
+}
+
+pub(super) fn guard_runtime(groups: &[GroupIdentity]) -> Result<Vec<OwnedGroup>> {
+    anyhow::ensure!(
+        groups.len() == 2,
+        "managed bridge requires server and owner groups"
+    );
+    let server = &groups[0];
+    let owner = &groups[1];
+    anyhow::ensure!(
+        owner.pid == unsafe { libc::getppid() } as u32 && server.pid != owner.pid,
+        "managed bridge owner is not its parent"
+    );
+    anyhow::ensure!(
+        GroupIdentity::stat(server.pid)?
+            .get(1)
+            .and_then(|pid| pid.parse::<u32>().ok())
+            == Some(owner.pid),
+        "managed server is not an owner child"
+    );
+    for identity in groups {
+        identity.validate()?;
+    }
+    Ok(groups.iter().cloned().map(OwnedGroup).collect())
 }
 
 impl Drop for OwnedGroup {
     fn drop(&mut self) {
-        let same_group = match Self::start_time(self.pid) {
-            Ok(value) => value == self.started,
+        let same_group = match GroupIdentity::capture(self.0.pid) {
+            Ok(identity) => identity.started == self.0.started,
             Err(error) => error
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound),
         };
         if same_group {
             unsafe {
-                libc::kill(-(self.pid as i32), libc::SIGKILL);
+                libc::kill(-(self.0.pid as i32), libc::SIGKILL);
             }
         }
     }
@@ -181,5 +233,80 @@ pub(super) fn wait_attachment(
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+
+    fn sleeping_group() -> Child {
+        Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    fn live(pid: u32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .is_some_and(|stat| !stat.rsplit_once(") ").unwrap().1.starts_with('Z'))
+    }
+
+    #[test]
+    fn guard_cleans_a_group_after_its_leader_dies_and_preserves_foreign_group() {
+        let mut foreign = sleeping_group();
+        let mut leader = Command::new("sh")
+            .args(["-c", "sleep 300 & printf '%s\\n' \"$!\"; wait"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let guard = OwnedGroup::capture(leader.id()).unwrap();
+        let mut child_pid = String::new();
+        BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut child_pid)
+            .unwrap();
+        let child_pid: u32 = child_pid.trim().parse().unwrap();
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        assert!(live(child_pid));
+        drop(guard);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while live(child_pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!live(child_pid));
+        assert!(foreign.try_wait().unwrap().is_none());
+        foreign.kill().unwrap();
+        foreign.wait().unwrap();
+    }
+
+    #[test]
+    fn guard_rejects_a_changed_process_identity() {
+        let mut child = sleeping_group();
+        let mut guard = OwnedGroup::capture(child.id()).unwrap();
+        guard.0.started.push('0');
+        drop(guard);
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn malformed_bridge_arguments_do_not_arm_group_cleanup() {
+        let mut child = sleeping_group();
+        let identity = GroupIdentity::capture(child.id()).unwrap().argument();
+        let result = super::super::parse_args(&[
+            "--owned-group".to_owned(),
+            identity,
+            "--unknown".to_owned(),
+        ]);
+        assert!(result.is_err());
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }

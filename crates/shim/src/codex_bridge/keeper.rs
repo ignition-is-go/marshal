@@ -42,7 +42,11 @@ impl ThreadKeepers {
             anyhow::ensure!(!task.is_finished(), "Codex keeper stopped for {thread_id}");
             return Ok(());
         }
-        match self.subscribe(thread_id).await {
+        let subscribed = tokio::time::timeout(RPC_TIMEOUT, self.subscribe(thread_id))
+            .await
+            .context("timed out acquiring Codex keeper")
+            .and_then(|result| result);
+        match subscribed {
             Ok(task) => {
                 threads.insert(thread_id.to_owned(), ThreadKeeper::Kept(task));
                 Ok(())
@@ -93,6 +97,7 @@ impl ThreadKeepers {
                 Err(error) => return Err(error).context("subscribing Codex keeper"),
             }
         }
+        let thread_id = thread_id.to_owned();
         let task = tokio::spawn(async move {
             while let Some(frame) = websocket.next().await {
                 match frame? {
@@ -100,6 +105,21 @@ impl ThreadKeepers {
                         websocket.send(WebSocketMessage::Pong(payload)).await?
                     }
                     WebSocketMessage::Close(_) => break,
+                    WebSocketMessage::Text(text) => {
+                        let message: Value = serde_json::from_str(text.as_ref())?;
+                        let method = message.get("method").and_then(Value::as_str);
+                        if message.pointer("/params/threadId").and_then(Value::as_str)
+                            == Some(thread_id.as_str())
+                            && (matches!(method, Some("thread/closed" | "thread/archived"))
+                                || method == Some("thread/status/changed")
+                                    && message
+                                        .pointer("/params/status/type")
+                                        .and_then(Value::as_str)
+                                        == Some("notLoaded"))
+                        {
+                            anyhow::bail!("kept Codex thread closed: {thread_id}");
+                        }
+                    }
                     _ => {}
                 }
             }

@@ -260,7 +260,7 @@ struct BridgeArgs {
     launcher_stdin: bool,
     keep_threads: bool,
     #[cfg(target_os = "linux")]
-    _owned_groups: Vec<managed::OwnedGroup>,
+    owned_groups: Vec<managed::GroupIdentity>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -443,7 +443,7 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     let managed: Option<()> = None;
     let mut app_server = match if managed.is_some() {
-        launch_isolated_app_server(codex)
+        launch_isolated_app_server(codex, true)
     } else {
         launch_app_server(codex)
     } {
@@ -1021,6 +1021,7 @@ where
                     && let Some(id) = value.get("id")
                 {
                     let method = value.get("method").and_then(Value::as_str);
+                    if method == Some("thread/resume") && let Some(keepers) = &keepers { keepers.check().await?; }
                     if method == Some("turn/start") && keepers.is_some()
                         && let Some(thread_id) = value.pointer("/params/threadId").and_then(Value::as_str)
                     {
@@ -1128,7 +1129,7 @@ fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
         eprintln!(
             "Codex app-server is behind the installed CLI; starting this session on an isolated current-generation app-server"
         );
-        return launch_isolated_app_server(codex);
+        return launch_isolated_app_server(codex, false);
     }
 
     let daemon_status = codex_child(codex)
@@ -1161,7 +1162,7 @@ fn launch_app_server(codex: &str) -> Result<LaunchedAppServer> {
     if let Some(connection) = shared_connection()? {
         return shared_app_server(&connection.endpoint);
     }
-    launch_isolated_app_server(codex)
+    launch_isolated_app_server(codex, false)
 }
 
 #[cfg(any(windows, test))]
@@ -1280,11 +1281,15 @@ fn managed_daemon_version_is_behind(encoded: &[u8]) -> bool {
     })
 }
 
-fn launch_isolated_app_server(codex: &str) -> Result<LaunchedAppServer> {
+fn launch_isolated_app_server(codex: &str, owned_group: bool) -> Result<LaunchedAppServer> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = owned_group;
     let endpoint = ephemeral_loopback_endpoint()?;
     let mut command = codex_child(codex);
     #[cfg(target_os = "linux")]
-    managed::process_group(&mut command);
+    if owned_group {
+        managed::process_group(&mut command);
+    }
     let mut child = command
         .args(["app-server", "--listen", &endpoint])
         .stdin(Stdio::null())
@@ -1347,6 +1352,23 @@ fn wait_for_app_server(child: &mut Child, endpoint: &str) -> Result<()> {
 pub async fn run(args: &[String]) -> Result<()> {
     let args = parse_args(args)?;
     crate::init_logging();
+    #[cfg(target_os = "linux")]
+    let _owned_groups = if args.keep_threads {
+        anyhow::ensure!(
+            args.launcher_stdin
+                && args.launcher_state_file.is_some()
+                && args.tui_proxy.is_some()
+                && args.wake_thread.is_none(),
+            "managed bridge requires launcher liveness, state and proxy"
+        );
+        managed::guard_runtime(&args.owned_groups)?
+    } else {
+        anyhow::ensure!(
+            args.owned_groups.is_empty(),
+            "owned process groups require managed keeper mode"
+        );
+        Vec::new()
+    };
     if let Some(session_id) = &args.wake_thread {
         let turn_id = start_thread(&args.app_server, session_id).await?;
         println!("{turn_id}");
@@ -1583,7 +1605,7 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
             }
             "--keep-threads" => keep_threads = true,
             #[cfg(target_os = "linux")]
-            "--owned-group" => owned_groups.push(managed::OwnedGroup::parse(&required_value(
+            "--owned-group" => owned_groups.push(managed::GroupIdentity::parse(&required_value(
                 &mut it,
                 "--owned-group",
             )?)?),
@@ -1658,7 +1680,7 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
         launcher_stdin,
         keep_threads,
         #[cfg(target_os = "linux")]
-        _owned_groups: owned_groups,
+        owned_groups,
     })
 }
 
