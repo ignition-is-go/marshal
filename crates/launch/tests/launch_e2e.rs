@@ -254,8 +254,15 @@ fn an_exposed_daemon_with_a_loopback_hook_port_is_named() {
     let cell = Cell::spawn_on("0.0.0.0");
     let port = cell.address.rsplit(':').next().unwrap().to_string();
     let exposed = format!("ws://{ip}:{port}");
+    let stubs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stub-harness");
+    let path = format!(
+        "{}:{}",
+        stubs.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let tmux = Tmux::new("tmux")
         .with_socket(&server.socket)
+        .with_client_env("PATH", path)
         .with_shim(common::shim_at(MARSHAL_VERSION));
     let plan = Plan {
         harness: "claude".into(),
