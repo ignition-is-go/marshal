@@ -162,7 +162,8 @@ lease can use `marshal task close <id> [commit]` to record completion.
 
 If the selected host is offline, an operator can cancel a pending reservation
 with `marshal task cancel-dispatch <id> <launch-id>`, using the launch ID
-returned by dispatch. Cancellation succeeds only while the reservation is
+returned by dispatch or shown by `marshal task dispatch-status <id>`.
+Cancellation succeeds only while the reservation is
 waiting to start.
 
 An authenticated operator can claim work for an existing session with

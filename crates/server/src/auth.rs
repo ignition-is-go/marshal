@@ -218,7 +218,7 @@ impl Authorizer for MarshalPolicy {
                 ),
                 OperationKind::Report => matches!(
                     operation,
-                    "WatchUsers" | "WatchPresenceRoom" | "GetTaskById"
+                    "WatchUsers" | "WatchPresenceRoom" | "GetTaskById" | "GetDispatchAttemptById"
                 ),
                 OperationKind::Command => matches!(
                     operation,

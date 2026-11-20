@@ -11,9 +11,10 @@ use marshal_client::{
     config::{ADDRESS_FILE, config_file_candidates, server_address},
 };
 use marshal_entities::{
-    AcceptTaskAssignment, AddTaskDependency, CancelTaskDispatch, ClaimTask, CompleteTaskAssignment, CoordinationMatches,
-    CreateTask, DispatchAttempt, DispatchHarness, FindCoordination, GetAllDispatchHosts,
-    GetAllSessions, GetAllTaskBlockers, GetAllTaskClaims, GetAllTasks, GetTaskById,
+    AcceptTaskAssignment, AddTaskDependency, CancelTaskDispatch, ClaimTask, CompleteTaskAssignment,
+    CoordinationMatches, CreateTask, DispatchAttempt, DispatchAttemptId, DispatchHarness,
+    FindCoordination, GetAllDispatchHosts, GetAllSessions, GetAllTaskBlockers, GetAllTaskClaims,
+    GetAllTasks, GetDispatchAttemptById, GetTaskById,
     ReleaseTaskClaim, RemoveTaskDependency, RenewTaskClaim, ReserveTaskDispatch, SendMessage,
     SendMessageResult, SessionId, SetTaskStatus, Task, TaskBlockerId, TaskClaim, TaskId,
     TaskPriority, TaskStatus,
@@ -45,6 +46,7 @@ const HELP: &str = "Usage: marshal <command>
   task release <id> <lease-id>       Release a task lease (operator)
   task dispatch <id> <host> <claude|codex> <workspace>
                                      Reserve an agent launch for a task
+  task dispatch-status <id>         Show the latest dispatch as JSON (operator)
   task cancel-dispatch <id> <launch-id>
                                      Cancel a reservation before launch
   send --as <session-id> <to>... -- <message>
@@ -150,6 +152,9 @@ async fn main() -> Result<()> {
         [command, action, id, lease] if command == "task" && action == "release" => {
             release_claim(id, lease).await?;
         }
+        [command, action, id] if command == "task" && action == "dispatch-status" => {
+            show_dispatch(id).await?;
+        }
         [command, action, id, launch] if command == "task" && action == "cancel-dispatch" => {
             let client = connect().await?;
             let response = client.send_command::<CancelTaskDispatch, ()>(&CancelTaskDispatch {
@@ -223,6 +228,21 @@ async fn show_task(id: &str) -> Result<()> {
         .map_err(anyhow::Error::msg)?
         .context("task not found")?;
     println!("{}", serde_json::to_string_pretty(&task)?);
+    Ok(())
+}
+
+async fn show_dispatch(id: &str) -> Result<()> {
+    let client = connect().await?;
+    let watch = client.watch_report_result::<GetDispatchAttemptById, Option<Arc<DispatchAttempt>>>(
+        GetDispatchAttemptById {
+            id: DispatchAttemptId(Arc::from(id)),
+        },
+    );
+    let attempt = await_value(|| watch.get())
+        .await?
+        .map_err(anyhow::Error::msg)?
+        .context("dispatch not found")?;
+    println!("{}", serde_json::to_string_pretty(&attempt)?);
     Ok(())
 }
 
