@@ -65,7 +65,7 @@ dependencies; crates.io packaging is unresolved and this PR is not a release.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo build -p marshal-daemon --example browser_fixture
+cargo build -p marshal-server --example browser_fixture
 (cd crates/ui && NO_COLOR=true trunk build)
 (cd scripts/browser && npm ci && npm run verify && MARSHAL_VERIFY_OAUTH=1 npm run verify)
 ```
@@ -87,7 +87,7 @@ Build the actual daemon and UI bundle, then point it at a dedicated local Postgr
 live Marshal database and other applications' development databases.
 
 ```sh
-cargo build --locked -p marshal-daemon --bin marshal-daemon
+cargo build --locked -p marshal-server --bin marshal-server
 (cd crates/ui && NO_COLOR=true trunk build)
 ```
 

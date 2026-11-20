@@ -88,11 +88,11 @@ jobs:
       - run: cargo flux run test
       - name: Test native embedding-agent registration and reconnect
         run: |
-          cargo build -p marshal-daemon -p marshal-shim --bins
+          cargo build -p marshal-server -p marshal-stdio --bins
           target_dir=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
-          test -x "$target_dir/debug/marshal-daemon"
-          test -x "$target_dir/debug/marshal-shim"
-          MARSHAL_DAEMON_BIN="$target_dir/debug/marshal-daemon" bun test \
+          test -x "$target_dir/debug/marshal-server"
+          test -x "$target_dir/debug/marshal-stdio"
+          MARSHAL_SERVER_BIN="$target_dir/debug/marshal-server" bun test \
             plugins/marshal-opencode/test/embedding-agent.test.ts \
             plugins/marshal-pi/test/embedding-agent.test.ts \
             plugins/marshal-prime-agent/test/embedding-agent.test.ts
@@ -169,7 +169,7 @@ jobs:
       - name: Install Chromium and its system dependencies
         working-directory: scripts/browser
         run: npx playwright install --with-deps chromium
-      - run: cargo build -p marshal-daemon --bin marshal-daemon --example browser_fixture --locked
+      - run: cargo build -p marshal-server --bin marshal-server --example browser_fixture --locked
       - name: Build the browser bundle
         working-directory: crates/ui
         run: trunk build
@@ -201,7 +201,7 @@ jobs:
         if: always() && env.MARSHAL_DEV_PG_DATA != ''
         run: '"$MARSHAL_DEV_PG_BIN/pg_ctl" -D "$MARSHAL_DEV_PG_DATA" -m fast -w stop'
 
-  # marshal-shim ships to Windows (ue_plugindev) as a cross-compiled
+  # marshal-stdio ships to Windows (ue_plugindev) as a cross-compiled
   # x86_64-pc-windows-gnu binary, but its Windows code is `#[cfg(windows)]`
   # and so is invisible to the Linux `check` job above. #19 silently
   # dropped the `windows-sys` dependency and broke the Windows build for
@@ -266,7 +266,7 @@ jobs:
             -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
           sudo apt-get install -y -o Acquire::Retries=3 build-essential pkg-config mingw-w64
       - name: Cross-compile the Windows shim
-        run: cargo check -p marshal-shim --target x86_64-pc-windows-gnu
+        run: cargo check -p marshal-stdio --target x86_64-pc-windows-gnu
 
       - name: Report runner resources
         if: always()
@@ -327,7 +327,7 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/test_windows_isolation.ps1
       - name: Run native Windows Codex wake canary
-        run: cargo test -p marshal-shim -- --nocapture
+        run: cargo test -p marshal-codex -p marshal-claude -p marshal-stdio -- --nocapture
 
       - name: Report runner resources
         if: always()

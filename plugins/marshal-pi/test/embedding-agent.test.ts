@@ -23,9 +23,9 @@ async function until(predicate: () => boolean | Promise<boolean>): Promise<void>
   }
 }
 
-test.skipIf(!process.env.MARSHAL_DAEMON_BIN)("embedding metadata survives native registration and daemon reconnect", async () => {
-  const binary = process.env.MARSHAL_DAEMON_BIN;
-  if (!binary) throw new Error("set MARSHAL_DAEMON_BIN to the built daemon");
+test.skipIf(!process.env.MARSHAL_SERVER_BIN)("embedding metadata survives native registration and daemon reconnect", async () => {
+  const binary = process.env.MARSHAL_SERVER_BIN;
+  if (!binary) throw new Error("set MARSHAL_SERVER_BIN to the built daemon");
   const before = process.env.MARSHAL_AGENT_ID;
   const ws = await freePort();
   const http = await freePort();

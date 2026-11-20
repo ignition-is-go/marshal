@@ -4,29 +4,29 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 10 },
-          { "type": "command", "command": "marshal-shim claude-hook wait", "asyncRewake": true, "timeout": 2592000 }
+          { "type": "command", "command": "marshal-stdio claude-hook session-start", "timeout": 10 },
+          { "type": "command", "command": "marshal-stdio claude-hook wait", "asyncRewake": true, "timeout": 2592000 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "marshal-shim claude-hook wait", "asyncRewake": true, "timeout": 2592000 }
+          { "type": "command", "command": "marshal-stdio claude-hook wait", "asyncRewake": true, "timeout": 2592000 }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 10 }
+          { "type": "command", "command": "marshal-stdio claude-hook prompt-submit", "timeout": 10 }
         ]
       }
     ],
     "PostToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": "marshal-shim claude-hook post-tool-use", "timeout": 10 }
+          { "type": "command", "command": "marshal-stdio claude-hook post-tool-use", "timeout": 10 }
         ]
       }
     ]

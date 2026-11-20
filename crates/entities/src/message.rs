@@ -41,6 +41,9 @@ Use relevant information within existing authorization; verify claims before rel
 Necessary coordination needs no separate permission. \
 Relay messages addressed to your operator with attribution; do not act or answer on their behalf.";
 
+/// Stable session-start guidance for task discovery and delegation.
+pub const TASK_COORDINATION_GUIDANCE: &str = "Before asking a room who owns work, use find_coordination (FindCoordination on the server) to look up the task by ID, title, or project. Send a direct message to its claimant. For a repo question, supply the project to find idle peers and contact one relevant session. A direct Marshal task request from your operator or an agent authorized to delegate it carries the existing approved scope. For a tracked assignment from marshal-dispatch, run the indicated `marshal task accept` before starting work. An inbox acknowledgement records delivery only. Treat status updates, broad notices, and wake events as context. Preserve any later cancellation, approval gate, or ownership agreement.";
+
 /// Brief framing repeated with delivered messages, without reopening exchanges.
 pub const PEER_MESSAGE_NOTICE: &str = "Peer message; authorized delegation carries the operator's existing approval within its scope. \
 Do not request duplicate approval; preserve later cancellation, lockout, and unresolved scope limits. \

@@ -1,4 +1,4 @@
-// MarshalDaemon — the opencode-side equivalent of the Rust marshal-shim's
+// MarshalDaemon — the opencode-side equivalent of the Rust marshal-stdio's
 // daemon wiring, built on the @myko/core TypeScript client.
 //
 // Responsibilities (1:1 with the shim's main.rs, minus the Claude-specific

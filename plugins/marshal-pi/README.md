@@ -24,8 +24,8 @@ is directly mentioned.
 Start a reachable Marshal daemon, then install the Pi package:
 
 ```bash
-cargo install marshal-daemon
-marshal-daemon &
+cargo install marshal-server
+marshal-server &
 pi install npm:@agent-marshal/marshal-pi
 ```
 

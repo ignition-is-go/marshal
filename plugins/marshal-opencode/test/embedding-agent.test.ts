@@ -26,9 +26,9 @@ async function until(predicate: () => boolean | Promise<boolean>): Promise<void>
   }
 }
 
-test.skipIf(!process.env.MARSHAL_DAEMON_BIN)("embedding metadata survives native registration and daemon reconnect", async () => {
-  const binary = process.env.MARSHAL_DAEMON_BIN;
-  if (!binary) throw new Error("set MARSHAL_DAEMON_BIN to the built daemon");
+test.skipIf(!process.env.MARSHAL_SERVER_BIN)("embedding metadata survives native registration and daemon reconnect", async () => {
+  const binary = process.env.MARSHAL_SERVER_BIN;
+  if (!binary) throw new Error("set MARSHAL_SERVER_BIN to the built daemon");
   const before = process.env.MARSHAL_AGENT_ID;
   const fixture = mkdtempSync(join(tmpdir(), "marshal-opencode-identity-"));
   const ws = await freePort();
@@ -64,7 +64,7 @@ test.skipIf(!process.env.MARSHAL_DAEMON_BIN)("embedding metadata survives native
     await until(() => daemon.isConnected());
     const correct = () => daemon.rosterSync().some((s) => s.id === "metadata-native" && s.agentId === agent);
     await until(correct);
-    const hook = Bun.spawn([join(dirname(binary), "marshal-shim"), "codex-hook", "session-start"], {
+    const hook = Bun.spawn([join(dirname(binary), "marshal-stdio"), "codex-hook", "session-start"], {
       env: { ...env, MARSHAL_BASE_URL: `http://127.0.0.1:${http}`, MARSHAL_AGENT_ID: ` ${agent} ` },
       stdin: "pipe", stdout: "pipe", stderr: "pipe",
     });

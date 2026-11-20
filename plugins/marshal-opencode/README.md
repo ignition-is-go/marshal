@@ -1,10 +1,10 @@
 # marshal-opencode
 
-The [opencode](https://opencode.ai) counterpart of the Claude Code `marshal-shim`. Connects an opencode session to the [marshal](../../README.md) coordination daemon so it shows up on the same roster as every other live agent session and can pass messages to them.
+The [opencode](https://opencode.ai) counterpart of the Claude Code `marshal-stdio`. Connects an opencode session to the [marshal](../../README.md) coordination daemon so it shows up on the same roster as every other live agent session and can pass messages to them.
 
 Where the Claude integration needs a shim **binary** (an MCP child process), a proprietary `notifications/claude/channel` push, curl **hooks**, and `~/.claude` session-id discovery, this is a single in-process opencode **plugin**. opencode's plugin hooks supply everything the shim had to bolt on for Claude:
 
-| Concern | Claude `marshal-shim` | this plugin |
+| Concern | Claude `marshal-stdio` | this plugin |
 |---|---|---|
 | Tools (send/broadcast/…) | stdio MCP server | native opencode tools (`marshal_*`), acting session auto-filled |
 | Roster registration | shim startup + `/hook/session-start` | `event` hook → `SET Session` over the myko client |
@@ -17,7 +17,7 @@ It talks to the daemon with [`@myko/core`](https://www.npmjs.com/package/@myko/c
 
 ## Requirements
 
-- A reachable `marshal-daemon` (see the [top-level README](../../README.md)). The plugin defaults to `ws://localhost:6155`.
+- A reachable `marshal-server` (see the [top-level README](../../README.md)). The plugin defaults to `ws://localhost:6155`.
 - opencode (the plugin runs under opencode's Bun runtime).
 
 ## Install
@@ -94,11 +94,11 @@ bun test test/entities.test.ts test/daemon.test.ts  # unit only
 ```
 
 - **Unit** (`test/entities.test.ts`, `test/daemon.test.ts`) pins the marshal wire shapes and proves a disconnected coordination daemon cannot block an OpenCode turn.
-- **Integration** (`test/integration.test.ts`) spins up a **real `marshal-daemon` binary** and round-trips the plugin's actual `MarshalDaemon` (the `@myko/core` client) against it over the real myko WS wire: roster registration + entity fields, send → inbox-pull + ack, the real-time `NotifyChannel` push, a live push through the plugin itself that must leave other unread messages for the next turn, `join_room` + `broadcast` delivery, and `set_status`. It does **not** fake the daemon or the wire — that round-trip is the thing under test, and it is also the **drift guard** for the wire shapes in `entities.ts`: rename a field in the Rust `marshal-entities` source and the round-trip fails. The suite skips (loudly) if no daemon binary is found; enable it with:
+- **Integration** (`test/integration.test.ts`) spins up a **real `marshal-server` binary** and round-trips the plugin's actual `MarshalDaemon` (the `@myko/core` client) against it over the real myko WS wire: roster registration + entity fields, send → inbox-pull + ack, the real-time `NotifyChannel` push, a live push through the plugin itself that must leave other unread messages for the next turn, `join_room` + `broadcast` delivery, and `set_status`. It does **not** fake the daemon or the wire — that round-trip is the thing under test, and it is also the **drift guard** for the wire shapes in `entities.ts`: rename a field in the Rust `marshal-entities` source and the round-trip fails. The suite skips (loudly) if no daemon binary is found; enable it with:
 
   ```bash
-  (cd ../.. && cargo build -p marshal-daemon)   # builds target/debug/marshal-daemon
-  bun test test/integration.test.ts             # or set MARSHAL_DAEMON_BIN=/path/to/marshal-daemon
+  (cd ../.. && cargo build -p marshal-server)   # builds target/debug/marshal-server
+  bun test test/integration.test.ts             # or set MARSHAL_SERVER_BIN=/path/to/marshal-server
   ```
 
 ## Status / follow-ups

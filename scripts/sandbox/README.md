@@ -25,7 +25,7 @@ into Zoo. Report what changed, what held, and what the run did not exercise.
 Build the version you want to evaluate:
 
 ```sh
-cargo build -p marshal-daemon -p marshal-shim
+cargo build -p marshal-server -p marshal-stdio
 ```
 
 Run from this directory or the repository root. Use the actual binary paths
@@ -35,8 +35,8 @@ printed by Cargo for your workspace:
 uv run scripts/sandbox/run.py \
   --label candidate \
   --model gpt-6.1-sol \
-  --shim /absolute/path/to/target/debug/marshal-shim \
-  --daemon /absolute/path/to/target/debug/marshal-daemon \
+  --shim /absolute/path/to/target/debug/marshal-stdio \
+  --daemon /absolute/path/to/target/debug/marshal-server \
   --output /tmp/marshal-candidate-01
 ```
 
@@ -139,7 +139,7 @@ link. A forced SIGKILL cannot run cleanup.
 ## Check the runner without model calls
 
 ```sh
-MARSHAL_TEST_SHIM=/absolute/path/to/target/debug/marshal-shim \
+MARSHAL_TEST_SHIM=/absolute/path/to/target/debug/marshal-stdio \
   python3 -m unittest discover -s scripts/sandbox -v
 ```
 
@@ -171,8 +171,8 @@ into the deployed dashboard.
 ```sh
 python3 scripts/sandbox/contention.py \
   --output /tmp/marshal-contention-01 --label 'Contention 01' \
-  --model gpt-6.1-sol --shim /absolute/path/to/marshal-shim \
-  --daemon /absolute/path/to/marshal-daemon \
+  --model gpt-6.1-sol --shim /absolute/path/to/marshal-stdio \
+  --daemon /absolute/path/to/marshal-server \
   --seconds 420 --max-turns 20 --max-messages 24 --max-tokens 1500000
 ```
 

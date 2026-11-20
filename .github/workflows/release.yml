@@ -125,11 +125,21 @@ jobs:
           COMPLETE=true
           for asset in \
             install-codex.sh \
+            marshal-server-x86_64-unknown-linux-gnu \
             marshal-daemon-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-unknown-linux-gnu \
+            marshal-x86_64-unknown-linux-gnu \
+            marshal-host-x86_64-unknown-linux-gnu \
+            marshal-stdio-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-pc-windows-gnu.exe \
+            marshal-x86_64-pc-windows-gnu.exe \
+            marshal-host-x86_64-pc-windows-gnu.exe \
+            marshal-stdio-x86_64-pc-windows-gnu.exe \
             marshal-ui-dist.tar.gz \
-            marshal-shim-aarch64-apple-darwin; do
+            marshal-shim-aarch64-apple-darwin \
+            marshal-aarch64-apple-darwin \
+            marshal-host-aarch64-apple-darwin \
+            marshal-stdio-aarch64-apple-darwin; do
             if ! grep -Fxq "$asset" <<<"$ASSETS"; then
               COMPLETE=false
               break
@@ -202,13 +212,22 @@ jobs:
           # which Acquire's stall timeouts never trip. A Windows/UI failure
           # below is therefore visible with fleet-deployable Linux assets
           # already present.
-          cargo build --release -p marshal-daemon
-          cargo build --release -p marshal-shim
-          cp target/release/marshal-daemon  marshal-daemon-x86_64-unknown-linux-gnu
-          cp target/release/marshal-shim    marshal-shim-x86_64-unknown-linux-gnu
+          cargo build --release -p marshal-server
+          cargo build --release -p marshal-stdio -p marshal-host
+          cp target/release/marshal marshal-x86_64-unknown-linux-gnu
+          cp target/release/marshal-host marshal-host-x86_64-unknown-linux-gnu
+          cp target/release/marshal-server  marshal-server-x86_64-unknown-linux-gnu
+          # Keep the old asset URL usable while deployments switch to the new name.
+          cp target/release/marshal-server  marshal-daemon-x86_64-unknown-linux-gnu
+          cp target/release/marshal-stdio    marshal-stdio-x86_64-unknown-linux-gnu
+          cp marshal-stdio-x86_64-unknown-linux-gnu marshal-shim-x86_64-unknown-linux-gnu
           gh release upload "v$VERSION" --clobber \
+            marshal-server-x86_64-unknown-linux-gnu \
             marshal-daemon-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-unknown-linux-gnu \
+            marshal-x86_64-unknown-linux-gnu \
+            marshal-host-x86_64-unknown-linux-gnu \
+            marshal-stdio-x86_64-unknown-linux-gnu \
             scripts/install-codex.sh
 
           rustup target add x86_64-pc-windows-gnu
@@ -216,8 +235,11 @@ jobs:
           # and the hard `timeout` bounds a mirror that keeps trickling bytes
           # (the 2026-08-19 failure mode — 33 min inside one apt install).
           sudo timeout 8m apt-get install -y -o Acquire::Retries=3 mingw-w64
-          cargo build --release -p marshal-shim --target x86_64-pc-windows-gnu
-          cp target/x86_64-pc-windows-gnu/release/marshal-shim.exe marshal-shim-x86_64-pc-windows-gnu.exe
+          cargo build --release -p marshal-stdio -p marshal-host --target x86_64-pc-windows-gnu
+          cp target/x86_64-pc-windows-gnu/release/marshal.exe marshal-x86_64-pc-windows-gnu.exe
+          cp target/x86_64-pc-windows-gnu/release/marshal-host.exe marshal-host-x86_64-pc-windows-gnu.exe
+          cp target/x86_64-pc-windows-gnu/release/marshal-stdio.exe marshal-stdio-x86_64-pc-windows-gnu.exe
+          cp marshal-stdio-x86_64-pc-windows-gnu.exe marshal-shim-x86_64-pc-windows-gnu.exe
 
           # marshal-ui: build the Leptos/WASM dashboard to a static bundle and
           # ship it as a release asset, so the pulse-deploy `marshal_ui` role
@@ -229,6 +251,9 @@ jobs:
 
           gh release upload "v$VERSION" --clobber \
             marshal-shim-x86_64-pc-windows-gnu.exe \
+            marshal-x86_64-pc-windows-gnu.exe \
+            marshal-host-x86_64-pc-windows-gnu.exe \
+            marshal-stdio-x86_64-pc-windows-gnu.exe \
             marshal-ui-dist.tar.gz
 
       - name: Report runner resources
@@ -316,7 +341,7 @@ jobs:
         timeout-minutes: 1
         run: python3 scripts/ci/report_resources.py
 
-  # marshal-shim for macOS — the ONLY marshal binary a Mac needs (the daemon +
+  # Client and host binaries for macOS (the server +
   # UI run on the Linux marshal LXC; a Mac is purely a Codex/Claude CLIENT).
   # Darwin can't be cross-built from the Ubuntu release job (no Apple SDK), so a
   # native macos runner builds Apple Silicon and uploads it to the SAME release.
@@ -350,16 +375,22 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: Build + upload macOS marshal-shim
+      - name: Build and upload macOS client and host
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ needs.release.outputs.version }}"
           rustup target add aarch64-apple-darwin
-          cargo build --release -p marshal-shim --target aarch64-apple-darwin
-          cp target/aarch64-apple-darwin/release/marshal-shim marshal-shim-aarch64-apple-darwin
+          cargo build --release -p marshal-stdio -p marshal-host --target aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/marshal marshal-aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/marshal-host marshal-host-aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/marshal-stdio marshal-stdio-aarch64-apple-darwin
+          cp marshal-stdio-aarch64-apple-darwin marshal-shim-aarch64-apple-darwin
           gh release upload "v$VERSION" --clobber \
-            marshal-shim-aarch64-apple-darwin
+            marshal-shim-aarch64-apple-darwin \
+            marshal-aarch64-apple-darwin \
+            marshal-host-aarch64-apple-darwin \
+            marshal-stdio-aarch64-apple-darwin
 
       - name: Report runner resources
         if: always()

@@ -9,7 +9,7 @@ keywords = ["marshal", "agent", "coordination", "myko"]
 categories = ["network-programming"]
 
 [package.metadata.flux]
-# Published as a transitive dep of marshal-daemon/shim/tui. Cargo
+# Published as a transitive dep of marshal-server/shim/tui. Cargo
 # requires path deps to also be published (with a matching version),
 # so this crate ships even though it isn't a user-facing artifact.
 tasks = ["check", "build", "test", "lint", "publish"]
@@ -43,3 +43,8 @@ log = { workspace = true }
 # Only linked under `ts-export` (the macros' `#[derive(ts_rs::TS)]`). Same 12.0.1
 # as myko so the derived `TS` impls match the trait myko's typegen consumes.
 ts-rs = { version = "12.0.1", features = ["serde-json-impl"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"

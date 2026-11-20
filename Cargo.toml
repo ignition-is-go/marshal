@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/entities", "crates/daemon", "crates/shim", "crates/tui", "crates/ui"]
+members = ["crates/client", "crates/codex", "crates/claude", "crates/entities", "crates/host", "crates/server", "crates/stdio", "crates/tui", "crates/ui"]
 
 [workspace.package]
 version = "0.49.5"

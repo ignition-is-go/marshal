@@ -1,4 +1,4 @@
-// MarshalDaemon — the pi-side equivalent of the Rust marshal-shim's daemon
+// MarshalDaemon — the pi-side equivalent of the Rust marshal-stdio's daemon
 // wiring, built on the @myko/core TypeScript client (official myko protocol).
 //
 // Responsibilities (1:1 with the shim's main.rs, minus the Claude-specific

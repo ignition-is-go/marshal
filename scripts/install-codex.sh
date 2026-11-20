@@ -4,7 +4,7 @@
 #   curl -fsSL https://github.com/ignition-is-go/marshal/releases/latest/download/install-codex.sh \
 #     | sh -s -- --daemon ws://<daemon-host>:6155
 #
-# Detects this machine's OS/arch, downloads the matching marshal-shim from the
+# Detects this machine's OS/arch, downloads the matching marshal-stdio from the
 # latest release, and runs `codex-setup` — which installs the shim to a stable
 # per-user path, wires ~/.codex (marshal MCP server + hooks), and pre-trusts the
 # hooks so they fire in the ChatGPT desktop app. Windows users run the .exe with
@@ -49,12 +49,12 @@ case "$os" in
         ;;
 esac
 
-url="$REPO/releases/latest/download/marshal-shim-$target"
+url="$REPO/releases/latest/download/marshal-stdio-$target"
 tmp=$(mktemp -d)
-bin="$tmp/marshal-shim"
+bin="$tmp/marshal-stdio"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-echo "Downloading marshal-shim ($target)..."
+echo "Downloading marshal-stdio ($target)..."
 curl -fSL --proto '=https' --tlsv1.2 -o "$bin" "$url"
 chmod +x "$bin"
 # Clear the Gatekeeper quarantine in case this binary was fetched via a browser

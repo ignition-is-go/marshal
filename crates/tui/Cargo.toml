@@ -24,6 +24,7 @@ chrono = { workspace = true }
 myko = { workspace = true }
 hyphae = { workspace = true }
 marshal-entities = { workspace = true }
+marshal-client = { path = "../client", version = "0.60.5" }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
 clap = { version = "4", features = ["derive"] }

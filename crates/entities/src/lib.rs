@@ -9,7 +9,7 @@
 //! - `MessageRead` — per-recipient read acknowledgment, replaces the
 //!   old single-bool `Message.read_at`.
 //!
-//! Persistence is configured at the daemon (see `daemon::persister`) so
+//! Persistence is configured at the daemon (see `marshal_server::persister`) so
 //! the roster survives restart.
 //!
 //! Each item lives in its own module because `#[myko_item]` re-imports
@@ -18,6 +18,9 @@
 
 mod ack_messages;
 mod broadcast_message;
+mod discovery;
+mod dispatch_attempt;
+mod dispatch_host;
 mod message;
 mod message_read;
 mod nickname;
@@ -30,10 +33,16 @@ mod sandbox;
 mod send_message;
 mod session;
 mod session_nickname;
+mod task;
+mod task_claim;
+mod task_dependency;
 mod wake_watcher;
 
 pub use ack_messages::*;
 pub use broadcast_message::*;
+pub use discovery::*;
+pub use dispatch_attempt::*;
+pub use dispatch_host::*;
 pub use message::*;
 pub use message_read::*;
 pub use nickname::*;
@@ -46,6 +55,9 @@ pub use sandbox::*;
 pub use send_message::*;
 pub use session::*;
 pub use session_nickname::*;
+pub use task::*;
+pub use task_claim::*;
+pub use task_dependency::*;
 pub use wake_watcher::*;
 
 /// Force-link this crate so the `inventory`-based item registration in the
@@ -62,6 +74,9 @@ pub fn link() {}
 // files. `register_typegen_type!` is a no-op unless `ts-export` is on, so this
 // costs nothing in normal builds.
 myko::register_typegen_type!(
+    CoordinationMatches,
+    TaskMatch,
+    IdleAgent,
     HostInfo,
     SandboxArtifact,
     SandboxStatus,

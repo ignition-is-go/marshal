@@ -3280,14 +3280,108 @@ dependencies = [
 ]
 
 [[package]]
-name = "marshal-daemon"
+name = "marshal-claude"
+version = "0.60.5"
+dependencies = [
+ "chrono",
+ "hyphae",
+ "libc",
+ "log",
+ "marshal-client",
+ "marshal-entities",
+ "myko",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "marshal-client"
+version = "0.60.5"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "gethostname",
+ "hyphae",
+ "log",
+ "marshal-entities",
+ "myko",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "marshal-codex"
+version = "0.60.5"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "gethostname",
+ "hyphae",
+ "libc",
+ "log",
+ "marshal-client",
+ "marshal-entities",
+ "myko",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "marshal-entities"
+version = "0.60.5"
+dependencies = [
+ "chrono",
+ "hmac 0.12.1",
+ "log",
+ "myko",
+ "myko-macros",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "marshal-host"
+version = "0.60.5"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "http",
+ "hyphae",
+ "log",
+ "marshal-client",
+ "marshal-entities",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "marshal-server"
 version = "0.60.5"
 dependencies = [
  "anyhow",
  "chrono",
  "env_logger",
+ "futures-util",
  "hyphae",
  "log",
+ "marshal-client",
  "marshal-entities",
  "myko",
  "myko-auth",
@@ -3297,27 +3391,15 @@ dependencies = [
  "pulse-multi-user",
  "reqwest 0.12.28",
  "serde_json",
+ "subtle",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "uuid",
 ]
 
 [[package]]
-name = "marshal-entities"
-version = "0.60.5"
-dependencies = [
- "chrono",
- "log",
- "myko",
- "myko-macros",
- "serde",
- "serde_json",
- "ts-rs",
- "uuid",
-]
-
-[[package]]
-name = "marshal-shim"
+name = "marshal-stdio"
 version = "0.60.5"
 dependencies = [
  "anyhow",
@@ -3328,19 +3410,20 @@ dependencies = [
  "hyphae",
  "libc",
  "log",
+ "marshal-claude",
+ "marshal-client",
+ "marshal-codex",
  "marshal-entities",
+ "marshal-server",
  "myko",
  "myko-server",
  "notify-debouncer-mini",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "socket2",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
  "uuid",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3354,6 +3437,7 @@ dependencies = [
  "env_logger",
  "hyphae",
  "log",
+ "marshal-client",
  "marshal-entities",
  "myko",
  "ratatui",

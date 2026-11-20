@@ -26,8 +26,8 @@ received while disconnected.
 Start a reachable daemon, then install the Prime Agent package:
 
 ```bash
-cargo install marshal-daemon
-marshal-daemon &
+cargo install marshal-server
+marshal-server &
 prime-agent package install npm:@agent-marshal/marshal-prime-agent
 ```
 

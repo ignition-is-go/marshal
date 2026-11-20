@@ -6,6 +6,7 @@
 //! renders the result with ratatui.
 
 mod self_update;
+mod tasks;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -42,19 +43,11 @@ use std::{
 const FRAME_POLL: Duration = Duration::from_millis(150);
 const RECENT_LIMIT: usize = 50;
 const ACTIVE_WINDOW_MS: i64 = 60_000;
-const DEFAULT_DAEMON_ADDRESS: &str = "ws://localhost:6155";
-/// Env var that overrides the daemon WebSocket URL. Same name the shim
-/// uses, so a single `export MARSHAL_DAEMON_ADDRESS=...` configures
-/// every marshal client. `MYKO_ADDRESS` is honored as a legacy fallback.
-const ADDRESS_ENV: &str = "MARSHAL_DAEMON_ADDRESS";
-const ADDRESS_ENV_LEGACY: &str = "MYKO_ADDRESS";
-
 #[derive(Parser, Debug)]
 #[command(name = "marshal-tui", version)]
 struct Args {
     /// Override the daemon WebSocket URL. Defaults to
-    /// MARSHAL_DAEMON_ADDRESS env var (then MYKO_ADDRESS for back-compat),
-    /// then ws://localhost:6155.
+    /// shared Marshal address configuration.
     #[arg(long)]
     address: Option<String>,
 
@@ -173,6 +166,19 @@ impl PaneScroll {
         self.offset = self.offset.min(max_offset);
     }
 
+    fn key(&mut self, key: KeyCode) {
+        self.offset = match key {
+            KeyCode::Up => self.offset.saturating_sub(1),
+            KeyCode::Down => self.offset.saturating_add(1),
+            KeyCode::PageUp => self.offset.saturating_sub(self.page_size),
+            KeyCode::PageDown => self.offset.saturating_add(self.page_size),
+            KeyCode::Home => 0,
+            KeyCode::End => self.max_offset,
+            _ => self.offset,
+        }
+        .min(self.max_offset);
+    }
+
     fn title(&self) -> String {
         if self.max_offset > 0 {
             format!(" [{} / {}] ", self.offset + 1, self.max_offset + 1)
@@ -211,19 +217,7 @@ impl ViewState {
                 self.live_only = !self.live_only;
                 self.panes[0].offset = 0;
             }
-            key => {
-                let pane = &mut self.panes[self.focus];
-                pane.offset = match key {
-                    KeyCode::Up => pane.offset.saturating_sub(1),
-                    KeyCode::Down => pane.offset.saturating_add(1),
-                    KeyCode::PageUp => pane.offset.saturating_sub(pane.page_size),
-                    KeyCode::PageDown => pane.offset.saturating_add(pane.page_size),
-                    KeyCode::Home => 0,
-                    KeyCode::End => pane.max_offset,
-                    _ => pane.offset,
-                }
-                .min(pane.max_offset);
-            }
+            key => self.panes[self.focus].key(key),
         }
     }
 }
@@ -239,14 +233,13 @@ async fn main() -> Result<()> {
 
     let address = args
         .address
-        .or_else(|| std::env::var(ADDRESS_ENV).ok())
-        .or_else(|| std::env::var(ADDRESS_ENV_LEGACY).ok())
-        .unwrap_or_else(|| DEFAULT_DAEMON_ADDRESS.to_string());
+        .unwrap_or_else(marshal_client::config::server_address);
 
     marshal_entities::link();
 
     let state = State::new();
     let client = Arc::new(MykoClient::new());
+    marshal_client::config::configure_operator_token(&client)?;
 
     // Self-update watcher: polls `current_exe()` mtime every 5s, runs
     // the smoke test, then re-execs into the new binary. Gated on
@@ -342,13 +335,14 @@ async fn main() -> Result<()> {
     members_cell.own(members_guard);
     Box::leak(Box::new(members_cell));
 
+    let task_board = tasks::TaskBoard::subscribe(&client);
     Box::leak(Box::new(client));
 
     let render_state = state.clone();
     let key_activity_for_render = Arc::clone(&key_activity);
     let handle = std::thread::Builder::new()
         .name("tui-render".into())
-        .spawn(move || render_loop(render_state, key_activity_for_render))
+        .spawn(move || render_loop(render_state, key_activity_for_render, task_board))
         .context("spawning render thread")?;
     handle
         .join()
@@ -373,7 +367,11 @@ fn time_str() -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Result<()> {
+fn render_loop(
+    state: State,
+    key_activity: Arc<self_update::KeyActivity>,
+    task_board: tasks::TaskBoard,
+) -> Result<()> {
     enable_raw_mode().context("enable_raw_mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("enter alt screen")?;
@@ -382,19 +380,32 @@ fn render_loop(state: State, key_activity: Arc<self_update::KeyActivity>) -> Res
 
     let result = (|| -> Result<()> {
         let mut view = ViewState::default();
+        let mut task_view = tasks::View::default();
+        let mut show_tasks = false;
         loop {
             let snap = state.snapshot();
-            terminal.draw(|frame| draw(&snap, &mut view, frame.area(), frame))?;
+            terminal.draw(|frame| {
+                if show_tasks {
+                    task_view.draw(&task_board, frame.area(), frame);
+                } else {
+                    draw(&snap, &mut view, frame.area(), frame);
+                }
+            })?;
             if event::poll(FRAME_POLL)?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
             {
                 key_activity.bump();
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
                     }
+                    _ if show_tasks && task_view.is_dispatching() => {
+                        task_view.key(&task_board, key.code)
+                    }
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('t') => show_tasks = !show_tasks,
+                    _ if show_tasks => task_view.key(&task_board, key.code),
                     _ => view.key(key.code),
                 }
             }
@@ -974,7 +985,7 @@ fn draw_status(
         ),
         Span::raw("  "),
         Span::styled(
-            "Tab pane  ↑↓/PgUp/PgDn scroll  Home/End  q quit",
+            "t tasks  Tab pane  ↑↓/PgUp/PgDn scroll  q quit",
             Style::default().fg(Color::DarkGray),
         ),
     ]));
@@ -1073,6 +1084,7 @@ mod tests {
                 operator: Some(format!("operator{i}")),
                 host: None,
                 project: Some(format!("project{i}")),
+                repository: None,
                 channels_enabled: None,
                 acks_pushes: None,
                 agent_id: None,

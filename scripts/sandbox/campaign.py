@@ -38,7 +38,7 @@ async def campaign(args):
         env = dict(os.environ, MARSHAL_EVAL_CONDITION=condition, MARSHAL_EVAL_SCENARIO=scenario,
                    MARSHAL_EVAL_REPRESENTATION=args.baseline_representation if condition == 'baseline' else args.candidate_representation)
         command = [sys.executable, str(runner / 'behavior.py'), '--output', str(output), '--label', name,
-                   '--model', args.model, '--shim', str(binaries / 'marshal-shim'), '--daemon', str(binaries / 'marshal-daemon'),
+                   '--model', args.model, '--shim', str(binaries / 'marshal-stdio'), '--daemon', str(binaries / 'marshal-server'),
                    '--seconds', '420', '--max-turns', '20', '--max-messages', '24', '--max-tokens', '900000' if scenario == 'three-way' else '650000']
         started = time.monotonic()
         with (args.output / f'{name}.log').open('wb') as log:

@@ -75,7 +75,7 @@ const number = value => value.toLocaleString('en-US');
     await page.getByRole('tab', { name: 'Context', exact: true }).press('Home');
     await page.getByLabel('Search timeline').waitFor();
 
-    await importFile(path.resolve(__dirname, '../../crates/daemon/tests/fixtures/sandbox-run.json'));
+    await importFile(path.resolve(__dirname, '../../crates/server/tests/fixtures/sandbox-run.json'));
     await chooseRun(page, artifact.run_id);
     await page.getByRole('tab', { name: 'Compare', exact: true }).click();
     if (await page.getByLabel('Zoo baseline').locator(`option[value="${artifact.run_id}"]`).count()) {

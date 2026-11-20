@@ -3,7 +3,7 @@
 // opencode sessions, Codex hooks, other pi sessions, the TUI) on the same
 // roster.
 //
-// This is the pi-native counterpart of the Claude Code `marshal-shim` and the
+// This is the pi-native counterpart of the Claude Code `marshal-stdio` and the
 // opencode `marshal-opencode` plugin. Where Claude needs a shim binary (MCP
 // child), a proprietary `notifications/claude/channel` push, and ~/.claude
 // session-id discovery, pi's extension API gives us all of it in-process:

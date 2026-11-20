@@ -18,7 +18,7 @@
 //
 // Drift-safety: these shapes are guarded by the real-daemon integration test
 // (test/integration.test.ts), which round-trips every command/query against a
-// live marshal-daemon — rename a field in the Rust `marshal-entities` source
+// live marshal-server — rename a field in the Rust `marshal-entities` source
 // and the wire round-trip fails. That end-to-end guard is why this stays a
 // small hand-mirror rather than generated code. (marshal-entities CAN emit
 // these as TS via `cargo run -p marshal-entities --features codegen --bin

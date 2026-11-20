@@ -14,11 +14,11 @@ if (!['127.0.0.1', 'localhost'].includes(database.hostname) || !database.pathnam
 }
 const fixture = process.argv.includes('--fixture');
 const target = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {cwd:resolve(import.meta.dirname,'../..'),encoding:'utf8'})).target_directory;
-const runtime = await startDevRuntime({fixture,binary:resolve(target,'debug/marshal-daemon'),port:Number(process.env.MARSHAL_DEV_PORT ?? 8878)});
+const runtime = await startDevRuntime({fixture,binary:resolve(target,'debug/marshal-server'),port:Number(process.env.MARSHAL_DEV_PORT ?? 8878)});
 const child = runtime.startDaemon();
 const artifacts = resolve(import.meta.dirname, 'artifacts/dev');
 await mkdir(artifacts, {recursive:true,mode:0o700});
-const identity = {origin:runtime.origin,mode:fixture ? 'signed test issuer' : 'configured OIDC',pid:child.pid,agentPort:runtime.agentPort,hookPort:runtime.hookPort,commit:execFileSync('git',['rev-parse','HEAD'],{cwd:resolve(import.meta.dirname,'../..'),encoding:'utf8'}).trim()};
+const identity = {origin:runtime.origin,mode:fixture ? 'signed test issuer' : 'configured OIDC',pid:child.pid,agentPort:runtime.agentPort,commit:execFileSync('git',['rev-parse','HEAD'],{cwd:resolve(import.meta.dirname,'../..'),encoding:'utf8'}).trim()};
 let stopping = false;
 async function stop() {
   if (stopping) return;

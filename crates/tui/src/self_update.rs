@@ -2,7 +2,7 @@
 //! version is installed (e.g. `cargo install --path crates/tui`
 //! overwrites `~/.cargo/bin/marshal-tui`).
 //!
-//! Mirrors `marshal-shim`'s `self_update.rs` — same poll-and-exec
+//! Mirrors `marshal-stdio`'s `self_update.rs` — same poll-and-exec
 //! mechanism, two TUI-specific differences:
 //!
 //! 1. **Idle gate.** The shim gates on MCP-server idleness (no in-flight

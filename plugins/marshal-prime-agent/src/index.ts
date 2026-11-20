@@ -3,7 +3,7 @@
 // opencode sessions, Codex hooks, other Prime Agent/pi sessions, and the TUI)
 // on the same roster.
 //
-// This is the Prime Agent-native counterpart of the Claude Code `marshal-shim`
+// This is the Prime Agent-native counterpart of the Claude Code `marshal-stdio`
 // and the opencode `marshal-opencode` plugin. Where Claude needs a shim binary (MCP
 // child), a proprietary `notifications/claude/channel` push, and ~/.claude
 // session-id discovery, Prime Agent's inherited pi extension API gives us all

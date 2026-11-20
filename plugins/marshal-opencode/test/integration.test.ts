@@ -1,6 +1,6 @@
 // Integration test: the plugin's real MarshalDaemon (the @myko/core MykoClient
 // path that the unit tests can't reach) round-tripping against a REAL
-// marshal-daemon binary over the real myko WS wire (CBOR), real command/query
+// marshal-server binary over the real myko WS wire (CBOR), real command/query
 // handlers, real NotifyChannel push.
 //
 // This deliberately does NOT fake the daemon or the wire — the only thing
@@ -8,10 +8,10 @@
 // "test the real spawn path, not a synthetic one" rule).
 //
 // The daemon binary is located in this order:
-//   1. $MARSHAL_DAEMON_BIN
-//   2. ../../target/{debug,release}/marshal-daemon (cargo build -p marshal-daemon)
+//   1. $MARSHAL_SERVER_BIN
+//   2. ../../target/{debug,release}/marshal-server (cargo build -p marshal-server)
 // If neither exists the whole suite SKIPS (loudly) so `bun test` stays green
-// on a box without the binary — run `cargo build -p marshal-daemon` first to
+// on a box without the binary — run `cargo build -p marshal-server` first to
 // enable it.
 //
 // Run: bun test test/integration.test.ts
@@ -28,10 +28,10 @@ import { MarshalPlugin } from "../src/index.js";
 import type { Identity } from "../src/identity.js";
 
 function resolveDaemonBin(): string | null {
-  const fromEnv = process.env.MARSHAL_DAEMON_BIN;
+  const fromEnv = process.env.MARSHAL_SERVER_BIN;
   if (fromEnv && existsSync(fromEnv)) return fromEnv;
   for (const profile of ["debug", "release"]) {
-    const p = join(import.meta.dir, "..", "..", "..", "target", profile, "marshal-daemon");
+    const p = join(import.meta.dir, "..", "..", "..", "target", profile, "marshal-server");
     if (existsSync(p)) return p;
   }
   return null;
@@ -84,15 +84,15 @@ function makeIdentity(operator: string): Identity {
 if (!DAEMON_BIN) {
   // eslint-disable-next-line no-console
   console.warn(
-    "[marshal-opencode integration] SKIPPED — no marshal-daemon binary found. " +
-      "Build it with `cargo build -p marshal-daemon` (from external/marshal) or set " +
-      "MARSHAL_DAEMON_BIN. Unit tests still cover the wire shapes.",
+    "[marshal-opencode integration] SKIPPED — no marshal-server binary found. " +
+      "Build it with `cargo build -p marshal-server` (from external/marshal) or set " +
+      "MARSHAL_SERVER_BIN. Unit tests still cover the wire shapes.",
   );
 }
 
 const suite = DAEMON_BIN ? describe : describe.skip;
 
-suite("marshal-opencode ↔ real marshal-daemon", () => {
+suite("marshal-opencode ↔ real marshal-server", () => {
   let proc: ReturnType<typeof Bun.spawn> | undefined;
   let stateDir = "";
   let address = "";
@@ -121,7 +121,7 @@ suite("marshal-opencode ↔ real marshal-daemon", () => {
     });
 
     const up = await waitFor(() => tcpOpen(wsPort).then(() => true), 15_000);
-    if (!up) throw new Error(`marshal-daemon did not accept connections on ${wsPort} within 15s`);
+    if (!up) throw new Error(`marshal-server did not accept connections on ${wsPort} within 15s`);
 
     daemonA = new MarshalDaemon({ address, cwd: "/tmp/itest-a", identity: makeIdentity("alice") });
     daemonB = new MarshalDaemon({ address, cwd: "/tmp/itest-b", identity: makeIdentity("bob") });

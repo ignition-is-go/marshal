@@ -71,6 +71,7 @@ impl Console {
                 arch: "wasm".to_string(),
             }),
             project: Some("marshal".to_string()),
+            repository: None,
             channels_enabled: Some(false),
             acks_pushes: None,
         }

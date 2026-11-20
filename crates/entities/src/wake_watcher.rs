@@ -21,6 +21,79 @@ pub struct WakeWatcher {
     pub until: i64,
 }
 
+/// Record whether a harness is listening for direct mail.
+#[myko::myko_command]
+#[myko_public]
+pub struct SetHarnessWake {
+    pub session_id: crate::SessionId,
+    pub waiting: bool,
+}
+
+impl myko::command::CommandHandler for SetHarnessWake {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(
+        self,
+        _ctx: myko::command::CommandContext,
+    ) -> Result<(), myko::command::CommandError> {
+        unreachable!("SetHarnessWake executes on the server");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(
+        self,
+        ctx: myko::command::CommandContext,
+    ) -> Result<(), myko::command::CommandError> {
+        crate::session::require_console_owner(&ctx, &self.session_id)?;
+        if !self.waiting {
+            return ctx.emit_del(&WakeWatcher {
+                id: WakeWatcherId(self.session_id.0),
+                until: 0,
+            });
+        }
+        let Some(_) = ctx.exec_report(crate::GetSessionById {
+            id: self.session_id.clone(),
+        })?
+        else {
+            return Err(crate::task_dependency::task_error(
+                &ctx,
+                "Harness session is not registered",
+            ));
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        refresh_wake_registration(&ctx, &self.session_id, now)
+    }
+}
+
+const WAKE_WATCHER_TTL_MS: i64 = 2 * 60 * 1000;
+const WAKE_WATCHER_REFRESH_MS: i64 = 60 * 1000;
+
+pub fn wake_watcher_due(until: Option<i64>, now: i64) -> bool {
+    until.is_none_or(|until| {
+        until <= now.saturating_add(WAKE_WATCHER_TTL_MS - WAKE_WATCHER_REFRESH_MS)
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn refresh_wake_registration(
+    ctx: &myko::command::CommandContext,
+    session_id: &crate::SessionId,
+    now: i64,
+) -> Result<(), myko::command::CommandError> {
+    let id = WakeWatcherId(session_id.0.clone());
+    let watchers = ctx.exec_query(GetAllWakeWatchers {})?;
+    let until = watchers
+        .iter()
+        .find(|watcher| watcher.id == id)
+        .map(|watcher| watcher.until);
+    if wake_watcher_due(until, now) {
+        ctx.emit_set(&WakeWatcher {
+            id,
+            until: now.saturating_add(WAKE_WATCHER_TTL_MS),
+        })?;
+    }
+    Ok(())
+}
+
 /// Whether a message would wake a session, as far as Marshal can tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WakeState {
@@ -88,6 +161,7 @@ mod tests {
             operator: None,
             host: None,
             project: None,
+            repository: None,
             channels_enabled: None,
             acks_pushes: None,
         }

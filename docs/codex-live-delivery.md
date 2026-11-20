@@ -24,7 +24,7 @@ codex-run ──wait for subscriber──> local Codex bridge
                                       │
                                shared app-server <── attached TUI
                                       │
-                                      └── /hook/session-register ──> roster
+                                      └── RegisterHarnessSession ──> roster
 
 sender ──send_message──> marshal daemon ──durable unread Message
                                       │
@@ -43,9 +43,9 @@ The Marshal session id supplied to hooks is the Codex app-server thread id.
 That lets the bridge target the thread without guessing from cwd, process age,
 or rollout files.
 
-Eager registration uses the dedicated `/hook/session-register` endpoint. It
-only creates or refreshes the roster row; it never surfaces or acknowledges
-inbox messages because there is no model turn available to receive them.
+Eager registration sends the Myko `RegisterHarnessSession` command to refresh
+the roster before the first turn. Inbox delivery and acknowledgement happen
+when the model can receive messages.
 `SessionStart` injects identity/context for ordinary launches. Prompt and tool
 boundary hooks also refresh `<marshal_session>` from the active thread ID. For
 spawned descendants, the shim reads `subagent.agent_id` from the hook payload.
@@ -198,20 +198,20 @@ compatibility, but describe only the synchronous live push.
 First install the normal Codex integration:
 
 ```sh
-marshal-shim codex-setup --daemon ws://marshal-host:6155
+marshal-stdio codex-setup --daemon ws://marshal-host:6155
 ```
 
 Then use the live launcher for an interactive session:
 
 ```sh
-marshal-shim codex-run
-marshal-shim codex-run resume --last
+marshal-stdio codex-run
+marshal-stdio codex-run resume --last
 ```
 
 On Linux and macOS, `codex-run` performs three actions:
 
 1. idempotently starts `codex app-server daemon`;
-2. starts `marshal-shim codex-bridge` and waits until its lifecycle
+2. starts `marshal-stdio codex-bridge` and waits until its lifecycle
    subscription is ready;
 3. runs `codex --remote unix:// ...`; the resulting `thread/started` event
    registers the session before any prompt is required.
@@ -283,12 +283,12 @@ launchers use separate ephemeral ports.
 For diagnostics or a supervisor-managed deployment, run the bridge directly:
 
 ```sh
-marshal-shim codex-bridge \
+marshal-stdio codex-bridge \
   --daemon ws://marshal-host:6155 \
   --socket "$CODEX_HOME/app-server-control/app-server-control.sock"
 
 # Native Windows or a manually supervised local app-server:
-marshal-shim codex-bridge \
+marshal-stdio codex-bridge \
   --daemon ws://marshal-host:6155 \
   --endpoint ws://127.0.0.1:4500
 ```
@@ -299,10 +299,10 @@ Codex currently exposes the shared endpoint as a CLI flag, not a
 `config.toml` setting. Make the behavior default at the agent-launcher layer:
 
 - interactive `codex` and `codex resume` jobs invoke
-  `marshal-shim codex-run ...`;
+  `marshal-stdio codex-run ...`;
 - non-interactive and administrative subcommands (`codex exec`, `codex mcp`,
   `codex update`, and similar) continue to invoke the real Codex executable;
-- the Ansible role runs `marshal-shim codex-setup` so SessionStart,
+- the Ansible role runs `marshal-stdio codex-setup` so SessionStart,
   SessionEnd, prompt, and tool hooks stay installed and trusted.
 
 Do not overwrite Codex's own managed executable or symlink. Its updater owns

@@ -72,6 +72,14 @@ pub struct ReadMessages {
     pub as_session: Option<SessionId>,
 }
 
+/// A leased inbox batch. A harness acknowledges the IDs after printing it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessInbox {
+    pub context: String,
+    pub message_ids: Vec<MessageId>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]

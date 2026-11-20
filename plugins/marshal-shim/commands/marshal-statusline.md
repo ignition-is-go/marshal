@@ -3,7 +3,7 @@ description: Configure Claude Code's statusLine to show this session's id, host,
 allowed-tools: Bash, Read, Edit, Write
 ---
 
-Wire up the user's Claude Code `statusLine` to invoke `marshal-shim statusline` so the session prefix `[user@host dir sid8]` appears in the footer. The renderer is a subcommand of the shim binary, so the same command string works on every platform — no path resolution, no platform branching.
+Wire up the user's Claude Code `statusLine` to invoke `marshal-stdio statusline` so the session prefix `[user@host dir sid8]` appears in the footer. The renderer is a subcommand of the shim binary, so the same command string works on every platform — no path resolution, no platform branching.
 
 Do this in order:
 
@@ -13,12 +13,12 @@ Do this in order:
    {
      "statusLine": {
        "type": "command",
-       "command": "marshal-shim statusline"
+       "command": "marshal-stdio statusline"
      }
    }
    ```
 
-   This assumes `marshal-shim` is on the user's `PATH` (which it must be already, since the plugin's MCP server entry invokes bare `marshal-shim`). If the user reports it isn't found at runtime, they should `cargo install marshal-shim` and restart Claude Code.
+   This assumes `marshal-stdio` is on the user's `PATH` (which it must be already, since the plugin's MCP server entry invokes bare `marshal-stdio`). If the user reports it isn't found at runtime, they should `cargo install marshal-stdio` and restart Claude Code.
 
 2. **Locate the settings file**:
    - Unix: `$HOME/.claude/settings.json`

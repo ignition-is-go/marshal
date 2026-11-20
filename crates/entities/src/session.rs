@@ -73,6 +73,7 @@ mod tests {
             operator: None,
             host: None,
             project: None,
+            repository: None,
             channels_enabled: None,
             acks_pushes: None,
         };
@@ -110,6 +111,7 @@ mod tests {
                 os: "linux".into(),
                 arch: "x86_64".into(),
             }),
+            repository: None,
             channels_enabled: None,
             acks_pushes: None,
         };
@@ -259,6 +261,10 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
 
+    /// Canonical Git remote key used for cross-host task discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+
     /// Whether this session can receive LIVE channel pushes — i.e. its
     /// claude was launched with `--dangerously-load-development-channels
     /// …marshal`. The shim resolves it from the parent process at startup;
@@ -378,12 +384,193 @@ impl myko::command::CommandHandler for RegisterSession {
     }
 }
 
+/// Register an app-server thread whose lifetime is independent of an MCP client.
+#[myko::myko_command(String)]
+#[myko_public]
+pub struct RegisterHarnessSession {
+    pub session_id: SessionId,
+    pub cwd: String,
+    pub repository: Option<String>,
+    pub agent_id: Option<String>,
+    pub operator: Option<String>,
+    pub host: Option<HostInfo>,
+    pub activity: Option<String>,
+    #[serde(default)]
+    pub waiting: bool,
+}
+
+impl myko::command::CommandHandler for RegisterHarnessSession {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _ctx: CommandContext) -> Result<String, CommandError> {
+        unreachable!("RegisterHarnessSession is server-only")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(self, ctx: CommandContext) -> Result<String, CommandError> {
+        let session_id = self.session_id.clone();
+        self.register(&ctx)?;
+        crate::nickname_for(&ctx, session_id.0.as_ref())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RegisterHarnessSession {
+    pub fn register(self, ctx: &CommandContext) -> Result<(), CommandError> {
+        let Self {
+            session_id: id,
+            cwd,
+            repository,
+            agent_id,
+            operator,
+            host,
+            activity,
+            waiting,
+        } = self;
+        if id.0.trim().is_empty()
+            || id.0.len() > 256
+            || cwd.len() > 4096
+            || activity
+                .as_deref()
+                .is_some_and(|value| !matches!(value, "idle" | "busy" | "unavailable"))
+        {
+            return Err(caller_err(ctx, "Invalid harness session registration"));
+        }
+        let dir = cwd
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|value| !value.is_empty());
+        let project = dir.filter(|value| *value != "session").map(str::to_owned);
+        let now = chrono::Utc::now().timestamp_millis();
+        let active_at = (!waiting).then_some(now);
+        let reported_activity = activity;
+        let agent_id = agent_id.filter(|value| !value.trim().is_empty());
+        update_registered_session(ctx, &id, |prior| match prior {
+            Some(p) => {
+                let mut updated = p.clone();
+                if repository.is_some() || updated.cwd != cwd {
+                    updated.repository = repository;
+                }
+                updated.cwd = cwd;
+                if agent_id.is_some() {
+                    updated.agent_id = agent_id;
+                }
+                if reported_activity.is_some() {
+                    updated.activity = reported_activity;
+                }
+                if active_at.is_some() {
+                    updated.last_activity_at = active_at;
+                }
+                if updated.operator.is_none() {
+                    updated.operator = operator;
+                }
+                if updated.host.is_none() {
+                    updated.host = host;
+                }
+                if updated.project.is_none() {
+                    updated.project = project;
+                }
+                updated
+            }
+            None => Session {
+                id: id.clone(),
+                client_id: None,
+                agent_id,
+                pid: 0,
+                cwd,
+                git_branch: None,
+                current_task: None,
+                // Codex has no per-PID name manifest; identity is hook-owned.
+                session_name: None,
+                activity: reported_activity,
+                kind: None,
+                connected_at: now,
+                last_activity_at: active_at,
+                last_tool: None,
+                last_tool_at: None,
+                operator,
+                host,
+                project,
+                repository,
+                channels_enabled: None,
+                acks_pushes: None,
+            },
+        })
+    }
+}
+
+/// End a harness session and remove its outstanding wake registration.
+#[myko::myko_command]
+#[myko_public]
+pub struct EndHarnessSession {
+    pub session_id: SessionId,
+}
+
+impl myko::command::CommandHandler for EndHarnessSession {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _ctx: CommandContext) -> Result<(), CommandError> {
+        unreachable!("EndHarnessSession is server-only")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(self, ctx: CommandContext) -> Result<(), CommandError> {
+        require_console_owner(&ctx, &self.session_id)?;
+        if let Some(session) = ctx.exec_report(GetSessionById {
+            id: self.session_id.clone(),
+        })? {
+            ctx.emit_del(session.as_ref())?;
+        }
+        ctx.emit_del(&crate::WakeWatcher {
+            id: crate::WakeWatcherId(self.session_id.0),
+            until: 0,
+        })
+    }
+}
+
+/// Report the current turn state of a registered harness session.
+#[myko::myko_command]
+#[myko_public]
+pub struct ReportSessionActivity {
+    pub session_id: SessionId,
+    pub activity: String,
+}
+
+impl myko::command::CommandHandler for ReportSessionActivity {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _ctx: CommandContext) -> Result<(), CommandError> {
+        unreachable!("ReportSessionActivity is server-only")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(self, ctx: CommandContext) -> Result<(), CommandError> {
+        if !matches!(self.activity.as_str(), "idle" | "busy" | "unavailable") {
+            return Err(caller_err(&ctx, "Invalid harness turn state"));
+        }
+        edit_registered_session(&ctx, &self.session_id, |prior| {
+            let mut session = prior?.clone();
+            if session.activity.as_deref() == Some(self.activity.as_str()) {
+                return None;
+            }
+            session.activity = Some(self.activity);
+            Some(session)
+        })
+    }
+}
+
 /// Serialize hook and shim registration because both replace the same Session row.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn update_registered_session(
     ctx: &CommandContext,
     id: &SessionId,
     update: impl FnOnce(Option<&Session>) -> Session,
+) -> Result<(), CommandError> {
+    edit_registered_session(ctx, id, |prior| Some(update(prior)))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn edit_registered_session(
+    ctx: &CommandContext,
+    id: &SessionId,
+    update: impl FnOnce(Option<&Session>) -> Option<Session>,
 ) -> Result<(), CommandError> {
     require_console_owner(ctx, id)?;
     static REGISTRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -392,7 +579,9 @@ pub fn update_registered_session(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
     let prior = sessions.iter().find(|s| &s.id == id).map(Arc::as_ref);
-    let mut session = update(prior);
+    let Some(mut session) = update(prior) else {
+        return Ok(());
+    };
     session.agent_id = session
         .agent_id
         .as_deref()
@@ -532,7 +721,13 @@ myko::submit! { myko::auth::public_access::PublicOperationRegistration {
     operation: "GetAllClients",
 } }
 
-fn require_console_owner(ctx: &CommandContext, id: &SessionId) -> Result<(), CommandError> {
+pub(crate) fn require_console_owner(
+    ctx: &CommandContext,
+    id: &SessionId,
+) -> Result<(), CommandError> {
+    if id.0.as_ref() == crate::DISPATCH_SENDER {
+        return Err(caller_err(ctx, "The dispatch sender is server-owned"));
+    }
     if !is_operator_console(id.0.as_ref()) {
         return Ok(());
     }

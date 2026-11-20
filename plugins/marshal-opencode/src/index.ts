@@ -2,7 +2,7 @@
 // daemon so it can see and message sibling agent sessions (Claude Code shims,
 // other opencode sessions, the TUI) on the same roster.
 //
-// This is the opencode-native counterpart of the Claude Code `marshal-shim`.
+// This is the opencode-native counterpart of the Claude Code `marshal-stdio`.
 // Where Claude needs a shim binary (MCP child), a proprietary
 // `notifications/claude/channel` push, curl hooks, and ~/.claude session-id
 // discovery, opencode's plugin system gives us all of it in-process:

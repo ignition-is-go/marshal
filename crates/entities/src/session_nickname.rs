@@ -35,6 +35,9 @@ pub fn nickname_for(
     ctx: &myko::command::CommandContext,
     session_id: &str,
 ) -> Result<String, myko::command::CommandError> {
+    if session_id == crate::DISPATCH_SENDER {
+        return Ok("marshal-dispatch".into());
+    }
     let assigned: Vec<std::sync::Arc<SessionNickname>> =
         ctx.exec_query(GetAllSessionNicknames {})?;
     Ok(assigned

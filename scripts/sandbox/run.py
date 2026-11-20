@@ -253,15 +253,15 @@ class Run:
         for key in list(env):
             if key.startswith(('MARSHAL_', 'MYKO_')) or key == 'CODEX_THREAD_ID':
                 del env[key]
-        daemon_port, hook_port, app_port = free_port(), free_port(), free_port()
+        daemon_port, app_port = free_port(), free_port()
         daemon = f'ws://127.0.0.1:{daemon_port}'
         private_config = self.output / 'config'
         (private_config / 'marshal').mkdir(parents=True)
         (private_config / 'marshal' / 'daemon-address').write_text(daemon + '\n')
         endpoint = f'ws://127.0.0.1:{app_port}'
         env.update(CODEX_HOME=str(home), XDG_CONFIG_HOME=str(private_config), MARSHAL_BIND=f'127.0.0.1:{daemon_port}',
-                   MARSHAL_HOOK_BIND=f'127.0.0.1:{hook_port}', MARSHAL_DAEMON_ADDRESS=daemon,
-                   MARSHAL_BASE_URL=f'http://127.0.0.1:{hook_port}', MARSHAL_HARNESS='codex',
+                   MARSHAL_DAEMON_ADDRESS=daemon,
+                   MARSHAL_BASE_URL=daemon, MARSHAL_HARNESS='codex',
                    MARSHAL_OPERATOR='sandbox@localhost')
         setup = await asyncio.create_subprocess_exec(str(self.args.shim), 'codex-setup', '--no-install',
                     '--codex-home', str(home), '--daemon', daemon, env=env,
@@ -281,7 +281,6 @@ class Run:
         }
         (self.output / 'manifest.json').write_text(json.dumps(metadata, indent=2))
         await self.spawn('daemon', [self.args.daemon], env, self.output)
-        await wait_port(hook_port)
         await self.spawn('app-server', [self.args.codex, 'app-server', '--listen', endpoint], env, self.output)
         await wait_port(app_port)
         websocket = await websockets.connect(endpoint, max_size=128 * 1024 * 1024)

@@ -21,7 +21,6 @@ export async function startDevRuntime({ fixture = true, binary: configuredBinary
     return port;
   };
   const agentPort = await freePort();
-  const hookPort = await freePort();
   let issuer;
   const proxy = createServer((incoming, outgoing) => {
     if (incoming.url.startsWith('/auth/user')) { outgoing.writeHead(404); outgoing.end(); return; }
@@ -57,13 +56,13 @@ export async function startDevRuntime({ fixture = true, binary: configuredBinary
   const origin = process.env.MARSHAL_DEV_ORIGIN ?? (!fixture && process.env.MARSHAL_AUTH_ORIGIN ? process.env.MARSHAL_AUTH_ORIGIN : `http://127.0.0.1:${proxy.address().port}`);
   if (fixture) issuer = await startOidcFixture({ appOrigin: origin, internalIssuer: !process.env.MARSHAL_DEV_ORIGIN });
   const target = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {cwd: resolve(import.meta.dirname, '../..'), encoding: 'utf8'})).target_directory;
-  const binary = configuredBinary ?? process.env.MARSHAL_BROWSER_FIXTURE ?? resolve(target, process.env.MARSHAL_VERIFY_RESTART ? 'debug/marshal-daemon' : 'debug/examples/browser_fixture');
+  const binary = configuredBinary ?? process.env.MARSHAL_BROWSER_FIXTURE ?? resolve(target, process.env.MARSHAL_VERIFY_RESTART ? 'debug/marshal-server' : 'debug/examples/browser_fixture');
   const dist = resolve(import.meta.dirname, process.env.MARSHAL_FRONTEND_DIST ?? '../../crates/ui/dist');
   let serverLog = '';
   const startDaemon = () => {
     const daemon = spawn(binary, [], { env: {
       ...process.env, ...(process.env.MARSHAL_VERIFY_OAUTH ? {MARSHAL_AUTH_OAUTH_ISSUER: origin + '/myko/oauth', MARSHAL_AUTH_OAUTH_RESOURCE: origin + '/myko/mcp'} : {}), MARSHAL_BIND: `127.0.0.1:${agentPort}`,
-      MARSHAL_HOOK_BIND: `127.0.0.1:${hookPort}`, MARSHAL_AUTH_ORIGIN: origin,
+      MARSHAL_AUTH_ORIGIN: origin,
       ...(fixture ? {MARSHAL_AUTH_ISSUER: issuer.issuer, MARSHAL_AUTH_CLIENT_ID: issuer.clientId, MARSHAL_AUTH_CLIENT_SECRET: issuer.clientSecret, MARSHAL_AUTH_EMAIL_DOMAINS:'fixture.test'} : {}),
     }, stdio: ['ignore', 'pipe', 'pipe'] });
     daemon.stdout.on('data', (data) => { serverLog += data; });
@@ -72,5 +71,5 @@ export async function startDevRuntime({ fixture = true, binary: configuredBinary
     return daemon;
   };
 
-  return { origin, proxy, issuer, binary, agentPort, hookPort, startDaemon, get serverLog() { return serverLog; } };
+  return { origin, proxy, issuer, binary, agentPort, startDaemon, get serverLog() { return serverLog; } };
 }

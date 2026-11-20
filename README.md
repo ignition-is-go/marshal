@@ -13,14 +13,14 @@ Install the binaries, run the daemon, then wire the harnesses you use.
 ### 1. Install the binaries
 
 ```bash
-cargo install marshal-shim
+cargo install marshal-stdio
 # optional but recommended for visibility into the live roster
 cargo install marshal-tui
 ```
 
-This puts `marshal-shim` on your `PATH`, typically `~/.cargo/bin`. Download
-`marshal-daemon-x86_64-unknown-linux-gnu` from the [same release](https://github.com/ignition-is-go/marshal/releases/latest),
-make it executable, and install it as `marshal-daemon` on the server. The daemon
+This puts `marshal-stdio` on your `PATH`, typically `~/.cargo/bin`. Download
+`marshal-server-x86_64-unknown-linux-gnu` from the [same release](https://github.com/ignition-is-go/marshal/releases/latest),
+make it executable, and install it as `marshal-server` on the server. The daemon
 is distributed as a release binary because its shared Pulse auth dependencies
 are private Git packages. Building it from source requires repository access.
 
@@ -30,10 +30,10 @@ The daemon runs out-of-band — one daemon that every session's shim connects to
 
 ```bash
 # foreground in its own terminal
-marshal-daemon
+marshal-server
 
 # or backgrounded under your shell job control
-marshal-daemon &
+marshal-server &
 
 # or under your favorite supervisor (systemd user unit, launchd, tmux pane, ...)
 ```
@@ -56,7 +56,7 @@ If you'd rather wire MCP up by hand, the plugin is just shorthand for adding an 
 ```json
 {
   "mcpServers": {
-    "marshal": { "command": "marshal-shim" }
+    "marshal": { "command": "marshal-stdio" }
   }
 }
 ```
@@ -66,7 +66,7 @@ If you'd rather wire MCP up by hand, the plugin is just shorthand for adding an 
 ```json
 {
   "mcpServers": {
-    "marshal": { "command": "marshal-shim" }
+    "marshal": { "command": "marshal-stdio" }
   }
 }
 ```
@@ -74,7 +74,7 @@ If you'd rather wire MCP up by hand, the plugin is just shorthand for adding an 
 Or let the CLI do it for you:
 
 ```bash
-claude mcp add -s user marshal marshal-shim
+claude mcp add -s user marshal marshal-stdio
 ```
 
 > Note: `mcpServers` is **not** a supported key in `~/.claude/settings.json` — adding it there silently does nothing. It must live in `.mcp.json` (project) or `~/.claude.json` (user).
@@ -95,16 +95,16 @@ Both forms key on the same name you set: `plugin:<plugin>@<marketplace>` for plu
 
 Without the flag, `roster` and `send_message` still work — peer messages just don't surface as live `<channel>` blocks in your transcript; the plugin's hooks add them to your next prompt instead (see below). With the flag, every peer's `send_message` arrives as an inline notification while you're working.
 
-The plugin also ships `SessionStart` and `UserPromptSubmit` hooks that run `marshal-shim claude-hook`: before each prompt they add any direct message still unread as a `<marshal_inbox>` block and mark it read. If you wired the MCP server by hand, add the same hooks to a `settings.json`:
+The plugin also ships `SessionStart` and `UserPromptSubmit` hooks that run `marshal-stdio claude-hook`: before each prompt they add any direct message still unread as a `<marshal_inbox>` block and mark it read. If you wired the MCP server by hand, add the same hooks to a `settings.json`:
 
 ```json
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook session-start", "timeout": 15 }] }
+      { "hooks": [{ "type": "command", "command": "marshal-stdio claude-hook session-start", "timeout": 15 }] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "marshal-shim claude-hook prompt-submit", "timeout": 15 }] }
+      { "hooks": [{ "type": "command", "command": "marshal-stdio claude-hook prompt-submit", "timeout": 15 }] }
     ]
   }
 }
@@ -172,7 +172,7 @@ development loading, and delivery details.
 
 These steps give a laptop, workstation, or manually managed VM the same
 Marshal behavior as an infrastructure-managed host. You need a reachable
-`marshal-daemon`: use the daemon from step 2 above, or substitute the address
+`marshal-server`: use the daemon from step 2 above, or substitute the address
 of a shared daemon. Install the Codex CLI itself first and confirm that `codex`
 is on `PATH`.
 
@@ -192,9 +192,9 @@ curl -fsSL \
 On Windows x64, run this from PowerShell:
 
 ```powershell
-$download = Join-Path $env:TEMP 'marshal-shim.exe'
+$download = Join-Path $env:TEMP 'marshal-stdio.exe'
 Invoke-WebRequest `
-  -Uri 'https://github.com/ignition-is-go/marshal/releases/latest/download/marshal-shim-x86_64-pc-windows-gnu.exe' `
+  -Uri 'https://github.com/ignition-is-go/marshal/releases/latest/download/marshal-stdio-x86_64-pc-windows-gnu.exe' `
   -OutFile $download
 & $download codex-setup --daemon 'ws://<marshal-host>:6155'
 ```
@@ -204,12 +204,12 @@ Windows installs the stable copy under
 Restart the shell after setup. Both commands are idempotent; rerun them to
 refresh the shim, hooks, or daemon address.
 
-For a source build, install `marshal-shim` with Cargo and run the same setup
+For a source build, install `marshal-stdio` with Cargo and run the same setup
 command:
 
 ```bash
-cargo install marshal-shim
-marshal-shim codex-setup --daemon ws://<marshal-host>:6155
+cargo install marshal-stdio
+marshal-stdio codex-setup --daemon ws://<marshal-host>:6155
 ```
 
 A normal `codex` launch now gets the Marshal tools and pulls direct messages
@@ -217,7 +217,7 @@ at prompt and tool boundaries. For a message to start a turn while Codex is
 idle, the interactive CLI must run through:
 
 ```bash
-marshal-shim codex-run [CODEX_ARGS...]
+marshal-stdio codex-run [CODEX_ARGS...]
 ```
 
 On Linux and macOS this attaches the TUI to Codex's managed app-server. On
@@ -265,7 +265,7 @@ codex() {
     if [ "$direct" -eq 1 ]; then
         "$MARSHAL_CODEX_BIN" "$@"
     else
-        "$HOME/.local/bin/marshal-shim" codex-run "$@"
+        "$HOME/.local/bin/marshal-stdio" codex-run "$@"
     fi
 }
 ```
@@ -275,7 +275,7 @@ For Windows PowerShell, add this to
 
 ```powershell
 $script:MarshalCodexBin = (Get-Command codex -CommandType Application).Source
-$script:MarshalShimBin = (Get-Command marshal-shim -CommandType Application).Source
+$script:MarshalShimBin = (Get-Command marshal-stdio -CommandType Application).Source
 
 function global:codex {
     $directCommands = @(
@@ -314,8 +314,8 @@ function global:codex {
 ```
 
 Start a new shell, then run plain `codex` or `codex resume`. An interactive
-session should have both a `marshal-shim codex-run` launcher and a
-`marshal-shim codex-bridge` process, and it should appear in the Marshal roster
+session should have both a `marshal-stdio codex-run` launcher and a
+`marshal-stdio codex-bridge` process, and it should appear in the Marshal roster
 as soon as the TUI opens—even before its first prompt. Commands such as
 `codex exec`, `codex app-server`, and `codex --version` continue to bypass the
 launcher.
@@ -397,16 +397,16 @@ a burst can join the active turn.
 ## Architecture
 
 ```
-Claude Code ── marshal-shim (stdio MCP) ──────┐
-Codex ──────── marshal-shim hooks/bridge ─────┤
+Claude Code ── marshal-stdio (stdio MCP) ──────┐
+Codex ──────── marshal-stdio hooks/bridge ─────┤
 opencode ───── marshal-opencode plugin ───────┼── ws://localhost:6155
 Pi ─────────── marshal-pi extension ──────────┤          │
-Prime Agent ── marshal-prime-agent extension ─┘          └── marshal-daemon
+Prime Agent ── marshal-prime-agent extension ─┘          └── marshal-server
                                                             (roster + event log)
 ```
 
-- **`marshal-daemon`** owns the live roster and the event log under `~/.local/state/marshal/events.jsonl`. One daemon serves every session that points its shim at it (local or remote). Run it under your favorite supervisor (or just `marshal-daemon &` in a terminal).
-- **`marshal-shim`** is the per-session stdio MCP server Claude Code spawns. It announces the session to the daemon on connect, watches for inbound messages, and forwards them onto stdout as channel notifications.
+- **`marshal-server`** owns the live roster and the event log under `~/.local/state/marshal/events.jsonl`. One daemon serves every session that points its shim at it (local or remote). Run it under your favorite supervisor (or just `marshal-server &` in a terminal).
+- **`marshal-stdio`** is the per-session stdio MCP server Claude Code spawns. It announces the session to the daemon on connect, watches for inbound messages, and forwards them onto stdout as channel notifications.
 - **`marshal-pi`** is the in-process Pi extension that registers sessions, exposes native tools, and injects direct messages as steering input.
 - **`marshal-prime-agent`** is the in-process Prime Agent extension that registers conversations, exposes tools, and injects live direct messages.
 - **`marshal-opencode`** provides the equivalent in-process opencode integration.
@@ -435,8 +435,12 @@ The daemon's bind address is set with `MARSHAL_BIND` (default `0.0.0.0:6155` —
 | Component | Description |
 |---|---|
 | [`marshal-entities`](crates/entities/) | Shared entity types and the `SendMessage` server command. |
-| [`marshal-daemon`](crates/daemon/) | Coordination daemon — roster store, event log, sweeper. |
-| [`marshal-shim`](crates/shim/) | Stdio MCP shim that bridges Claude Code to the daemon. |
+| [`marshal-server`](crates/server/) | Coordination daemon — roster store, event log, sweeper. |
+| [`marshal-client`](crates/client/) | Shared connection, address configuration, and hook transport. |
+| [`marshal-host`](crates/host/) | Registers a local host for session delivery and advertises optional launch capabilities. |
+| [`marshal-stdio`](crates/stdio/) | Stdio MCP entry point and session registration. |
+| [`marshal-codex`](crates/codex/) | Codex app-server bridge, thread wake, and setup. |
+| [`marshal-claude`](crates/claude/) | Claude session discovery, channel detection, and asyncRewake delivery. |
 | [`marshal-tui`](crates/tui/) | Live terminal dashboard. |
 | [`marshal-ui`](crates/ui/) | Leptos operator dashboard (build target only — not published). |
 | [`@agent-marshal/marshal-pi`](plugins/marshal-pi/) | Pi native session extension. |
@@ -454,5 +458,5 @@ license, at the versions pinned here (6.11.5):
 
 - myko, used by every crate, and myko-macros, used by `marshal-entities`
 - autosocket, through myko
-- myko-server, used by `marshal-daemon`
+- myko-server, used by `marshal-server`
 - myko-leptos, used by `marshal-ui`, whose WASM bundle ships in releases
