@@ -636,8 +636,6 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
         Ok(status)
     })();
 
-    // A managed pane owner reaches cleanup only when its runtime ends. Ordinary
-    // launchers reach it when their interactive frontend exits.
     let _ = bridge.kill();
     let _ = bridge.wait();
     let _ = fs::remove_file(&ready_file);
