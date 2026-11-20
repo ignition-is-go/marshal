@@ -55,6 +55,7 @@ impl CommandHandler for FindCoordination {
 #[cfg(not(target_arch = "wasm32"))]
 impl CommandHandler for FindCoordination {
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
+        use crate::wake_watcher::GetAllWakeWatchers;
         use crate::{
             GetAllSessionNicknames, GetAllSessions, GetAllTaskClaims, GetAllTasks, TaskStatus,
         };
@@ -135,12 +136,21 @@ impl CommandHandler for FindCoordination {
                 .filter(|task| task.status == TaskStatus::Open)
                 .filter_map(|task| active.get(&task.id).copied())
                 .collect();
+            let watchers = ctx.exec_query(GetAllWakeWatchers {})?;
+            let waiting: HashSet<_> = watchers
+                .iter()
+                .filter(|watcher| watcher.until > now)
+                .map(|watcher| watcher.id.0.as_ref())
+                .collect();
             let sessions = ctx.exec_query(GetAllSessions {})?;
             let mut idle: Vec<_> = sessions
                 .iter()
                 .filter(|session| {
-                    session.activity.as_deref() == Some("idle")
-                        && !working.contains(&session.id)
+                    let idle = match session.activity.as_deref() {
+                        Some(activity) => activity == "idle",
+                        None => waiting.contains(session.id.0.as_ref()),
+                    };
+                    idle && !working.contains(&session.id)
                         && project_matches(
                             project,
                             session
