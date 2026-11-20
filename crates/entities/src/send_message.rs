@@ -55,6 +55,21 @@ pub struct SendMessage {
     pub as_session: Option<SessionId>,
 }
 
+pub const LAUNCHER_SESSION_KIND: &str = "launcher";
+
+#[myko_command(SendMessageResult)]
+#[myko_public]
+pub struct SendLaunchTask {
+    pub launch_id: String,
+    pub to_session_id: SessionId,
+    pub body: String,
+}
+
+pub fn launch_task_message_id(launch_id: &str) -> Option<MessageId> {
+    let id = Uuid::try_parse(launch_id.strip_prefix("launch-")?).ok()?;
+    (id.get_version_num() == 4).then(|| MessageId(Arc::from(id.to_string())))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ts-export", derive(myko::TS), ts(export))]
@@ -170,16 +185,24 @@ impl CommandHandler for SendMessage {
             from_session_id: sender.id.clone(),
             to_session_id: Some(recipient.id.clone()),
             to_room_id: None,
-            to_operator: to_operator.clone(),
-            body: self.body.clone(),
+            to_operator,
+            body: self.body,
             sent_at: now,
         };
 
-        // Persist unconditionally: in the pull model the recipient reads
-        // this on its next turn via the hook, whether or not it has a live
-        // connection right now. Delivery is decoupled from acceptance.
         ctx.emit_set(&msg)?;
+        Self::deliver_persisted(&ctx, &recipient, msg)
+    }
+}
 
+impl SendMessage {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn deliver_persisted(
+        ctx: &CommandContext,
+        recipient: &Session,
+        msg: Message,
+    ) -> Result<SendMessageResult, CommandError> {
+        let now = msg.sent_at;
         // Best-effort live push: only when the recipient has a live WS client
         // AND its session can actually render channel pushes. A flag-off
         // recipient (channels_enabled == Some(false)) has a live client but
@@ -194,7 +217,7 @@ impl CommandHandler for SendMessage {
         // (`SessionNickname`); fall back to the computed candidate for the brief
         // window before the assignment saga has run. The full id stays in `meta`
         // for exact reply routing; `from_nickname` lets an agent reply by name.
-        let from_nickname = crate::nickname_for(&ctx, sender.id.0.as_ref())?;
+        let from_nickname = crate::nickname_for(ctx, msg.from_session_id.0.as_ref())?;
         let (context_body, body_truncated) = context_preview(&msg.body, CONTEXT_BODY_MAX_CHARS);
         let live_push = match recipient.client_id.as_ref() {
             Some(cid) if recipient_can_render => {
@@ -207,21 +230,21 @@ impl CommandHandler for SendMessage {
                     // the persisted Message retains the complete body.
                     direct_push_content(
                         &from_nickname,
-                        to_operator.as_deref(),
+                        msg.to_operator.as_deref(),
                         body_truncated.then_some(msg.id.0.as_ref()),
                     ),
                     serde_json::json!({
                         "source": "marshal",
                         "kind": "new_message",
                         "message_id": msg.id.0.as_ref(),
-                        "from_session": sender.id.0.as_ref(),
+                        "from_session": msg.from_session_id.0.as_ref(),
                         "from_nickname": from_nickname,
                         "to_session": recipient.id.0.as_ref(),
                         // Present when addressed to a human via their operator
                         // identity: the receiving agent should surface it to that
                         // operator, not treat it as ordinary peer chatter.
-                        "to_operator": to_operator,
-                        "response_required": self.response_required,
+                        "to_operator": msg.to_operator,
+                        "response_required": msg.response_required,
                         "body": context_body,
                         "body_truncated": body_truncated,
                         "sent_at": now,
@@ -288,11 +311,76 @@ impl CommandHandler for SendMessage {
         Ok(SendMessageResult {
             message_id: msg.id,
             to_session_id: recipient.id.clone(),
-            sent_at: now,
+            sent_at: msg.sent_at,
             live_push,
             wake,
             delivered_live,
         })
+    }
+}
+
+impl CommandHandler for SendLaunchTask {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _ctx: CommandContext) -> Result<Self::Result, CommandError> {
+        unreachable!("SendLaunchTask::execute is server-only");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
+        let id = launch_task_message_id(&self.launch_id)
+            .ok_or_else(|| err(&ctx, "invalid launch ID"))?;
+        let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
+        let sender = resolve_caller(&ctx, &sessions, None)?;
+        if sender.kind.as_deref() != Some(LAUNCHER_SESSION_KIND) {
+            return Err(err(
+                &ctx,
+                "first tasks require a connected launcher session",
+            ));
+        }
+
+        static FIRST_TASKS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = FIRST_TASKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let messages: Vec<Arc<Message>> = ctx.exec_query(crate::GetAllMessages {})?;
+        if let Some(existing) = messages.iter().find(|message| message.id == id) {
+            if existing.to_session_id.as_ref() != Some(&self.to_session_id)
+                || existing.body != self.body
+            {
+                return Err(err(&ctx, "this launch already has a different first task"));
+            }
+            return Ok(SendMessageResult {
+                message_id: id,
+                to_session_id: self.to_session_id,
+                sent_at: existing.sent_at,
+                live_push: LivePushStatus::Unknown,
+                wake: WakeStatus::Unobserved,
+                delivered_live: false,
+            });
+        }
+
+        let Some(recipient) = sessions.iter().find(|session| {
+            session.id == self.to_session_id
+                && session.agent_id.as_deref() == Some(self.launch_id.as_str())
+        }) else {
+            return Err(err(
+                &ctx,
+                "the exact session for this launch is no longer on the roster",
+            ));
+        };
+        let message = Message {
+            id,
+            from_session_id: sender.id.clone(),
+            to_session_id: Some(recipient.id.clone()),
+            to_room_id: None,
+            to_operator: None,
+            response_required: false,
+            body: self.body,
+            sent_at: Utc::now().timestamp_millis(),
+        };
+        ctx.emit_set(&message)?;
+        drop(guard);
+        SendMessage::deliver_persisted(&ctx, recipient, message)
     }
 }
 

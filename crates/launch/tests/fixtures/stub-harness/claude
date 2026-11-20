@@ -1,0 +1,5 @@
+#!/bin/sh
+# A stand-in for Claude Code in launch_e2e.rs: it shows what the launcher gave
+# it, then idles. The test registers its roster row as Claude's hooks would.
+printf '[stub %s %s %s]\n' "$MARSHAL_AGENT_ID" "$MARSHAL_DAEMON_ADDRESS" "$PWD"
+exec sleep 300

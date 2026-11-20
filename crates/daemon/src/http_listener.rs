@@ -16,6 +16,10 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::watch;
 
+use marshal_launch::api::{
+    GET_LAUNCH_PATH, LAUNCH_PATH, LIST_LAUNCHES_PATH, LaunchKey, LaunchView, STOP_LAUNCH_PATH,
+    Service, TaskState,
+};
 use myko::server::MykoServerContext;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -54,6 +58,15 @@ pub async fn run_until(
     ctx: Arc<MykoServerContext>,
     stopping: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
+    run_with_launch(bind, ctx, stopping, None).await
+}
+
+pub async fn run_with_launch(
+    bind: SocketAddr,
+    ctx: Arc<MykoServerContext>,
+    stopping: watch::Receiver<bool>,
+    launches: Option<Arc<Service>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     log::info!("marshal hook listener on http://{bind} (/hook/*)");
     loop {
@@ -66,8 +79,9 @@ pub async fn run_until(
         };
         let ctx = ctx.clone();
         let stopping = stopping.clone();
+        let launches = launches.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, ctx, stopping).await {
+            if let Err(e) = handle_conn(stream, ctx, stopping, launches).await {
                 log::debug!("[hook] connection error: {e}");
             }
         });
@@ -78,6 +92,7 @@ async fn handle_conn(
     mut stream: TcpStream,
     ctx: Arc<MykoServerContext>,
     stopping: watch::Receiver<bool>,
+    launches: Option<Arc<Service>>,
 ) -> std::io::Result<()> {
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
     let mut tmp = [0u8; 2048];
@@ -109,8 +124,10 @@ async fn handle_conn(
         .filter_map(|l| l.split_once(':'))
         .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
         .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-        .unwrap_or(0)
-        .min(MAX_BODY);
+        .unwrap_or(0);
+    if content_length > MAX_BODY {
+        return write_response(&mut stream, 413, "payload too large").await;
+    }
 
     // Body bytes already buffered past the header terminator, plus any
     // remainder up to Content-Length.
@@ -135,6 +152,28 @@ async fn handle_conn(
 
     if method != "POST" {
         return write_response(&mut stream, 405, "method not allowed").await;
+    }
+
+    if matches!(
+        path,
+        LAUNCH_PATH | GET_LAUNCH_PATH | STOP_LAUNCH_PATH | LIST_LAUNCHES_PATH
+    ) && let Some(launches) = launches
+    {
+        let path = path.to_owned();
+        let runtime = tokio::runtime::Handle::current();
+        let result = tokio::task::spawn_blocking(move || {
+            launch_response(&path, &body, &launches, &ctx, &runtime, stopping)
+        })
+        .await;
+        return match result {
+            Ok(Ok(body)) => {
+                write_response_type(&mut stream, 200, "", &body, "application/json").await
+            }
+            Ok(Err(error)) => write_response(&mut stream, 400, &format!("{error:#}")).await,
+            Err(error) => {
+                write_response(&mut stream, 500, &format!("launch worker failed: {error}")).await
+            }
+        };
     }
 
     if path == "/hook/wait" {
@@ -167,6 +206,100 @@ async fn handle_conn(
         }
         None => write_response(&mut stream, 404, "not found").await,
     }
+}
+
+fn launch_response(
+    path: &str,
+    body: &[u8],
+    launches: &Service,
+    ctx: &Arc<MykoServerContext>,
+    runtime: &tokio::runtime::Handle,
+    mut stopping: watch::Receiver<bool>,
+) -> anyhow::Result<String> {
+    let cmd = hooks::internal_cmd_ctx(ctx);
+    let messages = std::cell::OnceCell::<Vec<Arc<marshal_entities::Message>>>::new();
+    let reads = std::cell::OnceCell::<Vec<Arc<marshal_entities::MessageRead>>>::new();
+    let observed = |mut view: LaunchView| {
+        let Some(session) = view.session_id.as_deref() else {
+            return view;
+        };
+        let message_id = match &view.task {
+            TaskState::Pending => {
+                let Some(id) = marshal_entities::launch_task_message_id(&view.launch_id) else {
+                    return view;
+                };
+                id.0.to_string()
+            }
+            TaskState::DeliveryUncertain { message_id } | TaskState::Stored { message_id } => {
+                message_id.clone()
+            }
+            TaskState::NotRequested | TaskState::Acknowledged { .. } => return view,
+        };
+        let reads = reads.get_or_init(|| {
+            cmd.exec_query(marshal_entities::GetAllMessageReads {})
+                .unwrap_or_default()
+        });
+        let acknowledged = reads.iter().any(|read| {
+            read.session_id.0.as_ref() == session && read.message_id.0.as_ref() == message_id
+        });
+        let task = if acknowledged {
+            TaskState::Acknowledged { message_id }
+        } else if matches!(view.task, TaskState::Stored { .. }) {
+            return view;
+        } else {
+            let messages = messages.get_or_init(|| {
+                cmd.exec_query(marshal_entities::GetAllMessages {})
+                    .unwrap_or_default()
+            });
+            if !messages.iter().any(|message| {
+                message.id.0.as_ref() == message_id
+                    && message
+                        .to_session_id
+                        .as_ref()
+                        .is_some_and(|to| to.0.as_ref() == session)
+            }) {
+                return view;
+            }
+            TaskState::Stored { message_id }
+        };
+        if let Err(error) = launches.record_task_receipt(&view.launch_id, session, task.clone()) {
+            log::debug!("[launch] could not record task receipt: {error:#}");
+        }
+        view.task = task;
+        view
+    };
+    let result = match path {
+        LAUNCH_PATH => {
+            let request = serde_json::from_slice(body)?;
+            let view = runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = stopping.wait_for(|value| *value) => {
+                        anyhow::bail!("daemon is stopping; recover the launch with the same ID")
+                    }
+                    result = launches.start(request) => result,
+                }
+            })?;
+            serde_json::to_string(&observed(view))?
+        }
+        GET_LAUNCH_PATH => {
+            let key: LaunchKey = serde_json::from_slice(body)?;
+            serde_json::to_string(&observed(launches.get(&key.launch_id)?))?
+        }
+        STOP_LAUNCH_PATH => {
+            let key: LaunchKey = serde_json::from_slice(body)?;
+            serde_json::to_string(&observed(runtime.block_on(launches.stop(&key.launch_id))?))?
+        }
+        LIST_LAUNCHES_PATH => serde_json::to_string(
+            &launches
+                .list()?
+                .into_iter()
+                .map(observed)
+                .collect::<Vec<_>>(),
+        )?,
+        _ => unreachable!(),
+    };
+    Ok(result)
 }
 
 /// `/hook/wait`: hold the request until the session has an unread direct
@@ -248,8 +381,27 @@ async fn write_response_with(
     extra_headers: &str,
     body: &str,
 ) -> std::io::Result<()> {
+    write_response_type(
+        stream,
+        status,
+        extra_headers,
+        body,
+        "text/plain; charset=utf-8",
+    )
+    .await
+}
+
+async fn write_response_type(
+    stream: &mut TcpStream,
+    status: u16,
+    extra_headers: &str,
+    body: &str,
+    content_type: &str,
+) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
+        400 => "Bad Request",
+        500 => "Internal Server Error",
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
@@ -257,7 +409,7 @@ async fn write_response_with(
     };
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n\
-         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n{extra_headers}\r\n",
         body.len(),

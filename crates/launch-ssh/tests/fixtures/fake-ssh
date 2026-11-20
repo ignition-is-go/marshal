@@ -1,0 +1,27 @@
+#!/bin/sh
+# Stands in for `ssh` in the adapter's tests: runs the remote command here.
+# The adapter calls `<ssh> -o ... -o ... -- <dest> 'bash -l -s'`.
+# - By default this runs `bash -s` (no -l, so the test's PATH survives
+#   /etc/profile) with the script on stdin.
+# - FAKE_SSH_LOGIN_SHELL=<shell> runs the remote command string through that
+#   shell's `-c`, as sshd does with the user's login shell (zsh on macOS).
+# - FAKE_SSH_UNREACHABLE=1 exits 255, as ssh does when the host can't be
+#   reached.
+# - FAKE_SSH_TRANSCRIPT=<file> appends everything the "target" sends back
+#   (stdout and stderr) to <file>, so a test can see what would cross the wire.
+[ "${FAKE_SSH_UNREACHABLE:-}" = 1 ] && { echo "ssh: connect to host: No route to host" >&2; exit 255; }
+for a; do last=$a; done
+if [ -n "${FAKE_SSH_LOGIN_SHELL:-}" ]; then
+  set -- "$FAKE_SSH_LOGIN_SHELL" -c "$last"
+else
+  set -- bash -s
+fi
+if [ -n "${FAKE_SSH_TRANSCRIPT:-}" ]; then
+  out=$(mktemp); err=$(mktemp)
+  "$@" > "$out" 2> "$err"; rc=$?
+  cat "$out" "$err" >> "$FAKE_SSH_TRANSCRIPT"
+  cat "$out"; cat "$err" >&2
+  rm -f "$out" "$err"
+  exit $rc
+fi
+exec "$@"

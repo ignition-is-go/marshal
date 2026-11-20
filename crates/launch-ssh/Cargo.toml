@@ -1,0 +1,29 @@
+[package]
+name = "marshal-launch-ssh"
+version = "0.60.5"
+edition.workspace = true
+license.workspace = true
+description = "Reference marshal-launch adapter: start a coding agent in tmux on another machine over ssh."
+repository = "https://github.com/ignition-is-go/marshal"
+keywords = ["marshal", "agent", "launcher", "ssh", "tmux"]
+categories = ["command-line-utilities"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "marshal-launch-ssh"
+path = "src/main.rs"
+
+[package.metadata.flux]
+tasks = ["check", "build", "test", "lint", "publish"]
+
+[dependencies]
+anyhow = { workspace = true }
+marshal-launch = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

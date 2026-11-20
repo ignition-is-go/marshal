@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use hyphae::{Gettable, Materialize};
 use marshal_entities::{
-    LivePushStatus, Message, SendMessage, SendMessageResult, Session, SessionId, WakeStatus,
-    WakeWatcher, WakeWatcherId,
+    LAUNCHER_SESSION_KIND, LivePushStatus, Message, SendLaunchTask, SendMessage, SendMessageResult,
+    Session, SessionId, WakeStatus, WakeWatcher, WakeWatcherId,
 };
 use myko::{
     command::{CommandContext, CommandHandler},
@@ -110,6 +110,73 @@ fn only_message(ctx: &MykoServerContext) -> Message {
     assert_eq!(entries.len(), 1, "expected exactly one Message");
     myko::utils::downcast_item::<Message>(&entries.into_iter().next().unwrap().1)
         .expect("entry is a Message")
+}
+
+#[test]
+fn launch_task_requires_the_exact_bound_thread_and_persists_only_once() {
+    let ctx = setup();
+    let launch_id = format!("launch-{}", Uuid::new_v4().simple());
+    let mut launcher = session("launcher", Some("c-launcher"));
+    launcher.kind = Some(LAUNCHER_SESSION_KIND.into());
+    set_session(&ctx, &launcher);
+    let mut recipient = session("thread-with-longer-id", None);
+    recipient.agent_id = Some(launch_id.clone());
+    set_session(&ctx, &recipient);
+    let send = |id: &str, text: &str| {
+        SendLaunchTask {
+            launch_id: launch_id.clone(),
+            to_session_id: SessionId(Arc::from(id)),
+            body: text.into(),
+        }
+        .execute(cmd_ctx(&ctx, Some("c-launcher")))
+    };
+
+    assert!(send("thread-with-longer", "first").is_err());
+    assert_eq!(message_count(&ctx), 0);
+
+    let start = std::sync::Barrier::new(2);
+    let (first, retry) = std::thread::scope(|scope| {
+        let left = scope.spawn(|| {
+            start.wait();
+            send("thread-with-longer-id", "first").unwrap()
+        });
+        start.wait();
+        (
+            send("thread-with-longer-id", "first").unwrap(),
+            left.join().unwrap(),
+        )
+    });
+    assert_eq!(first.message_id, retry.message_id);
+    assert_eq!(first.sent_at, retry.sent_at);
+    assert!(send("thread-with-longer-id", "different task").is_err());
+    assert_eq!(only_message(&ctx).to_session_id, Some(recipient.id));
+}
+
+#[test]
+fn launch_task_rejects_an_unbound_thread_and_non_launcher_sender() {
+    let ctx = setup();
+    let launch_id = format!("launch-{}", Uuid::new_v4().simple());
+    let mut launcher = session("launcher", Some("c-launcher"));
+    launcher.kind = Some(LAUNCHER_SESSION_KIND.into());
+    set_session(&ctx, &launcher);
+    let ordinary = session("ordinary", Some("c-ordinary"));
+    set_session(&ctx, &ordinary);
+    let mut recipient = session("recipient", None);
+    let id = recipient.id.clone();
+    let send = |client| {
+        SendLaunchTask {
+            launch_id: launch_id.clone(),
+            to_session_id: id.clone(),
+            body: "first".into(),
+        }
+        .execute(cmd_ctx(&ctx, Some(client)))
+    };
+    set_session(&ctx, &recipient);
+    assert!(send("c-launcher").is_err());
+    recipient.agent_id = Some(launch_id.clone());
+    set_session(&ctx, &recipient);
+    assert!(send("c-ordinary").is_err());
+    assert_eq!(message_count(&ctx), 0);
 }
 
 #[test]

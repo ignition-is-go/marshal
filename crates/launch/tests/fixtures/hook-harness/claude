@@ -1,0 +1,22 @@
+#!/bin/sh
+# A stand-in for Claude Code in real_daemon_e2e.rs. It makes the calls
+# Claude's hooks make, through the real marshal-shim, so its roster row is
+# registered, its mail read and its row cleared by the shim and the daemon,
+# not by the test. MARSHAL_E2E_SHIM names the shim; MARSHAL_BASE_URL its
+# daemon's hook listener.
+shim=${MARSHAL_E2E_SHIM:?MARSHAL_E2E_SHIM names the marshal-shim to use}
+sid=$(cat /proc/sys/kernel/random/uuid)
+hook() {
+  printf '{"session_id":"%s","cwd":"%s","hook_event_name":"%s"}' "$sid" "$PWD" "$2" \
+    | "$shim" claude-hook "$1"
+}
+bye() { hook session-end SessionEnd >/dev/null 2>&1; exit 0; }
+trap bye HUP TERM INT
+hook session-start SessionStart
+echo "[hook-harness $sid $MARSHAL_AGENT_ID $PWD]"
+# Each turn pulls unread mail into the "prompt", as UserPromptSubmit does.
+while :; do
+  hook prompt-submit UserPromptSubmit
+  sleep 1 &
+  wait $!
+done
