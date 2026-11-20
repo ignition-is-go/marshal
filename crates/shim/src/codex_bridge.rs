@@ -278,6 +278,8 @@ struct LauncherStateWriter {
     path: PathBuf,
     state: LauncherState,
     launch_id: Option<String>,
+    selection_sequence: u64,
+    confirmed_sequence: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -300,6 +302,8 @@ impl LauncherStateWriter {
         Self {
             path,
             launch_id,
+            selection_sequence: 0,
+            confirmed_sequence: 0,
             state: LauncherState {
                 thread_id,
                 ..LauncherState::default()
@@ -339,11 +343,24 @@ impl LauncherStateWriter {
         Ok(())
     }
 
-    fn confirmed_selection(&mut self, thread_id: &str) -> Result<()> {
+    fn selection_requested(&mut self) -> Result<u64> {
+        let sequence = self
+            .selection_sequence
+            .checked_add(1)
+            .context("Codex TUI selection request counter exhausted")?;
+        self.selection_sequence = sequence;
+        Ok(sequence)
+    }
+
+    fn confirmed_selection(&mut self, thread_id: &str, sequence: u64) -> Result<()> {
+        if sequence <= self.confirmed_sequence {
+            return Ok(());
+        }
         self.state
             .thread_id
             .get_or_insert_with(|| thread_id.to_string());
         self.state.active_thread_id = Some(thread_id.to_string());
+        self.confirmed_sequence = sequence;
         self.persist()
     }
 
@@ -903,14 +920,16 @@ where
                 if let WebSocketMessage::Text(text) = &message
                     && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
                     && let Some(id) = value.get("id")
+                    && let Some(launcher) = launcher.as_ref()
                 {
-                    if let Some(thread_id) = resumed_thread_id(&value) {
-                        if let Some(launcher) = launcher.as_ref() {
-                            launcher.lock().await.selected(thread_id)?;
+                    let resumed = resumed_thread_id(&value);
+                    if resumed.is_some() || value.get("method").and_then(Value::as_str) == Some("thread/start") {
+                        let mut writer = launcher.lock().await;
+                        let sequence = writer.selection_requested()?;
+                        if let Some(thread_id) = resumed {
+                            writer.selected(thread_id)?;
                         }
-                        pending_selections.push((id.clone(), Some(thread_id.to_string())));
-                    } else if value.get("method").and_then(Value::as_str) == Some("thread/start") {
-                        pending_selections.push((id.clone(), None));
+                        pending_selections.push((id.clone(), resumed.map(str::to_string), sequence));
                     }
                 }
                 let closed = matches!(message, WebSocketMessage::Close(_));
@@ -926,9 +945,9 @@ where
                     && let Some(id) = value.get("id")
                     && let Some(position) = pending_selections
                         .iter()
-                        .position(|(pending, _)| pending == id)
+                        .position(|(pending, _, _)| pending == id)
                 {
-                    let (_, expected_thread) = pending_selections.swap_remove(position);
+                    let (_, expected_thread, sequence) = pending_selections.swap_remove(position);
                     if value.get("error").is_none()
                         && let Some(thread_id) = value
                         .pointer("/result/thread/id")
@@ -937,7 +956,7 @@ where
                         && expected_thread.as_deref().is_none_or(|expected| expected == thread_id)
                         && let Some(launcher) = launcher.as_ref()
                     {
-                        launcher.lock().await.confirmed_selection(thread_id)?;
+                        launcher.lock().await.confirmed_selection(thread_id, sequence)?;
                     }
                 }
                 let closed = matches!(message, WebSocketMessage::Close(_));
@@ -2649,8 +2668,10 @@ mod tests {
             None,
             Some("launch-owner".into()),
         );
-        writer.confirmed_selection("initial-thread").unwrap();
-        writer.confirmed_selection("active-thread").unwrap();
+        let first = writer.selection_requested().unwrap();
+        writer.confirmed_selection("initial-thread", first).unwrap();
+        let next = writer.selection_requested().unwrap();
+        writer.confirmed_selection("active-thread", next).unwrap();
         writer.disconnected().unwrap();
         writer.connected().unwrap();
         let state = read_launcher_state(&path).unwrap();
@@ -2664,6 +2685,26 @@ mod tests {
             writer.registration_binding("active-thread"),
             RegistrationBinding::OtherThread
         );
+    }
+
+    #[test]
+    fn selection_counter_exhaustion_leaves_confirmed_state_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut writer = LauncherStateWriter::new(
+            directory.path().join("state.json"),
+            directory.path().into(),
+            None,
+            None,
+        );
+        let selected = writer.selection_requested().unwrap();
+        writer
+            .confirmed_selection("active-thread", selected)
+            .unwrap();
+        let before = writer.state.clone();
+        writer.selection_sequence = u64::MAX;
+        assert!(writer.selection_requested().is_err());
+        assert_eq!(writer.selection_sequence, u64::MAX);
+        assert_eq!(writer.state, before);
     }
 
     #[test]
