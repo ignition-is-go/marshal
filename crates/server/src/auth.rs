@@ -231,6 +231,7 @@ impl Authorizer for MarshalPolicy {
                         | "ListReadyTasks"
                         | "ClaimTask"
                         | "ReserveTaskDispatch"
+                        | "CancelTaskDispatch"
                         | "RenewTaskClaim"
                         | "ReleaseTaskClaim"
                         | "SetTaskTitle"

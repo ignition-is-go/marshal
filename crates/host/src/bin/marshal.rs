@@ -11,7 +11,7 @@ use marshal_client::{
     config::{ADDRESS_FILE, config_file_candidates, server_address},
 };
 use marshal_entities::{
-    AcceptTaskAssignment, AddTaskDependency, ClaimTask, CompleteTaskAssignment, CoordinationMatches,
+    AcceptTaskAssignment, AddTaskDependency, CancelTaskDispatch, ClaimTask, CompleteTaskAssignment, CoordinationMatches,
     CreateTask, DispatchAttempt, DispatchHarness, FindCoordination, GetAllDispatchHosts,
     GetAllSessions, GetAllTaskBlockers, GetAllTaskClaims, GetAllTasks, GetTaskById,
     ReleaseTaskClaim, RemoveTaskDependency, RenewTaskClaim, ReserveTaskDispatch, SendMessage,
@@ -45,6 +45,8 @@ const HELP: &str = "Usage: marshal <command>
   task release <id> <lease-id>       Release a task lease (operator)
   task dispatch <id> <host> <claude|codex> <workspace>
                                      Reserve an agent launch for a task
+  task cancel-dispatch <id> <launch-id>
+                                     Cancel a reservation before launch
   send --as <session-id> <to>... -- <message>
                                      Message one or more agents
 
@@ -147,6 +149,14 @@ async fn main() -> Result<()> {
         }
         [command, action, id, lease] if command == "task" && action == "release" => {
             release_claim(id, lease).await?;
+        }
+        [command, action, id, launch] if command == "task" && action == "cancel-dispatch" => {
+            let client = connect().await?;
+            let response = client.send_command::<CancelTaskDispatch, ()>(&CancelTaskDispatch {
+                task_id: TaskId(Arc::from(id.as_str())),
+                launch_id: launch.clone(),
+            });
+            await_value(|| response.get()).await?.map_err(anyhow::Error::msg)?;
         }
         [command, action, id, host, harness, workspace]
             if command == "task" && action == "dispatch" =>

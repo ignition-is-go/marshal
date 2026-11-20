@@ -177,6 +177,45 @@ pub fn begin_dispatch(ctx: &CommandContext, id: &DispatchAttemptId) -> Result<bo
     Ok(ready)
 }
 
+/// Cancel a reservation before a launch request can reach the host.
+#[myko_command]
+pub struct CancelTaskDispatch {
+    pub task_id: TaskId,
+    pub launch_id: String,
+}
+
+impl CommandHandler for CancelTaskDispatch {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _: CommandContext) -> Result<Self::Result, CommandError> {
+        unreachable!("CancelTaskDispatch executes on the server")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
+        use crate::task_dependency::task_error;
+
+        if ctx
+            .req
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.identity())
+            .and_then(|identity| identity.user_id.as_ref())
+            .is_none()
+        {
+            return Err(task_error(&ctx, "Dispatch cancellation requires an authenticated operator"));
+        }
+        if !reject_reserved_dispatch(
+            &ctx,
+            &DispatchAttemptId(self.task_id.0),
+            &self.launch_id,
+            "Cancelled by operator".into(),
+        )? {
+            return Err(task_error(&ctx, "Dispatch differs or is no longer reserved"));
+        }
+        Ok(())
+    }
+}
+
 /// Reject a reservation without recording a start on the host.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn reject_reserved_dispatch(
@@ -184,17 +223,18 @@ pub fn reject_reserved_dispatch(
     id: &DispatchAttemptId,
     launch_id: &str,
     reason: String,
-) -> Result<(), CommandError> {
+) -> Result<bool, CommandError> {
     let _guard = crate::task_dependency::lock_task_state(ctx)?;
     let Some(attempt) = ctx.exec_report(GetDispatchAttemptById { id: id.clone() })? else {
-        return Ok(());
+        return Ok(false);
     };
-    if attempt.launch_id == launch_id && attempt.state == DispatchState::Reserved {
-        let mut updated = attempt.as_ref().clone();
-        updated.state = DispatchState::Rejected { reason };
-        ctx.emit_set(&updated)?;
+    if attempt.launch_id != launch_id || attempt.state != DispatchState::Reserved {
+        return Ok(false);
     }
-    Ok(())
+    let mut updated = attempt.as_ref().clone();
+    updated.state = DispatchState::Rejected { reason };
+    ctx.emit_set(&updated)?;
+    Ok(true)
 }
 
 /// Store one assignment in the joined session's inbox. The message key is
