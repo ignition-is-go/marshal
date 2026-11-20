@@ -274,7 +274,8 @@ fn protect_operator_identity(
             | "SurfaceHarnessInbox"
             | "SetHarnessWake"
             | "EndHarnessSession"
-            | "AcceptTaskAssignment" => (
+            | "AcceptTaskAssignment"
+            | "CompleteTaskAssignment" => (
                 arguments.get("sessionId").and_then(|value| value.as_str()),
                 false,
             ),
@@ -398,6 +399,7 @@ mod tests {
             "SetHarnessWake",
             "EndHarnessSession",
             "AcceptTaskAssignment",
+            "CompleteTaskAssignment",
         ] {
             for id in ["console-user:tab", marshal_entities::DISPATCH_SENDER] {
                 assert!(

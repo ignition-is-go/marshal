@@ -372,6 +372,56 @@ pub fn assignment_proof(host_token: &str, launch_id: &str) -> String {
     format!("{:x}", mac.finalize().into_bytes())
 }
 
+/// Close only the task currently leased to the authenticated launch.
+#[myko_command]
+#[myko_public]
+pub struct CompleteTaskAssignment {
+    pub task_id: TaskId,
+    pub launch_id: String,
+    pub session_id: SessionId,
+    pub proof: String,
+    pub commit: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn authorize_assignment(
+    ctx: &CommandContext,
+    task_id: &TaskId,
+    launch_id: &str,
+    session_id: &SessionId,
+    proof: &str,
+) -> Result<std::sync::Arc<DispatchAttempt>, CommandError> {
+    use subtle::ConstantTimeEq as _;
+
+    let denied = || crate::task_dependency::task_error(ctx, "Invalid task assignment or proof");
+    if proof.len() != 64
+        || uuid::Uuid::parse_str(task_id.0.as_ref()).is_err()
+        || uuid::Uuid::parse_str(launch_id).is_err()
+        || session_id.0.is_empty()
+        || session_id.0.len() > 256
+    {
+        return Err(denied());
+    }
+    let attempt = ctx
+        .exec_report(GetDispatchAttemptById {
+            id: DispatchAttemptId(task_id.0.clone()),
+        })?
+        .filter(|attempt| attempt.launch_id == launch_id)
+        .ok_or_else(denied)?;
+    let key = ASSIGNMENT_CREDENTIALS
+        .get()
+        .and_then(|credentials| credentials.get(&attempt.host_id))
+        .ok_or_else(denied)?;
+    if !bool::from(
+        assignment_proof(key, launch_id)
+            .as_bytes()
+            .ct_eq(proof.as_bytes()),
+    ) {
+        return Err(denied());
+    }
+    Ok(attempt)
+}
+
 impl CommandHandler for AcceptTaskAssignment {
     #[cfg(target_arch = "wasm32")]
     fn execute(self, _: CommandContext) -> Result<Self::Result, CommandError> {
@@ -380,40 +430,100 @@ impl CommandHandler for AcceptTaskAssignment {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
-        use subtle::ConstantTimeEq as _;
-
-        let denied =
-            || crate::task_dependency::task_error(&ctx, "Assignment could not be accepted");
-        if self.proof.len() != 64
-            || uuid::Uuid::parse_str(self.task_id.0.as_ref()).is_err()
-            || uuid::Uuid::parse_str(&self.launch_id).is_err()
-            || self.session_id.0.is_empty()
-            || self.session_id.0.len() > 256
-        {
-            return Err(denied());
-        }
-        let id = DispatchAttemptId(self.task_id.0.clone());
-        let attempt = ctx
-            .exec_report(GetDispatchAttemptById { id: id.clone() })?
-            .filter(|attempt| attempt.launch_id == self.launch_id)
-            .ok_or_else(denied)?;
-        let key = ASSIGNMENT_CREDENTIALS
-            .get()
-            .and_then(|credentials| credentials.get(&attempt.host_id))
-            .ok_or_else(denied)?;
-        let expected = assignment_proof(key, &self.launch_id);
-        if !bool::from(expected.as_bytes().ct_eq(self.proof.as_bytes())) {
-            return Err(denied());
-        }
+        let attempt = authorize_assignment(
+            &ctx,
+            &self.task_id,
+            &self.launch_id,
+            &self.session_id,
+            &self.proof,
+        )?;
         if !accept_dispatched_task(
             &ctx,
-            &id,
+            &attempt.id,
             &self.launch_id,
             &self.session_id,
             self.task_id.0.as_ref(),
         )? {
-            return Err(denied());
+            return Err(crate::task_dependency::task_error(
+                &ctx,
+                "Assignment could not be accepted",
+            ));
         }
         Ok(())
+    }
+}
+
+impl CommandHandler for CompleteTaskAssignment {
+    #[cfg(target_arch = "wasm32")]
+    fn execute(self, _: CommandContext) -> Result<Self::Result, CommandError> {
+        unreachable!("CompleteTaskAssignment executes on the server")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
+        use crate::task_dependency::{lock_task_state, task_error};
+        use crate::{GetSessionById, GetTaskById, GetTaskClaimById, TaskClaimId, TaskStatus};
+
+        let _guard = lock_task_state(&ctx)?;
+        let denied = || task_error(&ctx, "This session does not hold the task assignment");
+        let attempt = authorize_assignment(
+            &ctx,
+            &self.task_id,
+            &self.launch_id,
+            &self.session_id,
+            &self.proof,
+        )?;
+        let DispatchState::Claimed {
+            session_id,
+            lease_id,
+            ..
+        } = &attempt.state
+        else {
+            return Err(denied());
+        };
+        if session_id != &self.session_id {
+            return Err(denied());
+        }
+        let task = ctx
+            .exec_report(GetTaskById {
+                id: self.task_id.clone(),
+            })?
+            .ok_or_else(denied)?;
+        let status = TaskStatus::Closed {
+            commit: self.commit,
+        };
+        let claim = ctx.exec_report(GetTaskClaimById {
+            id: TaskClaimId(self.task_id.0),
+        })?;
+        let matching = claim
+            .as_ref()
+            .filter(|claim| claim.session_id == *session_id && claim.lease_id == *lease_id);
+        if task.status == status {
+            if let Some(claim) = matching {
+                ctx.emit_del(claim.as_ref())?;
+            }
+            return Ok(());
+        }
+        if task.status != TaskStatus::Open {
+            return Err(denied());
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let claim = matching
+            .filter(|claim| claim.expires > now)
+            .ok_or_else(denied)?;
+        let registered = ctx.exec_report(GetSessionById {
+            id: session_id.clone(),
+        })?;
+        if registered
+            .as_ref()
+            .and_then(|session| session.agent_id.as_deref())
+            != Some(self.launch_id.as_str())
+        {
+            return Err(denied());
+        }
+        let mut updated = task.as_ref().clone();
+        updated.status = status;
+        ctx.emit_set(&updated)?;
+        ctx.emit_del(claim.as_ref())
     }
 }

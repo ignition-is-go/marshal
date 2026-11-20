@@ -8,9 +8,9 @@ use hyphae::Gettable;
 use marshal_client::host::{ExecutionRequest, ExecutionResult, Harness, HostConnection};
 use marshal_client::{ConnectionStatus, MarshalClient};
 use marshal_entities::{
-    AcceptTaskAssignment, AckMessages, CreateTask, DispatchHarness, DispatchState,
-    GetAllDispatchAttempts, GetAllDispatchHosts, GetAllMessages, GetAllTaskClaims, ListReadyTasks,
-    ReserveTaskDispatch, Session, SessionId, TaskPriority,
+    AcceptTaskAssignment, AckMessages, CompleteTaskAssignment, CreateTask, DispatchHarness,
+    DispatchState, GetAllDispatchAttempts, GetAllDispatchHosts, GetAllMessages, GetAllTaskClaims,
+    GetTaskById, ListReadyTasks, ReserveTaskDispatch, Session, SessionId, TaskPriority, TaskStatus,
 };
 use marshal_server::{
     dispatch::reconcile_once,
@@ -487,7 +487,7 @@ async fn verify_dispatch(managed: bool) {
         states()[0].state,
         DispatchState::Claimed {
             handle: "recovered-worker".into(),
-            session_id: session.id,
+            session_id: session.id.clone(),
             lease_id: recorded[0].lease_id.clone(),
         }
     );
@@ -495,12 +495,52 @@ async fn verify_dispatch(managed: bool) {
     assert_eq!(claims()[0].lease_id, recorded[0].lease_id);
     let active = reserve().execute(command(Some(operator.clone()))).unwrap();
     assert_eq!(active.launch_id, attempt.launch_id);
-    let mut expired = recorded[0].as_ref().clone();
-    expired.expires = 0;
-    command(None).emit_set(&expired).unwrap();
-    let replacement = reserve().execute(command(Some(operator))).unwrap();
-    assert_ne!(replacement.launch_id, attempt.launch_id);
-    assert_eq!(replacement.state, DispatchState::Reserved);
+    if managed {
+        let complete = |session_id| CompleteTaskAssignment {
+            task_id: task_id.clone(),
+            launch_id: attempt.launch_id.clone(),
+            session_id,
+            proof: marshal_entities::assignment_proof(token, &attempt.launch_id),
+            commit: Some("verified-commit".into()),
+        };
+        let status = || {
+            command(None)
+                .exec_report(GetTaskById {
+                    id: task_id.clone(),
+                })
+                .unwrap()
+                .unwrap()
+                .status
+                .clone()
+        };
+        assert!(
+            complete(SessionId("unrelated-session".into()))
+                .execute(command(None))
+                .is_err()
+        );
+        let mut expired = recorded[0].as_ref().clone();
+        expired.expires = 0;
+        command(None).emit_set(&expired).unwrap();
+        assert!(complete(session.id.clone()).execute(command(None)).is_err());
+        assert_eq!(status(), TaskStatus::Open);
+        command(None).emit_set(recorded[0].as_ref()).unwrap();
+        complete(session.id.clone()).execute(command(None)).unwrap();
+        complete(session.id.clone()).execute(command(None)).unwrap();
+        assert!(claims().is_empty());
+        assert_eq!(
+            status(),
+            TaskStatus::Closed {
+                commit: Some("verified-commit".into())
+            }
+        );
+    } else {
+        let mut expired = recorded[0].as_ref().clone();
+        expired.expires = 0;
+        command(None).emit_set(&expired).unwrap();
+        let replacement = reserve().execute(command(Some(operator))).unwrap();
+        assert_ne!(replacement.launch_id, attempt.launch_id);
+        assert_eq!(replacement.state, DispatchState::Reserved);
+    }
     recovery.abort();
     host_server.abort();
     myko_server.abort();

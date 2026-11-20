@@ -11,11 +11,12 @@ use marshal_client::{
     config::{ADDRESS_FILE, config_file_candidates, server_address},
 };
 use marshal_entities::{
-    AcceptTaskAssignment, AddTaskDependency, CoordinationMatches, CreateTask, DispatchAttempt,
-    DispatchHarness, FindCoordination, GetAllDispatchHosts, GetAllSessions, GetAllTaskBlockers,
-    GetAllTaskClaims, GetAllTasks, GetTaskById, ReleaseTaskClaim, RemoveTaskDependency,
-    RenewTaskClaim, ReserveTaskDispatch, SendMessage, SendMessageResult, SessionId, SetTaskStatus,
-    Task, TaskBlockerId, TaskClaim, TaskId, TaskPriority, TaskStatus,
+    AcceptTaskAssignment, AddTaskDependency, CompleteTaskAssignment, CoordinationMatches,
+    CreateTask, DispatchAttempt, DispatchHarness, FindCoordination, GetAllDispatchHosts,
+    GetAllSessions, GetAllTaskBlockers, GetAllTaskClaims, GetAllTasks, GetTaskById,
+    ReleaseTaskClaim, RemoveTaskDependency, RenewTaskClaim, ReserveTaskDispatch, SendMessage,
+    SendMessageResult, SessionId, SetTaskStatus, Task, TaskBlockerId, TaskClaim, TaskId,
+    TaskPriority, TaskStatus,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -294,18 +295,21 @@ async fn list_dependencies(id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn accept_assignment(id: &str) -> Result<()> {
-    let id = uuid::Uuid::parse_str(id)
-        .context("invalid task ID")?
-        .to_string();
+fn launch_session() -> Result<(PathBuf, SessionId)> {
     let join = std::env::var_os("MARSHAL_HOST_JOIN_FILE")
         .context("this session is not running under a Marshal launch")?;
     let join = PathBuf::from(join);
     let session: String =
         serde_json::from_slice(&std::fs::read(&join).context("reading launch session identity")?)?;
     anyhow::ensure!(!session.is_empty(), "launch session has not joined yet");
-    let proof = if let Some(path) = std::env::var_os("MARSHAL_ASSIGNMENT_PROOF_FILE") {
-        Some(std::fs::read_to_string(path).context("reading launch assignment proof")?)
+    Ok((join, SessionId(session.into())))
+}
+
+fn assignment_proof_from_env() -> Result<Option<String>> {
+    if let Some(path) = std::env::var_os("MARSHAL_ASSIGNMENT_PROOF_FILE") {
+        Ok(Some(
+            std::fs::read_to_string(path).context("reading launch assignment proof")?,
+        ))
     } else {
         std::env::var_os("MARSHAL_ASSIGNMENT_PROOF")
             .map(|proof| {
@@ -313,8 +317,16 @@ async fn accept_assignment(id: &str) -> Result<()> {
                     .into_string()
                     .map_err(|_| anyhow::anyhow!("invalid assignment proof"))
             })
-            .transpose()?
-    };
+            .transpose()
+    }
+}
+
+async fn accept_assignment(id: &str) -> Result<()> {
+    let id = uuid::Uuid::parse_str(id)
+        .context("invalid task ID")?
+        .to_string();
+    let (join, session) = launch_session()?;
+    let proof = assignment_proof_from_env()?;
     if let Some(proof) = proof {
         let launch_id =
             marshal_client::hooks::agent_id_from_env().context("missing Marshal launch ID")?;
@@ -322,7 +334,7 @@ async fn accept_assignment(id: &str) -> Result<()> {
         let response = client.send_command::<AcceptTaskAssignment, ()>(&AcceptTaskAssignment {
             task_id: TaskId(id.into()),
             launch_id,
-            session_id: SessionId(session.into()),
+            session_id: session,
             proof,
         });
         await_value(|| response.get())
@@ -408,6 +420,23 @@ async fn release_claim(id: &str, lease: &str) -> Result<()> {
 
 async fn set_task_status(id: &str, status: TaskStatus) -> Result<()> {
     let client = connect().await?;
+    if let TaskStatus::Closed { commit } = &status
+        && let Some(proof) = assignment_proof_from_env()?
+    {
+        let (_, session_id) = launch_session()?;
+        let launch_id =
+            marshal_client::hooks::agent_id_from_env().context("missing Marshal launch ID")?;
+        let response = client.send_command::<CompleteTaskAssignment, ()>(&CompleteTaskAssignment {
+            task_id: TaskId(Arc::from(id)),
+            launch_id,
+            session_id,
+            proof,
+            commit: commit.clone(),
+        });
+        return await_value(|| response.get())
+            .await?
+            .map_err(anyhow::Error::msg);
+    }
     let response = client.send_command::<SetTaskStatus, ()>(&SetTaskStatus {
         id: TaskId(Arc::from(id)),
         status,

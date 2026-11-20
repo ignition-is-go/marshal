@@ -140,7 +140,8 @@ registered the matching launch ID. Offered means the assignment is in that
 session's inbox. Delivered means that session acknowledged the inbox message.
 The launched worker uses `marshal task accept <id>` to submit acceptance
 over Myko. The launch host supplies a proof scoped to the launch, and Marshal
-grants the claim after verifying the task and session.
+grants the claim after verifying the task and session. A worker holding that
+lease can use `marshal task close <id> [commit]` to record completion.
 
 An authenticated operator can list active leases with `marshal task claims`.
 Use its task and lease IDs with `marshal task renew <id> <lease-id>` to extend
