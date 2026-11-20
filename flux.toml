@@ -1,3 +1,9 @@
+[cache.s3]
+endpoint_env = "CARGO_FLUX_S3_ENDPOINT"
+bucket_env = "CARGO_FLUX_S3_BUCKET"
+prefix = "rust/v1/flux"
+timeout_seconds = 600
+
 # cargo-flux configuration. Drives `cargo flux run <task>` across the
 # workspace. Each publishable crate opts into tasks via its own
 # `[package.metadata.flux]` block.
