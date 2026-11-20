@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use hyphae::{Gettable, Materialize};
 use marshal_entities::{
-    AddTaskDependency, ClaimTask, CreateTask, FindCoordination, ListReadyTasks, ReleaseTaskClaim,
-    RemoveTaskDependency, RenewTaskClaim, Session, SessionId, SetTaskStatus, Task, TaskPriority,
-    TaskStatus,
+    AddTaskDependency, ClaimTask, CreateTask, DispatchAttempt, DispatchAttemptId, DispatchHarness,
+    DispatchState, FindCoordination, ListReadyTasks, ReleaseTaskClaim, RemoveTaskDependency,
+    RenewTaskClaim, Session, SessionId, SetTaskStatus, Task, TaskPriority, TaskStatus,
 };
 use myko::command::{CommandContext, CommandHandler};
 use myko::{prelude::EventPublishing as _, request::RequestContext};
@@ -122,6 +122,22 @@ fn creates_valid_tasks_in_the_server_registry() {
         }
         .execute(command("ClaimTask"))
     };
+    let mut dispatch = DispatchAttempt {
+        id: DispatchAttemptId(id.0.clone()),
+        task_id: id.clone(),
+        launch_id: "reserved-launch".into(),
+        host_id: "host".into(),
+        harness: DispatchHarness::Codex,
+        workspace: "session".into(),
+        state: DispatchState::Reserved,
+        created: 1,
+    };
+    command("SeedDispatch").emit_set(&dispatch).unwrap();
+    assert!(claim("worker-1").is_err());
+    dispatch.state = DispatchState::Rejected {
+        reason: "test rejection".into(),
+    };
+    command("SeedDispatch").emit_set(&dispatch).unwrap();
     let first = claim("worker-1").unwrap();
     assert_eq!(claim("worker-1").unwrap().lease_id, first.lease_id);
     assert!(claim("worker-2").is_err());

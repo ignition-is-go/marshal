@@ -37,6 +37,7 @@ pub struct ReleaseTaskClaim {
 #[cfg(not(target_arch = "wasm32"))]
 mod server {
     use super::*;
+    use crate::dispatch_attempt::{DispatchAttemptId, DispatchState, GetDispatchAttemptById};
     use crate::task_dependency::{lock_task_state, ready_tasks, task_error};
     use std::sync::Arc;
 
@@ -45,6 +46,17 @@ mod server {
     impl CommandHandler for ClaimTask {
         fn execute(self, ctx: CommandContext) -> Result<Self::Result, CommandError> {
             let _guard = lock_task_state(&ctx)?;
+            let dispatch = ctx.exec_report(GetDispatchAttemptById {
+                id: DispatchAttemptId(self.task_id.0.clone()),
+            })?;
+            if dispatch.is_some_and(|attempt| {
+                !matches!(
+                    &attempt.state,
+                    DispatchState::Claimed { .. } | DispatchState::Rejected { .. }
+                )
+            }) {
+                return Err(task_error(&ctx, "Task has a dispatch in progress"));
+            }
             claim_ready_task(&ctx, self.task_id, self.session_id)
         }
     }
