@@ -829,7 +829,10 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
                 .as_deref(),
             Some("unrelated-owner")
         );
-        assert_eq!(name_sets.lock().unwrap().as_slice(), [decorated.clone()]);
+        assert_eq!(
+            name_sets.lock().unwrap().as_slice(),
+            std::slice::from_ref(&decorated)
+        );
         tokio::time::sleep(POLL).await;
     }
     bridge.stop();

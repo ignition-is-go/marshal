@@ -1717,7 +1717,11 @@ where
     initialize_app_server(websocket).await?;
     let mut request_id = 100_i64;
     if let Some(launcher) = launcher.as_ref() {
-        launcher.lock().await.connected()?;
+        let mut launcher = launcher.lock().await;
+        launcher.connected()?;
+        if let Some(thread_id) = launcher.state.thread_id.as_deref() {
+            decorations.remove(thread_id);
+        }
     }
     if let Some(path) = ready_file.as_ref() {
         // codex-run deliberately starts its TUI only after this marker, so the
