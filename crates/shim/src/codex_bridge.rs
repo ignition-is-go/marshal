@@ -3727,6 +3727,63 @@ mod tests {
         );
         relay.abort();
     }
+    #[tokio::test]
+    async fn tui_proxy_keeps_the_newest_successful_request_across_reply_order_and_connections() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for cross_proxy in [false, true] {
+                for newer_succeeds in [true, false] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let path = directory.path().join("launcher.json");
+                    let launcher = Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
+                        path.clone(), directory.path().into(), Some("initial-thread".into()),
+                        Some("launch-owner".into()),
+                    )));
+                    let mut connections = Vec::new();
+                    let mut relays = Vec::new();
+                    for _ in 0..2 {
+                        let (tui, downstream) = tokio::io::duplex(4096);
+                        let (upstream, app) = tokio::io::duplex(4096);
+                        connections.push((
+                            WebSocketStream::from_raw_socket(tui, Role::Client, None).await,
+                            WebSocketStream::from_raw_socket(app, Role::Server, None).await,
+                        ));
+                        relays.push(tokio::spawn(relay_tui_websocket(
+                            WebSocketStream::from_raw_socket(downstream, Role::Server, None).await,
+                            WebSocketStream::from_raw_socket(upstream, Role::Client, None).await,
+                            Some(launcher.clone()),
+                        )));
+                    }
+                    let newer_connection = usize::from(cross_proxy);
+                    for (connection, id) in [(0, 10), (newer_connection, 11)] {
+                        connections[connection].0.send(WebSocketMessage::Text(
+                            json!({"id":id,"method":"thread/start","params":{}}).to_string().into(),
+                        )).await.unwrap();
+                        let request = connections[connection].1.next().await.unwrap().unwrap();
+                        assert_eq!(serde_json::from_str::<Value>(request.to_text().unwrap()).unwrap()["id"], id);
+                    }
+                    let newer_reply = if newer_succeeds {
+                        json!({"id":11,"result":{"thread":{"id":"newer-thread"}}})
+                    } else {
+                        json!({"id":11,"error":{"code":-1,"message":"rejected"}})
+                    };
+                    connections[newer_connection].1.send(WebSocketMessage::Text(newer_reply.to_string().into())).await.unwrap();
+                    connections[newer_connection].0.next().await.unwrap().unwrap();
+                    connections[0].1.send(WebSocketMessage::Text(
+                        json!({"id":10,"result":{"thread":{"id":"older-thread"}}}).to_string().into(),
+                    )).await.unwrap();
+                    connections[0].0.next().await.unwrap().unwrap();
+                    let state = read_launcher_state(&path).unwrap();
+                    assert_eq!(state.thread_id.as_deref(), Some("initial-thread"));
+                    assert_eq!(state.recovery_thread_id(), Some(if newer_succeeds { "newer-thread" } else { "older-thread" }), "cross_proxy={cross_proxy}, newer_succeeds={newer_succeeds}");
+                    assert_eq!(launcher.lock().await.registration_binding("initial-thread"), RegistrationBinding::Selected("launch-owner".into()));
+                    for relay in relays { relay.abort(); }
+                }
+            }
+        }).await.expect("bounded out-of-order proxy transcript");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn tui_proxy_relays_plugin_catalog_larger_than_default_frame_limit() {
