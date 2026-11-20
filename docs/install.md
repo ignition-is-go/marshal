@@ -111,7 +111,9 @@ configuration with `marshal-stdio codex-setup` during the upgrade.
 Use `marshal task list [--project <name>]` or `marshal task show <id>` to
 inspect server tasks. Create tasks with `marshal task create "Task title"`. The command groups
 checkouts by their Git origin. Use `--project <name>` to choose a project
-explicitly. `marshal task close <id> [commit]` records completion with optional
+explicitly. Include `--body`, `--priority`, and repeatable `--label` options
+when recreating an existing task. Use `marshal task dep add <id> <blocker-id>`
+to link tasks after both exist. `marshal task close <id> [commit]` records completion with optional
 commit evidence, and `marshal task reopen <id>` reopens the task.
 
 Press `t` in `marshal-tui` to open the task board and use `[` and `]` to

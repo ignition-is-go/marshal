@@ -11,10 +11,11 @@ use marshal_client::{
     config::{ADDRESS_FILE, config_file_candidates, server_address},
 };
 use marshal_entities::{
-    AcceptTaskAssignment, CoordinationMatches, CreateTask, DispatchAttempt, DispatchHarness,
-    FindCoordination, GetAllDispatchHosts, GetAllSessions, GetAllTaskClaims, GetAllTasks,
-    GetTaskById, ReleaseTaskClaim, RenewTaskClaim, ReserveTaskDispatch, SendMessage,
-    SendMessageResult, SessionId, SetTaskStatus, Task, TaskClaim, TaskId, TaskPriority, TaskStatus,
+    AcceptTaskAssignment, AddTaskDependency, CoordinationMatches, CreateTask, DispatchAttempt,
+    DispatchHarness, FindCoordination, GetAllDispatchHosts, GetAllSessions, GetAllTaskBlockers,
+    GetAllTaskClaims, GetAllTasks, GetTaskById, ReleaseTaskClaim, RemoveTaskDependency,
+    RenewTaskClaim, ReserveTaskDispatch, SendMessage, SendMessageResult, SessionId, SetTaskStatus,
+    Task, TaskBlockerId, TaskClaim, TaskId, TaskPriority, TaskStatus,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -28,8 +29,12 @@ const HELP: &str = "Usage: marshal <command>
   find [--project <name>] [query]    Find task owners and idle agents as JSON
   task list [--project <name>]      List tasks as JSON (operator)
   task show <id>                    Show a task as JSON (operator)
-  task create [--project <name>] <title>
+  task create [--project <name>] [--body <text>] [--priority p0|p1|p2|p3]
+              [--label <name>]... <title>
                                      Create a task, defaulting to Git origin
+  task dep add|remove <id> <blocker-id>
+                                     Change a task dependency
+  task dep list <id>                 List dependencies as JSON
   task close <id> [commit]           Close a task with optional commit evidence
   task reopen <id>                   Reopen a task
   task accept <id>                   Accept the current launch's task assignment
@@ -99,13 +104,18 @@ async fn main() -> Result<()> {
         [command, action, id] if command == "task" && action == "show" => {
             show_task(id).await?;
         }
-        [command, action, title] if command == "task" && action == "create" => {
-            create_task(infer_project()?, title).await?;
+        [command, action, options @ ..] if command == "task" && action == "create" => {
+            create_task(options).await?;
         }
-        [command, action, flag, project, title]
-            if command == "task" && action == "create" && flag == "--project" =>
+        [command, group, action, id] if command == "task" && group == "dep" && action == "list" => {
+            list_dependencies(id).await?;
+        }
+        [command, group, action, id, blocker]
+            if command == "task"
+                && group == "dep"
+                && matches!(action.as_str(), "add" | "remove") =>
         {
-            create_task(project.clone(), title).await?;
+            change_dependency(id, blocker, action == "add").await?;
         }
         [command, action, id, tail @ ..]
             if command == "task" && action == "close" && tail.len() <= 1 =>
@@ -201,19 +211,86 @@ async fn show_task(id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn create_task(project: String, title: &str) -> Result<()> {
+async fn create_task(args: &[String]) -> Result<()> {
+    let (title, flags) = args.split_last().context("task create requires a title")?;
+    let (options, remainder) = flags.as_chunks::<2>();
+    anyhow::ensure!(remainder.is_empty(), "each task option requires a value");
+    let mut project = None;
+    let mut body = String::new();
+    let mut priority = TaskPriority::default();
+    let mut labels = Vec::new();
+    for [flag, value] in options {
+        match flag.as_str() {
+            "--project" => project = Some(value.clone()),
+            "--body" => body = value.clone(),
+            "--priority" => {
+                priority = match value.as_str() {
+                    "p0" => TaskPriority::P0,
+                    "p1" => TaskPriority::P1,
+                    "p2" => TaskPriority::P2,
+                    "p3" => TaskPriority::P3,
+                    _ => anyhow::bail!("priority must be p0, p1, p2, or p3"),
+                }
+            }
+            "--label" => labels.push(value.clone()),
+            _ => anyhow::bail!("unknown task option {flag}"),
+        }
+    }
+    let project = match project {
+        Some(project) => project,
+        None => infer_project()?,
+    };
     let client = connect().await?;
     let response = client.send_command::<CreateTask, TaskId>(&CreateTask {
         project,
-        title: title.into(),
-        body: String::new(),
-        priority: TaskPriority::default(),
-        labels: Vec::new(),
+        title: title.clone(),
+        body,
+        priority,
+        labels,
     });
     let id = await_value(|| response.get())
         .await?
         .map_err(anyhow::Error::msg)?;
     println!("{id}");
+    Ok(())
+}
+
+async fn change_dependency(id: &str, blocker: &str, add: bool) -> Result<()> {
+    let client = connect().await?;
+    let task_id = TaskId(Arc::from(id));
+    let blocker_id = TaskId(Arc::from(blocker));
+    let response = if add {
+        client.send_command::<AddTaskDependency, TaskBlockerId>(&AddTaskDependency {
+            task_id,
+            blocker_id,
+        })
+    } else {
+        client.send_command::<RemoveTaskDependency, TaskBlockerId>(&RemoveTaskDependency {
+            task_id,
+            blocker_id,
+        })
+    };
+    let edge = await_value(|| response.get())
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    println!("{edge}");
+    Ok(())
+}
+
+async fn list_dependencies(id: &str) -> Result<()> {
+    let client = connect().await?;
+    let watch = client.watch_query_state::<GetAllTaskBlockers>(GetAllTaskBlockers {});
+    let mut edges = await_value(|| {
+        if let Some(error) = watch.error().get() {
+            Some(Err(anyhow::anyhow!("{error}")))
+        } else {
+            watch.ready().get().then(|| Ok(watch.items().get()))
+        }
+    })
+    .await??;
+    edges.retain(|edge| edge.task_id.0.as_ref() == id);
+    edges.sort_unstable_by(|a, b| a.blocker_id.0.cmp(&b.blocker_id.0));
+    println!("{}", serde_json::to_string_pretty(&edges)?);
     Ok(())
 }
 
