@@ -63,12 +63,16 @@ jobs:
           cache-secret-access-key: ${{ secrets.CI_CACHE_S3_SECRET_ACCESS_KEY || secrets.CI_CACHE_SECRET_KEY }}
       - name: Restore ROSE compiler snapshot
         id: compiler-snapshot
+        continue-on-error: true
         if: env.CI_NATIVE_CACHE_CONFIGURED == 'true'
         uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
         with:
           operation: restore
           scope: check
           plugin: cargo
+      - name: Discard failed ROSE snapshot before a cold build
+        if: steps.compiler-snapshot.outcome == 'failure'
+        run: python3 scripts/ci/clean_failed_restore.py
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
@@ -147,12 +151,16 @@ jobs:
           cache-secret-access-key: ${{ secrets.CI_CACHE_S3_SECRET_ACCESS_KEY || secrets.CI_CACHE_SECRET_KEY }}
       - name: Restore ROSE compiler snapshot
         id: compiler-snapshot
+        continue-on-error: true
         if: env.CI_NATIVE_CACHE_CONFIGURED == 'true'
         uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
         with:
           operation: restore
           scope: browser-auth
           plugin: cargo
+      - name: Discard failed ROSE snapshot before a cold build
+        if: steps.compiler-snapshot.outcome == 'failure'
+        run: python3 scripts/ci/clean_failed_restore.py
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2
         with:
           tool: trunk@0.21.14
@@ -249,12 +257,16 @@ jobs:
           cache-secret-access-key: ${{ secrets.CI_CACHE_S3_SECRET_ACCESS_KEY || secrets.CI_CACHE_SECRET_KEY }}
       - name: Restore ROSE compiler snapshot
         id: compiler-snapshot
+        continue-on-error: true
         if: env.CI_NATIVE_CACHE_CONFIGURED == 'true'
         uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
         with:
           operation: restore
           scope: windows-cross-check
           plugin: cargo
+      - name: Discard failed ROSE snapshot before a cold build
+        if: steps.compiler-snapshot.outcome == 'failure'
+        run: python3 scripts/ci/clean_failed_restore.py
       - name: Install mingw-w64 cross linker
         # Bound apt's network waits (Acquire timeouts + retries) so a flaky
         # azure.archive.ubuntu.com mirror can't hang the job indefinitely —
