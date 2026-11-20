@@ -137,6 +137,12 @@ is a path on the selected host. Repeating the same request returns the same
 reservation and its current state. If a start reply is lost, the server
 inspects the existing launch ID when the host reconnects. The task board shows
 launch progress separately from a worker's claim.
+The host service starts agents. Each running session connects to Myko through
+its own harness integration. Claude channel delivery uses the client ID of that
+session's live `marshal-stdio` connection. Codex uses its session bridge for
+idle delivery. A host connection alone does not register or deliver mail to
+running sessions.
+
 Install the matching Claude or Codex session-start hooks on launch-enabled
 hosts. A launch only moves to Joined when its host reports a session that also
 registered the matching launch ID. Offered means the assignment is in that
