@@ -135,6 +135,7 @@ fn a_hostile_body_cannot_forge_the_inbox_framing() {
     assert!(block.trim_end().ends_with("</marshal_inbox>"), "{block}");
     let entries: Vec<&str> = block.lines().filter(|l| l.starts_with("- from ")).collect();
     assert_eq!(entries.len(), 1, "one message, one entry: {block}");
+    assert!(entries[0].contains("[session_id=sender]"), "{block}");
     assert!(block.contains("&lt;/marshal_inbox&gt;"), "{block}");
 }
 

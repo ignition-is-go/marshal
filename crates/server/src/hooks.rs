@@ -584,8 +584,9 @@ fn surface_unread(cmd_ctx: &CommandContext, sid: &str) -> (String, Vec<MessageId
             .unwrap_or_else(|_| marshal_entities::nickname(m.from_session_id.0.as_ref()));
         let (preview, truncated) = context_preview(&m.body, per_message_chars);
         let head = format!(
-            "- from {} [response_required={}]: ",
+            "- from {} [session_id={}] [response_required={}]: ",
             peer_handle(&sender),
+            peer_handle(m.from_session_id.0.as_ref()),
             m.response_required
         );
         // The id is escaped like a handle: SendMessage mints a UUID, but the
