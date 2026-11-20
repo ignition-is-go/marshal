@@ -82,6 +82,14 @@ For Codex, the launch and its tasks remain bound to the initial conversation.
 If the same TUI successfully starts or resumes another conversation, app-server
 recovery resumes that last confirmed conversation without replaying the original
 prompt. It does not move the launch's tasks to the later conversation.
+On Linux, native managed Codex tmux launches keep a dedicated app-server,
+Marshal bridge, and retained live threads after `/exit` or Ctrl+D closes the
+frontend. The same raw tmux attach command opens a replacement frontend on the
+last confirmed retained thread. It does not replay the original prompt or
+images. Ctrl+C still interrupts the active turn. `marshal-launch stop` ends the
+owned runtime. An ordinary `codex-run` outside a validated managed tmux pane
+keeps its existing exit cleanup. This runtime lifetime does not survive a host
+reboot or continue tools owned by an exited frontend.
 Marshal records the first task's stable message ID before sending it to
 the exact joined session. If a restart interrupts that send, Marshal
 recovers the task state from any surviving message or inbox receipt.
