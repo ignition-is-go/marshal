@@ -32,6 +32,11 @@
 //! backend with no control socket, so there is nowhere safe for a peer process
 //! to send `turn/start`; it retains hook-boundary inbox delivery.
 
+mod keeper;
+#[cfg(target_os = "linux")]
+mod managed;
+use keeper::ThreadKeepers;
+
 use std::net::{TcpListener, TcpStream};
 use std::{
     collections::{HashMap, HashSet},
@@ -253,6 +258,9 @@ struct BridgeArgs {
     launcher_thread_id: Option<String>,
     tui_proxy: Option<AppServerEndpoint>,
     launcher_stdin: bool,
+    keep_threads: bool,
+    #[cfg(target_os = "linux")]
+    _owned_groups: Vec<managed::OwnedGroup>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -263,6 +271,8 @@ struct LauncherState {
     thread_id: Option<String>,
     #[serde(default)]
     active_thread_id: Option<String>,
+    #[serde(default)]
+    kept_threads: HashSet<String>,
 }
 
 impl LauncherState {
@@ -280,6 +290,7 @@ struct LauncherStateWriter {
     launch_id: Option<String>,
     selection_sequence: u64,
     confirmed_sequence: u64,
+    keepers: Option<Arc<ThreadKeepers>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -304,6 +315,7 @@ impl LauncherStateWriter {
             launch_id,
             selection_sequence: 0,
             confirmed_sequence: 0,
+            keepers: None,
             state: LauncherState {
                 thread_id,
                 ..LauncherState::default()
@@ -426,9 +438,29 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
         crate::codex_setup::check_launch_wiring(&daemon, &hook_base)
             .context("Codex launch requires working Marshal inbox wiring")?;
     }
-    let mut app_server = match launch_app_server(codex) {
+    #[cfg(target_os = "linux")]
+    let managed = managed::ManagedContext::discover()?;
+    #[cfg(not(target_os = "linux"))]
+    let managed: Option<()> = None;
+    let mut app_server = match if managed.is_some() {
+        launch_isolated_app_server(codex)
+    } else {
+        launch_app_server(codex)
+    } {
         Ok(app_server) => app_server,
         Err(error) => return run_native_codex(codex, args, &error),
+    };
+    #[cfg(target_os = "linux")]
+    let server_guard = if managed.is_some() {
+        Some(managed::OwnedGroup::capture(
+            app_server
+                .child
+                .as_ref()
+                .context("managed server is not owned")?
+                .id(),
+        )?)
+    } else {
+        None
     };
     let ready_file = std::env::temp_dir().join(format!(
         "marshal-codex-bridge-{}.ready",
@@ -452,6 +484,16 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
         bridge_args.push(thread_id);
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(server_guard) = server_guard.as_ref() {
+        bridge_args.extend([
+            "--keep-threads".to_owned(),
+            "--owned-group".to_owned(),
+            server_guard.argument(),
+            "--owned-group".to_owned(),
+            managed::OwnedGroup::identity(std::process::id())?,
+        ]);
+    }
     let this = std::env::current_exe().context("locating marshal-shim executable")?;
     let mut bridge_command = Command::new(this);
     bridge_command
@@ -468,6 +510,11 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
         .stdin(Stdio::from(std::os::fd::OwnedFd::from(bridge_stdin)));
     #[cfg(not(unix))]
     bridge_command.stdin(Stdio::null());
+    #[cfg(target_os = "linux")]
+    if managed.is_some() {
+        managed::process_group(&mut bridge_command);
+        bridge_command.env_remove("MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE");
+    }
     let bridge = bridge_command
         .spawn()
         .context("starting Codex live-delivery bridge");
@@ -490,36 +537,74 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
     }
 
     let mut tui_args = args.to_vec();
-    let status = loop {
-        let launch_generation = read_launcher_state(&launcher_state_file)
-            .map(|state| state.generation)
-            .unwrap_or_default();
-        let mut command = codex_tui_command(codex, &app_server.remote, &tui_args, &cwd);
-        let status = command
-            .status()
-            .with_context(|| format!("running `{codex} --remote {}`", app_server.remote))?;
+    let result = (|| -> Result<std::process::ExitStatus> {
+        let status = loop {
+            let launch_generation = read_launcher_state(&launcher_state_file)
+                .map(|state| state.generation)
+                .unwrap_or_default();
+            let mut command = codex_tui_command(codex, &app_server.remote, &tui_args, &cwd);
+            #[cfg(target_os = "linux")]
+            let status = if managed.is_some() {
+                let mut frontend = command.spawn().context("starting managed Codex frontend")?;
+                managed::wait_frontend(&mut frontend, &mut bridge)?
+            } else {
+                command
+                    .status()
+                    .with_context(|| format!("running `{codex} --remote {}`", app_server.remote))?
+            };
+            #[cfg(not(target_os = "linux"))]
+            let status = command
+                .status()
+                .with_context(|| format!("running `{codex} --remote {}`", app_server.remote))?;
+            #[cfg(target_os = "linux")]
+            if let Some(context) = managed.as_ref() {
+                context.detach()?;
+                managed::wait_attachment(
+                    context,
+                    &mut bridge,
+                    app_server
+                        .child
+                        .as_mut()
+                        .context("managed server missing")?,
+                )?;
+                tui_args = read_launcher_state(&launcher_state_file)
+                    .and_then(|state| {
+                        state
+                            .recovery_thread_id()
+                            .filter(|id| state.kept_threads.contains(*id))
+                            .map(str::to_owned)
+                    })
+                    .map(|id| codex_resume_args(args, &id))
+                    .unwrap_or_else(|| codex_fresh_args(args));
+                continue;
+            }
 
-        let current = read_launcher_state(&launcher_state_file);
-        let already_reconnected = current
-            .as_ref()
-            .is_some_and(|state| state.generation > launch_generation && state.connected);
-        let recovered = if already_reconnected {
-            current
-        } else if status.success() {
-            None
-        } else {
-            wait_for_app_server_recovery(&mut bridge, &launcher_state_file, launch_generation)?
+            let current = read_launcher_state(&launcher_state_file);
+            let already_reconnected = current
+                .as_ref()
+                .is_some_and(|state| state.generation > launch_generation && state.connected);
+            let recovered = if already_reconnected {
+                current
+            } else if status.success() {
+                None
+            } else {
+                wait_for_app_server_recovery(&mut bridge, &launcher_state_file, launch_generation)?
+            };
+
+            let Some(thread_id) = recovered
+                .as_ref()
+                .and_then(LauncherState::recovery_thread_id)
+            else {
+                break status;
+            };
+            eprintln!(
+                "Codex app-server restarted; reconnecting and resuming thread {thread_id} ..."
+            );
+            tui_args = codex_resume_args(args, thread_id);
         };
 
-        let Some(thread_id) = recovered
-            .as_ref()
-            .and_then(LauncherState::recovery_thread_id)
-        else {
-            break status;
-        };
-        eprintln!("Codex app-server restarted; reconnecting and resuming thread {thread_id} ...");
-        tui_args = codex_resume_args(args, thread_id);
-    };
+        Ok(status)
+    })();
 
     // The bridge is scoped to this interactive launcher. Multiple launchers may
     // coexist; Unix bridges elect one wake leader for their shared app-server,
@@ -529,8 +614,11 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
     let _ = fs::remove_file(&ready_file);
     let _ = fs::remove_file(&launcher_state_file);
     cleanup_proxy(&app_server);
+    #[cfg(target_os = "linux")]
+    drop(server_guard);
     stop_owned_app_server(&mut app_server);
 
+    let status = result?;
     if !status.success() {
         anyhow::bail!("Codex exited with {status}");
     }
@@ -585,6 +673,13 @@ fn codex_tui_command(codex: &str, remote: &str, args: &[String], cwd: &Path) -> 
 }
 
 fn codex_resume_args(original: &[String], thread_id: &str) -> Vec<String> {
+    let mut recovered = codex_fresh_args(original);
+    recovered.push("resume".to_string());
+    recovered.push(thread_id.to_string());
+    recovered
+}
+
+fn codex_fresh_args(original: &[String]) -> Vec<String> {
     const VALUE_OPTIONS: &[&str] = &[
         "-c",
         "--config",
@@ -641,8 +736,6 @@ fn codex_resume_args(original: &[String], thread_id: &str) -> Vec<String> {
         }
         index += 1;
     }
-    recovered.push("resume".to_string());
-    recovered.push(thread_id.to_string());
     recovered
 }
 
@@ -912,7 +1005,13 @@ where
     Downstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     Upstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let keepers = if let Some(launcher) = &launcher {
+        launcher.lock().await.keepers.clone()
+    } else {
+        None
+    };
     let mut pending_selections = Vec::new();
+    let mut pending_turns = Vec::new();
     loop {
         tokio::select! {
             message = downstream.next() => {
@@ -920,50 +1019,67 @@ where
                 if let WebSocketMessage::Text(text) = &message
                     && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
                     && let Some(id) = value.get("id")
-                    && let Some(launcher) = launcher.as_ref()
                 {
-                    let resumed = resumed_thread_id(&value);
-                    if resumed.is_some() || value.get("method").and_then(Value::as_str) == Some("thread/start") {
-                        let mut writer = launcher.lock().await;
-                        let sequence = writer.selection_requested()?;
-                        if let Some(thread_id) = resumed {
-                            writer.selected(thread_id)?;
+                    let method = value.get("method").and_then(Value::as_str);
+                    if method == Some("turn/start") && keepers.is_some()
+                        && let Some(thread_id) = value.pointer("/params/threadId").and_then(Value::as_str)
+                    {
+                        pending_turns.push((id.clone(), thread_id.to_owned()));
+                    }
+                    if let Some(launcher) = launcher.as_ref() {
+                        let resumed = resumed_thread_id(&value);
+                        if resumed.is_some() || method == Some("thread/start") {
+                            let mut writer = launcher.lock().await;
+                            let sequence = writer.selection_requested()?;
+                            if let Some(thread_id) = resumed { writer.selected(thread_id)?; }
+                            pending_selections.push((id.clone(), resumed.map(str::to_owned), sequence));
                         }
-                        pending_selections.push((id.clone(), resumed.map(str::to_string), sequence));
                     }
                 }
                 let closed = matches!(message, WebSocketMessage::Close(_));
                 upstream.send(message).await.context("forwarding TUI request to app-server")?;
-                if closed {
-                    return Ok(());
-                }
+                if closed { return Ok(()); }
             }
             message = upstream.next() => {
                 let message = message.context("Codex app-server closed TUI proxy connection")??;
                 if let WebSocketMessage::Text(text) = &message
                     && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
                     && let Some(id) = value.get("id")
-                    && let Some(position) = pending_selections
-                        .iter()
-                        .position(|(pending, _, _)| pending == id)
                 {
-                    let (_, expected_thread, sequence) = pending_selections.swap_remove(position);
-                    if value.get("error").is_none()
-                        && let Some(thread_id) = value
-                        .pointer("/result/thread/id")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.is_empty())
-                        && expected_thread.as_deref().is_none_or(|expected| expected == thread_id)
-                        && let Some(launcher) = launcher.as_ref()
-                    {
-                        launcher.lock().await.confirmed_selection(thread_id, sequence)?;
+                    if let Some(position) = pending_turns.iter().position(|(pending, _)| pending == id) {
+                        let (_, thread_id) = pending_turns.swap_remove(position);
+                        if value.get("error").is_none() && let Some(keepers) = &keepers {
+                            keepers.retain(&thread_id).await?;
+                            if let Some(launcher) = &launcher {
+                                let mut writer = launcher.lock().await;
+                                writer.state.kept_threads.insert(thread_id);
+                                writer.persist()?;
+                            }
+                        }
+                    }
+                    if let Some(position) = pending_selections.iter().position(|(pending, _, _)| pending == id) {
+                        let (_, expected_thread, sequence) = pending_selections.swap_remove(position);
+                        if value.get("error").is_none()
+                            && let Some(thread_id) = value.pointer("/result/thread/id").and_then(Value::as_str).filter(|id| !id.is_empty())
+                            && expected_thread.as_deref().is_none_or(|expected| expected == thread_id)
+                            && let Some(launcher) = launcher.as_ref()
+                        {
+                            if let Some(keepers) = &keepers {
+                                if expected_thread.is_some() {
+                                    keepers.retain(thread_id).await?;
+                                } else {
+                                    keepers.pending(thread_id).await;
+                                }
+                            }
+                            let mut writer = launcher.lock().await;
+                            if keepers.is_some() && expected_thread.is_some() { writer.state.kept_threads.insert(thread_id.to_owned()); }
+                            writer.confirmed_selection(thread_id, sequence)?;
+                        }
                     }
                 }
                 let closed = matches!(message, WebSocketMessage::Close(_));
                 downstream.send(message).await.context("forwarding app-server event to TUI")?;
-                if closed {
-                    return Ok(());
-                }
+                if closed { return Ok(()); }
             }
         }
     }
@@ -1166,7 +1282,10 @@ fn managed_daemon_version_is_behind(encoded: &[u8]) -> bool {
 
 fn launch_isolated_app_server(codex: &str) -> Result<LaunchedAppServer> {
     let endpoint = ephemeral_loopback_endpoint()?;
-    let mut child = codex_child(codex)
+    let mut command = codex_child(codex);
+    #[cfg(target_os = "linux")]
+    managed::process_group(&mut command);
+    let mut child = command
         .args(["app-server", "--listen", &endpoint])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1249,6 +1368,12 @@ pub async fn run(args: &[String]) -> Result<()> {
                 launch_id_from_env(),
             )))
         });
+    let keepers = args
+        .keep_threads
+        .then(|| Arc::new(ThreadKeepers::new(args.app_server.clone())));
+    if let (Some(launcher), Some(keepers)) = (&launcher, &keepers) {
+        launcher.lock().await.keepers = Some(keepers.clone());
+    }
     let mut proxy_task = spawn_tui_proxy(
         args.tui_proxy.clone(),
         args.app_server.clone(),
@@ -1259,7 +1384,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         args.app_server.clone(),
         hook_base,
         args.ready_file.clone(),
-        launcher,
+        launcher.clone(),
     ));
     let client = Arc::new(MykoClient::new());
     let sessions = client.watch_query::<GetAllSessions>(GetAllSessions {});
@@ -1298,6 +1423,9 @@ pub async fn run(args: &[String]) -> Result<()> {
             _ = &mut launcher_exit => break,
         }
 
+        if let Some(keepers) = &keepers {
+            keepers.check().await?;
+        }
         let now = Instant::now();
         match wake_leadership.ready(now) {
             Ok(true) => {}
@@ -1326,6 +1454,14 @@ pub async fn run(args: &[String]) -> Result<()> {
 
             match start_thread(&args.app_server, &session_id).await {
                 Ok(turn_id) => {
+                    if let Some(keepers) = &keepers {
+                        keepers.retain(session_id.0.as_ref()).await?;
+                        if let Some(launcher) = &launcher {
+                            let mut writer = launcher.lock().await;
+                            writer.state.kept_threads.insert(session_id.0.to_string());
+                            writer.persist()?;
+                        }
+                    }
                     log::info!("[codex-bridge] woke thread={} turn={turn_id}", session_id.0);
                     cooldowns.insert(session_id, now + WAKE_COALESCE_WINDOW);
                 }
@@ -1403,6 +1539,9 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
     let mut proxy_socket = None;
     let mut proxy_endpoint = None;
     let mut launcher_stdin = false;
+    let mut keep_threads = false;
+    #[cfg(target_os = "linux")]
+    let mut owned_groups = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -1442,6 +1581,12 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
             "--proxy-endpoint" => {
                 proxy_endpoint = Some(required_value(&mut it, "--proxy-endpoint")?);
             }
+            "--keep-threads" => keep_threads = true,
+            #[cfg(target_os = "linux")]
+            "--owned-group" => owned_groups.push(managed::OwnedGroup::parse(&required_value(
+                &mut it,
+                "--owned-group",
+            )?)?),
             #[cfg(unix)]
             "--launcher-stdin" => launcher_stdin = true,
             "-h" | "--help" => {
@@ -1511,6 +1656,9 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
         launcher_thread_id,
         tui_proxy,
         launcher_stdin,
+        keep_threads,
+        #[cfg(target_os = "linux")]
+        _owned_groups: owned_groups,
     })
 }
 
@@ -2652,6 +2800,7 @@ mod tests {
                 connected: true,
                 thread_id: Some("owned-thread".into()),
                 active_thread_id: None,
+                kept_threads: HashSet::new(),
             })
         );
     }

@@ -41,6 +41,7 @@ tokio-tungstenite = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+tmux-session = { version = "=0.1.2", default-features = false, features = ["blocking"] }
 
 # Used by session_discovery.rs's #[cfg(windows)] parent-process lookup
 # (toolhelp snapshot for parent PID, GetProcessTimes for start time).
