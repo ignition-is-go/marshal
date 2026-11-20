@@ -5,12 +5,6 @@
 //! contract"): `marshal-launch-ssh <verb>` reads one JSON object on stdin and
 //! writes one on stdout. Anything on stderr is shown to the user.
 //!
-//! Target operations run one `bash -l -s` on the target, with a script this module
-//! writes on its stdin. Values reach the script single-quoted, never through
-//! the ssh command line, so nothing in a request is parsed by a remote shell.
-//! The script reports back in `@@<key> <value>` lines, which [`Probe::parse`]
-//! reads; anything else on stdout (a chatty login profile) is ignored.
-//!
 //! Options (after `--` on the `marshal-launch` command line):
 //! `--host <ssh destination>`, required.
 //!
@@ -24,7 +18,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use marshal_launch::address::{host_port, is_loopback_host};
 use marshal_launch::external::{DAEMON_CREDENTIAL_ENV, run_bounded};
 use marshal_launch::tmux::session_key;
-use marshal_launch::{LaunchRequest, Launched, PROTOCOL_VERSION, check_shim_version};
+use marshal_launch::{
+    LaunchBackend, LaunchRequest, Launched, PROTOCOL_VERSION, StopReceipt, check_shim_version,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -64,7 +60,7 @@ pub fn run(verb: &str, input: &str) -> Result<Value> {
         "inspect" => {
             let req = parse_launch_request(input)?;
             let target = Target::from_request(&req)?;
-            let launched = inspect(&target)?;
+            let launched = inspect(&target, &req)?;
             Ok(json!({"version": PROTOCOL_VERSION, "launched": launched}))
         }
         "launch" => {
@@ -119,7 +115,7 @@ pub struct Target {
     pub daemon: HostPort,
     pub hook: HostPort,
     /// `--oauth-token-file`: a file on the target holding Claude's long-lived
-    /// token. The agent's shell reads it there into CLAUDE_CODE_OAUTH_TOKEN,
+    /// token. `target_worker` reads it there into CLAUDE_CODE_OAUTH_TOKEN,
     /// so the token never leaves the target or enters a request or log.
     pub token_file: Option<String>,
 }
@@ -932,128 +928,153 @@ impl Probe {
     }
 }
 
-/// The `launch` script: start `argv` in a detached tmux session, in `cwd`,
-/// with `env` exported, through a login shell so PATH is the target's own.
-/// Adds nothing to `argv`.
-pub fn launch_script(t: &Target, req: &LaunchRequest) -> String {
-    let mut inner = format!(
-        "unset MARSHAL_AGENT_ID MARSHAL_LAUNCH_ID {}\n",
-        DAEMON_CREDENTIAL_ENV.join(" ")
+const TARGET_RESPONSE: &str = "@@marshal-target ";
+
+/// Run a request in the installed target helper, before any agent starts.
+pub fn run_target(verb: &str, input: &str) -> Result<Value> {
+    let request: Value = serde_json::from_str(input).context("reading target request")?;
+    anyhow::ensure!(
+        request["helper_version"].as_str() == Some(VERSION),
+        "incompatible target helper; install marshal-launch-ssh {VERSION} on this host"
     );
-    for (k, v) in req
-        .env
-        .iter()
-        .filter(|(key, _)| !DAEMON_CREDENTIAL_ENV.contains(&key.as_str()))
-    {
-        inner.push_str(&format!("export {k}={}\n", sq(v)));
+    let backend = marshal_launch::tmux::Tmux::new("tmux");
+    let mut response = match verb {
+        "check" | "launch" | "inspect" => {
+            let mut req = parse_launch_request(input)?;
+            let target = Target::from_request(&req)?;
+            req.options.clear();
+            req.env
+                .insert("MARSHAL_HOST".into(), marshal_launch::tmux::this_host());
+            match target.token_file {
+                Some(file) if verb == "launch" && backend.recover(&req)?.is_none() => {
+                    let metadata = std::fs::metadata(&file)
+                        .with_context(|| format!("no readable, non-empty token file at {file}"))?;
+                    anyhow::ensure!(
+                        metadata.is_file() && metadata.len() > 0,
+                        "no readable, non-empty token file at {file}"
+                    );
+                    std::fs::File::open(&file)
+                        .with_context(|| format!("no readable, non-empty token file at {file}"))?;
+                    let mut argv = vec![
+                        std::env::current_exe()?.display().to_string(),
+                        "--target-worker".into(),
+                        file,
+                        "--".into(),
+                    ];
+                    argv.extend(req.argv);
+                    req.argv = argv;
+                }
+                _ => {}
+            }
+            match verb {
+                "check" => {
+                    backend.check(&req)?;
+                    json!({})
+                }
+                "launch" => serde_json::to_value(backend.launch(&req)?)?,
+                _ => json!({"launched": backend.recover(&req)?}),
+            }
+        }
+        "status" | "stop" => {
+            let req: HandleRequest = serde_json::from_value(request)?;
+            check_version(req.version)?;
+            if verb == "status" {
+                json!({"running": backend.status(&req.handle)?.context("target could not determine agent status")?})
+            } else {
+                json!({"state": match backend.stop(&req.handle)? { StopReceipt::Stopped => "stopped", StopReceipt::Gone => "gone" }})
+            }
+        }
+        _ => bail!("unknown target verb {verb}"),
+    };
+    response["version"] = json!(PROTOCOL_VERSION);
+    response["helper_version"] = json!(VERSION);
+    if matches!(verb, "launch" | "inspect") {
+        response["tmux_path"] = json!(std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join("tmux"))
+                .find(|path| path.is_file())
+        }));
+        let mut uname = Command::new("uname");
+        uname.arg("-s");
+        let os = run_bounded(uname, Vec::new(), Duration::from_secs(2))
+            .context("reading target operating system")?;
+        response["os"] = json!(String::from_utf8_lossy(&os.stdout).trim());
     }
-    // Read on the target when the agent starts: the script, the tmux command
-    // and the request carry only the path.
-    if let Some(f) = &t.token_file {
-        inner.push_str(&format!(
-            "CLAUDE_CODE_OAUTH_TOKEN=$(cat {}) || exit 1\nexport CLAUDE_CODE_OAUTH_TOKEN\n",
-            sq(f)
-        ));
-    }
-    inner.push_str("exec");
-    for a in &req.argv {
-        inner.push(' ');
-        inner.push_str(&sq(a));
-    }
-    inner.push('\n');
-    let mut s = format!(
-        "name={}\ncwd={}\ninner={}\ntoken_file={}\n",
-        sq(&t.key),
-        sq(&req.cwd),
-        sq(&inner),
-        sq(t.token_file.as_deref().unwrap_or(""))
-    );
-    s.push_str(LOGIN);
-    s.push_str(PRELUDE);
-    s.push_str(TMUX_SESSION);
-    s.push_str(
-        r#"if locate_session; then
-  report_session
-  exit $?
-else
-  rc=$?
-  [ "$rc" -eq 1 ] || exit "$rc"
-fi
-h=$(uname -n)
-cd "$cwd" 2>/dev/null || { echo "$h has no folder $cwd" >&2; exit 1; }
-cwd=$(pwd -P)
-case "$cwd" in *$'\n'*|*$'\r'*) echo "the resolved target directory contains a line break" >&2; exit 1 ;; esac
-if [ -n "$token_file" ] && ! { [ -r "$token_file" ] && [ -s "$token_file" ]; }; then
-  echo "$h has no readable, non-empty token file at $token_file" >&2; exit 1
-fi
-inner="export PATH=$(q "$PATH")
-$inner"
-tmux new-session -d -s "$name" -c "$cwd" \
-    -e "MARSHAL_LAUNCH_KEY=$name" -e "MARSHAL_LAUNCH_CWD=$cwd" -e "MARSHAL_LAUNCH_HOST=$h" \
-    bash -lc "$inner" || exit 1
-report_values "$h" "$cwd"
-"#,
-    );
-    s
+    Ok(response)
 }
 
-const TMUX_SESSION: &str = r#"locate_session() {
-  listing=$(LC_ALL=C tmux list-sessions -F '#{session_id} #{session_name}' 2>&1) || {
-    case "$listing" in
-      'no server running on '*|'error connecting to '*' (No such file or directory)') return 1 ;;
-      *) echo "$listing" >&2; return 2 ;;
-    esac
-  }
-  session_id=$(printf '%s\n' "$listing" | awk -v name="$name" 'substr($0, length($1) + 2) == name { print $1 }')
-  [ -n "$session_id" ] || return 1
-  marker=$(tmux show-environment -t "$session_id" MARSHAL_LAUNCH_KEY) || return 2
-  if [ "$marker" != "MARSHAL_LAUNCH_KEY=$name" ]; then
-    echo "tmux session $name does not identify this launch" >&2
-    return 2
-  fi
+/// Read a target-local credential only inside the agent process.
+#[cfg(unix)]
+pub fn target_worker(args: &[String]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let [file, separator, program, argv @ ..] = args else {
+        bail!("invalid target worker arguments");
+    };
+    anyhow::ensure!(separator == "--", "invalid target worker separator");
+    let token = std::fs::read_to_string(file).context("reading target-local token file")?;
+    let mut command = Command::new(program);
+    command
+        .args(argv)
+        .env("CLAUDE_CODE_OAUTH_TOKEN", token.trim_end_matches('\n'));
+    for key in DAEMON_CREDENTIAL_ENV {
+        command.env_remove(key);
+    }
+    Err(command.exec()).context("executing target agent")
 }
-report_values() {
-  say "host $1"
-  say "os $(uname -s)"
-  say "tmux-path $(command -v tmux)"
-  say "cwd $2"
-  say "done"
-}
-report_session() {
-  location=$(tmux show-environment -t "$session_id" MARSHAL_LAUNCH_CWD) || return 2
-  launch_host=$(tmux show-environment -t "$session_id" MARSHAL_LAUNCH_HOST) || return 2
-  report_values "${launch_host#MARSHAL_LAUNCH_HOST=}" "${location#MARSHAL_LAUNCH_CWD=}"
-}
-"#;
 
-fn session_script(name: &str, action: &str, absent: &str) -> String {
-    format!(
-        "name={}\n{LOGIN}{TMUX_SESSION}if locate_session; then\n{action}\nelse\n  rc=$?\n  [ \"$rc\" -eq 1 ] || exit \"$rc\"\n{absent}\nfi\n",
-        sq(name)
+#[cfg(not(unix))]
+pub fn target_worker(_: &[String]) -> Result<()> {
+    bail!("target workers require Unix")
+}
+
+fn remote_target(dest: &str, verb: &str, mut request: Value) -> Result<Value> {
+    if let Some(environment) = request.get_mut("env").and_then(Value::as_object_mut) {
+        environment.retain(|key, _| !DAEMON_CREDENTIAL_ENV.contains(&key.as_str()));
+    }
+    let helper =
+        std::env::var("MARSHAL_LAUNCH_SSH_HELPER").unwrap_or_else(|_| "marshal-launch-ssh".into());
+    anyhow::ensure!(
+        helper == "marshal-launch-ssh" || helper.starts_with('/'),
+        "MARSHAL_LAUNCH_SSH_HELPER must name an absolute target path"
+    );
+    let script = format!("{LOGIN}exec {} --target {}", sq(&helper), sq(verb));
+    let remote_command = format!("bash -lc {}", sq(&script));
+    let command = ssh_command(dest, &remote_command)?;
+    request["helper_version"] = json!(VERSION);
+    let output = run_bounded(
+        command,
+        serde_json::to_vec(&request)?,
+        Duration::from_secs(15),
     )
-}
-
-pub fn stop_script(name: &str) -> String {
-    session_script(
-        name,
-        r##"  result=$(tmux if-shell -F -t "$session_id" "#{==:#{MARSHAL_LAUNCH_KEY},$name}" \
-    "kill-session -t '$session_id' ; display-message -p marshal-stopped" \
-    'display-message -p marshal-mismatch') || exit 2
-  if [ "$result" != marshal-stopped ]; then
-    echo "tmux did not confirm stopping $name" >&2
-    exit 2
-  fi
-  say "stop stopped""##,
-        r#"  say "stop gone""#,
-    )
-}
-
-pub fn status_script(name: &str) -> String {
-    session_script(name, r#"  say "running true""#, r#"  say "running false""#)
-}
-
-fn inspect_script(name: &str) -> String {
-    session_script(name, "  report_session", r#"  say "running false""#)
+    .with_context(|| format!("calling target helper on {dest}"))?;
+    anyhow::ensure!(
+        output.status.code() != Some(255),
+        "ssh to {dest} did not return a result: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    anyhow::ensure!(
+        output.status.success(),
+        "target helper on {dest} failed; install marshal-launch-ssh {VERSION} on the target (no fallback): {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let stdout =
+        String::from_utf8(output.stdout).context("target helper returned invalid UTF-8")?;
+    let mut replies = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix(TARGET_RESPONSE));
+    let reply = replies.next().context(
+        "target helper did not return a response; install the matching marshal-launch-ssh",
+    )?;
+    anyhow::ensure!(
+        replies.next().is_none(),
+        "target helper returned multiple responses"
+    );
+    let reply: Value = serde_json::from_str(reply).context("reading target helper response")?;
+    anyhow::ensure!(
+        reply["version"] == PROTOCOL_VERSION && reply["helper_version"] == VERSION,
+        "target helper version mismatch; install marshal-launch-ssh {VERSION} on {dest}"
+    );
+    Ok(reply)
 }
 
 /// What a handle names: `<destination> <session>`, both single words.
@@ -1084,10 +1105,7 @@ pub fn parse_handle(h: &str) -> Result<Handle> {
     })
 }
 
-/// Run `script` with `bash -l -s` on `dest`. stderr passes through to the
-/// user; stdout is returned. Fails if ssh can't reach `dest` (exit 255) or the
-/// script exits nonzero.
-pub fn remote(dest: &str, script: &str) -> Result<String> {
+fn ssh_command(dest: &str, remote_command: &str) -> Result<Command> {
     let ssh = std::env::var("MARSHAL_LAUNCH_SSH").unwrap_or_else(|_| "ssh".to_string());
     let mut words = ssh.split_whitespace();
     let prog = words
@@ -1105,8 +1123,16 @@ pub fn remote(dest: &str, script: &str) -> Result<String> {
         "ServerAliveCountMax=2",
         "--",
         dest,
-        "bash -l -s",
+        remote_command,
     ]);
+    for key in DAEMON_CREDENTIAL_ENV {
+        command.env_remove(key);
+    }
+    Ok(command)
+}
+
+pub fn remote(dest: &str, script: &str) -> Result<String> {
+    let command = ssh_command(dest, "bash -l -s")?;
     let out = run_bounded(command, script.as_bytes().to_vec(), Duration::from_secs(15))
         .with_context(|| format!("running remote command on {dest}"))?;
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1126,6 +1152,7 @@ pub fn check(t: &Target, req: &LaunchRequest) -> Result<()> {
     let out = remote(&t.dest, &check_script(t, req))?;
     let failures = Probe::parse(&out).failures(t, req);
     if failures.is_empty() {
+        remote_target(&t.dest, "check", serde_json::to_value(req)?)?;
         return Ok(());
     }
     let mut msg = format!("{} can't run this launch:", t.dest);
@@ -1145,36 +1172,35 @@ pub const MACOS_NOTE: &str = "note: on macOS, Local Network privacy can silently
      docs/agent-launcher.md";
 
 pub fn launch(t: &Target, req: &LaunchRequest) -> Result<Launched> {
-    let out = remote(&t.dest, &launch_script(t, req))?;
-    let probe = Probe::parse(&out);
-    if probe.os.as_deref() == Some("Darwin") {
+    let response = remote_target(&t.dest, "launch", serde_json::to_value(req)?)?;
+    if response["os"] == "Darwin" {
         eprintln!("{MACOS_NOTE}");
     }
-    observation(t, probe)
+    remote_observation(t, &response, response.clone())
 }
 
-fn inspect(t: &Target) -> Result<Option<Launched>> {
-    let out = remote(&t.dest, &inspect_script(&t.key))?;
-    if receipt(&out, "@@running ") == Some("false") {
+fn inspect(t: &Target, req: &LaunchRequest) -> Result<Option<Launched>> {
+    let response = remote_target(&t.dest, "inspect", serde_json::to_value(req)?)?;
+    if response["launched"].is_null() {
         return Ok(None);
     }
-    observation(t, Probe::parse(&out)).map(Some)
+    remote_observation(t, &response, response["launched"].clone()).map(Some)
 }
 
-fn observation(t: &Target, p: Probe) -> Result<Launched> {
-    let (Some(host), Some(cwd), true) = (p.host, p.cwd, p.done) else {
-        bail!(
-            "the script on {} did not report the launch location",
-            t.dest
-        );
-    };
-    Ok(Launched {
-        handle: t.handle().to_string(),
-        r#where: format!("{host} tmux:{}", t.name),
-        attach: Some(attach_command(&t.dest, p.tmux_path.as_deref(), &t.key)),
-        host,
-        cwd,
-    })
+fn remote_observation(t: &Target, response: &Value, value: Value) -> Result<Launched> {
+    let mut launched: Launched =
+        serde_json::from_value(value).context("reading target launch location")?;
+    anyhow::ensure!(
+        launched.handle == t.key,
+        "target helper returned a different launch handle"
+    );
+    launched.handle = t.handle().to_string();
+    launched.attach = Some(attach_command(
+        &t.dest,
+        response["tmux_path"].as_str(),
+        &t.key,
+    ));
+    Ok(launched)
 }
 
 /// The command a user runs to watch the agent. ssh runs it in the target's
@@ -1191,27 +1217,27 @@ pub fn attach_command(dest: &str, tmux_path: Option<&str>, name: &str) -> String
 }
 
 pub fn stop(h: &Handle) -> Result<&'static str> {
-    let out = remote(&h.dest, &stop_script(&h.name))?;
-    match receipt(&out, "@@stop ") {
+    let response = remote_target(
+        &h.dest,
+        "stop",
+        json!({"version": PROTOCOL_VERSION, "handle": h.name}),
+    )?;
+    match response["state"].as_str() {
         Some("stopped") => Ok("stopped"),
         Some("gone") => Ok("gone"),
-        _ => bail!("the stop script on {} did not confirm the outcome", h.dest),
+        _ => bail!("target helper did not confirm stop outcome"),
     }
 }
 
 pub fn status(h: &Handle) -> Result<bool> {
-    let out = remote(&h.dest, &status_script(&h.name))?;
-    match receipt(&out, "@@running ") {
-        Some("true") => Ok(true),
-        Some("false") => Ok(false),
-        _ => bail!("the status script on {} did not answer", h.dest),
-    }
-}
-
-fn receipt<'a>(out: &'a str, prefix: &str) -> Option<&'a str> {
-    let mut matches = out.lines().filter_map(|line| line.strip_prefix(prefix));
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
+    let response = remote_target(
+        &h.dest,
+        "status",
+        json!({"version": PROTOCOL_VERSION, "handle": h.name}),
+    )?;
+    response["running"]
+        .as_bool()
+        .context("target helper did not return agent status")
 }
 
 #[cfg(test)]
@@ -1219,6 +1245,13 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn target_version_is_checked_before_any_launch_fields_or_processes() {
+        let error = run_target("launch", r#"{"version":2,"helper_version":"wrong"}"#).unwrap_err();
+        assert!(error.to_string().contains("incompatible target helper"));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn attach_keeps_remote_quoting_after_local_shell_parsing() {
         for (path, expected) in [
@@ -1381,25 +1414,6 @@ mod tests {
                 .contains("needs a value")
         );
         assert!(o(&[]).unwrap_err().to_string().contains("needs --host"));
-    }
-
-    #[test]
-    fn the_launch_script_exports_the_login_path_and_the_requests_env() {
-        let mut r = req("ws://marshal.mesh:6155");
-        r.env
-            .insert("XDG_CONFIG_HOME".into(), "/from/launcher".into());
-        let t = Target::from_request(&r).unwrap();
-        let s = launch_script(&t, &r);
-        assert!(s.starts_with("name='marshal-launch-1'"), "{s}");
-        let inner = &s[s.find("inner=").unwrap()..];
-        assert!(
-            inner.contains("XDG_CONFIG_HOME='\"'\"'/from/launcher"),
-            "{inner}"
-        );
-        assert!(!inner.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{inner}");
-        assert!(s.contains("inner=\"export PATH=$(q \"$PATH\")"), "{s}");
-        let c = check_script(&t, &r);
-        assert!(c.contains("req_xdg='/from/launcher'"), "{c}");
     }
 
     #[test]

@@ -31,7 +31,7 @@ jobs:
         timeout-minutes: 1
         run: python3 scripts/ci/report_resources.py
 
-      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev python3-venv
+      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev python3-venv tmux strace
       - name: Install pinned workflow validator
         run: |
           bash scripts/ci/install-actionlint.sh "$RUNNER_TEMP/actionlint"
@@ -90,6 +90,14 @@ jobs:
       - run: cargo flux run check
       - run: cargo flux run lint
       - run: cargo flux run test
+      - name: Preserve native process failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-tmux-processes
+          path: ${{ runner.temp }}/native-tmux-processes
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Test native embedding-agent registration and reconnect
         run: |
           cargo build -p marshal-daemon -p marshal-shim --bins
@@ -118,6 +126,7 @@ jobs:
           operation: save
           state: ${{ steps.compiler-snapshot.outputs.state }}
     env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/scripts/ci/native-test-runner.sh
       CI_NATIVE_CACHE_CONFIGURED: ${{ (secrets.CI_CACHE_S3_ACCESS_KEY_ID || secrets.CI_CACHE_ACCESS_KEY) != '' }}
   browser-auth:
     runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]

@@ -146,6 +146,26 @@ async fn owned_session(
 }
 
 #[cfg(unix)]
+async fn quiet_session(
+    server: &tmux_session::Tmux,
+    id: tmux_session::SessionId,
+    handle: &str,
+) -> Result<()> {
+    server
+        .configure(
+            id,
+            &[tmux_session::ConfigOp::SessionOption {
+                key: "status".into(),
+                value: "off".into(),
+            }],
+        )
+        .await
+        .with_context(|| {
+            format!("quiet setup is uncertain for tmux session {handle}; recover this launch")
+        })
+}
+
+#[cfg(unix)]
 fn owned_target(handle: &str) -> Result<tmux_session::OwnedSession> {
     ensure!(
         handle.starts_with("marshal-") && valid_name(handle),
@@ -341,12 +361,15 @@ impl LaunchBackend for Tmux {
         )?);
         self.with_server(
             |server, runtime| match runtime.block_on(server.create(create)) {
-                Ok(session) => Ok(self.observation(
-                    req,
-                    handle,
-                    cwd.display().to_string(),
-                    server.attach_command(&session),
-                )),
+                Ok(session) => {
+                    runtime.block_on(quiet_session(server, session.id, &handle))?;
+                    Ok(self.observation(
+                        req,
+                        handle,
+                        cwd.display().to_string(),
+                        server.attach_command(&session),
+                    ))
+                }
                 Err(error) if error.kind() == tmux_session::ErrorKind::DuplicateName => self
                     .recover(req)?
                     .context("tmux reported a duplicate launch but it could not be recovered"),
@@ -369,6 +392,7 @@ impl LaunchBackend for Tmux {
                     bail!("tmux launch directory was not recorded");
                 };
                 let cwd = cwd.to_str().context("invalid tmux launch directory")?;
+                quiet_session(server, session.id, &handle).await?;
                 Ok(Some(self.observation(
                     req,
                     handle,

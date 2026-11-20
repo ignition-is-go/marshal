@@ -463,3 +463,255 @@ fn worker_with_no_arguments_runs_as_one_literal_program() {
         StopReceipt::Stopped
     );
 }
+
+fn quiet_request(work: &std::path::Path, id: &str) -> LaunchRequest {
+    LaunchRequest {
+        version: marshal_launch::PROTOCOL_VERSION,
+        harness: "claude".into(),
+        argv: ["sh", "-c", "printf 'started\\n' >> starts; exec sleep 30"]
+            .map(str::to_owned)
+            .to_vec(),
+        cwd: work.display().to_string(),
+        name: id.into(),
+        agent_id: id.into(),
+        marshal_version: MARSHAL_VERSION.into(),
+        env: Default::default(),
+        options: vec![],
+    }
+}
+
+fn tmux_value(server: &common::PrivateTmux, args: &[&str]) -> String {
+    let output = server.tmux().args(args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn quiet_setup_is_session_scoped_and_status_reads_do_not_change_it() {
+    let Some(server) = common::PrivateTmux::new("quiet") else {
+        return;
+    };
+    let unrelated = tmux_value(
+        &server,
+        &[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}",
+            "-s",
+            "unrelated",
+            "sleep",
+            "30",
+        ],
+    );
+    tmux_value(&server, &["set-option", "-g", "status", "on"]);
+    tmux_value(&server, &["set-option", "-t", &unrelated, "status", "on"]);
+    let unrelated_pid = tmux_value(
+        &server,
+        &["display-message", "-p", "-t", &unrelated, "#{pane_pid}"],
+    );
+    let work = tempfile::tempdir().unwrap();
+    let request = quiet_request(work.path(), "quiet-policy");
+    let backend = Tmux::new("tmux").with_socket(&server.socket);
+    let launched = backend.launch(&request).unwrap();
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["show-options", "-A", "-v", "-t", &launched.handle, "status"]
+        ),
+        "off"
+    );
+    assert_eq!(
+        tmux_value(&server, &["show-options", "-g", "-v", "status"]),
+        "on"
+    );
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["show-options", "-A", "-v", "-t", &unrelated, "status"]
+        ),
+        "on"
+    );
+    let worker_pid = tmux_value(
+        &server,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &launched.handle,
+            "#{pane_pid}",
+        ],
+    );
+    tmux_value(
+        &server,
+        &["set-option", "-t", &launched.handle, "status", "on"],
+    );
+    assert_eq!(backend.status(&launched.handle).unwrap(), Some(true));
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["show-options", "-A", "-v", "-t", &launched.handle, "status"]
+        ),
+        "on"
+    );
+    assert_eq!(backend.recover(&request).unwrap(), Some(launched.clone()));
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["show-options", "-A", "-v", "-t", &launched.handle, "status"]
+        ),
+        "off"
+    );
+    assert_eq!(
+        tmux_value(
+            &server,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &launched.handle,
+                "#{pane_pid}"
+            ]
+        ),
+        worker_pid
+    );
+    tmux_value(
+        &server,
+        &[
+            "set-environment",
+            "-t",
+            &launched.handle,
+            "MARSHAL_LAUNCH_KEY",
+            "foreign",
+        ],
+    );
+    tmux_value(
+        &server,
+        &["set-option", "-t", &launched.handle, "status", "on"],
+    );
+    assert!(backend.recover(&request).is_err());
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["show-options", "-A", "-v", "-t", &launched.handle, "status"]
+        ),
+        "on"
+    );
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["display-message", "-p", "-t", &unrelated, "#{pane_pid}"]
+        ),
+        unrelated_pid
+    );
+    assert_eq!(
+        tmux_value(&server, &["show-options", "-g", "-v", "status"]),
+        "on"
+    );
+}
+
+#[test]
+fn failed_quiet_setup_recovers_the_same_worker_without_another_create() {
+    let Some(server) = common::PrivateTmux::new("quiet-repair") else {
+        return;
+    };
+    let unrelated = tmux_value(
+        &server,
+        &[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}",
+            "-s",
+            "unrelated",
+            "sleep",
+            "30",
+        ],
+    );
+    tmux_value(&server, &["set-option", "-g", "status", "on"]);
+    tmux_value(&server, &["set-option", "-t", &unrelated, "status", "on"]);
+    let unrelated_pid = tmux_value(
+        &server,
+        &["display-message", "-p", "-t", &unrelated, "#{pane_pid}"],
+    );
+    let work = tempfile::tempdir().unwrap();
+    let failure = work.path().join("failed-configuration");
+    let wrapper = fixture_program(
+        work.path(),
+        "tmux-quiet-failure",
+        &format!(
+            "for arg do\nif [ \"$arg\" = set-option ] && mkdir '{}' 2>/dev/null; then\necho 'owned configuration failure' >&2\nexit 1\nfi\ndone\nexec tmux \"$@\"\n",
+            failure.display()
+        ),
+    );
+    let backend = Tmux::new(wrapper.display().to_string()).with_socket(&server.socket);
+    let request = quiet_request(work.path(), "quiet-repair");
+    let handle = backend.recovery_handle(&request).unwrap();
+    let error = backend.launch(&request).unwrap_err();
+    assert!(format!("{error:#}").contains(&handle), "{error:#}");
+    assert!(format!("{error:#}").contains("uncertain"), "{error:#}");
+    assert!(
+        error
+            .downcast_ref::<tmux_session::Error>()
+            .unwrap()
+            .effect_uncertain()
+    );
+    assert!(failure.is_dir());
+    let worker_pid = tmux_value(
+        &server,
+        &["display-message", "-p", "-t", &handle, "#{pane_pid}"],
+    );
+    let recovered = backend
+        .recover(&request)
+        .unwrap()
+        .expect("owned worker remains recoverable");
+    assert_eq!(recovered.handle, handle);
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["display-message", "-p", "-t", &handle, "#{pane_pid}"]
+        ),
+        worker_pid
+    );
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["show-options", "-A", "-v", "-t", &handle, "status"]
+        ),
+        "off"
+    );
+    assert_eq!(backend.launch(&request).unwrap(), recovered);
+    let starts = work.path().join("starts");
+    for _ in 0..50 {
+        if starts.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read_to_string(starts).unwrap(), "started\n");
+    assert_eq!(
+        tmux_value(&server, &["show-options", "-g", "-v", "status"]),
+        "on"
+    );
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["show-options", "-A", "-v", "-t", &unrelated, "status"]
+        ),
+        "on"
+    );
+    assert_eq!(
+        tmux_value(
+            &server,
+            &["display-message", "-p", "-t", &unrelated, "#{pane_pid}"]
+        ),
+        unrelated_pid
+    );
+    backend.stop(&handle).unwrap();
+}

@@ -14,7 +14,8 @@ marshal-launch stop launch-<uuid>
 ```
 
 The tmux backend runs on the daemon host. SSH starts a detached tmux session
-on an existing host. Install `marshal-launch-ssh` on the daemon’s PATH. Set up the repo, harness login, and Marshal wiring on
+on an existing host. Install the same version of `marshal-launch-ssh` on the
+daemon's PATH and on each target's login PATH. Set up the repo, harness login, and Marshal wiring on
 the target first. SSH accepts `--oauth-token-file` after `--` when Claude needs
 to read a login token from a file on the target. Use `--daemon http://host:6156` or `MARSHAL_LAUNCH_API` to
 point the CLI at the launch API. A WebSocket URL selects the hook port of the
@@ -139,6 +140,15 @@ the binaries from the same checkout with
 `cargo build --locked -p marshal-daemon -p marshal-launch -p marshal-launch-ssh`.
 SSH and tmux use a launch-specific session name and an ownership
 marker. The display name does not select the process to stop.
+
+Both session backends use the published `tmux-session` crate through Marshal's native adapter.
+SSH sends contract-v2 JSON to `marshal-launch-ssh --target`; it never falls
+back to shell commands that manage tmux. A missing or incompatible helper
+fails before launch. Set `MARSHAL_LAUNCH_SSH_HELPER` in the daemon service
+environment to an absolute target path when the helper is outside the target's
+login PATH. Keep that setting available for later inspect and stop calls.
+The optional Claude token file is read inside the target worker process;
+the credential value stays out of requests, responses, and tmux arguments.
 
 Pulse Agents can implement an external backend using its own launch API.
 That backend will pass through the provider's lifecycle handle, and Marshal
