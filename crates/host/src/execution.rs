@@ -119,6 +119,14 @@ impl Execution {
                     if let Some(codex) = &codex_env {
                         args.extend(["-e", codex]);
                     }
+                    let codex_home_env = (harness == Harness::Codex)
+                        .then(|| std::env::var("CODEX_HOME").ok())
+                        .flatten()
+                        .filter(|home| !home.is_empty())
+                        .map(|home| format!("CODEX_HOME={home}"));
+                    if let Some(codex_home) = &codex_home_env {
+                        args.extend(["-e", codex_home]);
+                    }
                     args.extend(["-e", &server_env, "env", &launch_env, &proof_env]);
                     args.extend_from_slice(launcher);
                     match tmux(&args).await {

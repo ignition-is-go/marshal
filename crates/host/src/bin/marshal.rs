@@ -637,7 +637,7 @@ fn install_service(flags: &[String]) -> Result<()> {
     if let Ok(path) = std::env::var("PATH") {
         settings.insert("PATH", path);
     }
-    for key in ["MARSHAL_DAEMON_ADDRESS", "MARSHAL_CODEX_BIN"] {
+    for key in ["MARSHAL_DAEMON_ADDRESS", "MARSHAL_CODEX_BIN", "CODEX_HOME"] {
         if let Ok(value) = std::env::var(key)
             && !value.is_empty()
         {
