@@ -8,7 +8,7 @@ use hyphae::Gettable;
 use marshal_client::host::{ExecutionRequest, ExecutionResult, Harness, HostConnection};
 use marshal_client::{ConnectionStatus, MarshalClient};
 use marshal_entities::{
-    AcceptTaskAssignment, AckMessages, CompleteTaskAssignment, CreateTask, DispatchHarness,
+    AcceptTaskAssignment, AckMessages, CancelTaskDispatch, CompleteTaskAssignment, CreateTask, DispatchHarness,
     DispatchState, GetAllDispatchAttempts, GetAllDispatchHosts, GetAllMessages, GetAllTaskClaims,
     GetTaskById, ListReadyTasks, ReserveTaskDispatch, Session, SessionId, TaskPriority, TaskStatus,
 };
@@ -103,11 +103,13 @@ async fn verify_dispatch(managed: bool) {
         workspace: "/work/marshal".into(),
     };
     assert!(reserve().execute(command(None)).is_err());
-    let mut rejected = reserve().execute(command(Some(operator.clone()))).unwrap();
-    rejected.state = DispatchState::Rejected {
-        reason: "Host rejected before launch".into(),
+    let rejected = reserve().execute(command(Some(operator.clone()))).unwrap();
+    let cancel = || CancelTaskDispatch {
+        task_id: task_id.clone(),
+        launch_id: rejected.launch_id.clone(),
     };
-    command(None).emit_set(&rejected).unwrap();
+    assert!(cancel().execute(command(None)).is_err());
+    cancel().execute(command(Some(operator.clone()))).unwrap();
     assert_eq!(
         ListReadyTasks { project: None }
             .execute(command(None))
@@ -116,6 +118,7 @@ async fn verify_dispatch(managed: bool) {
     );
     let attempt = reserve().execute(command(Some(operator.clone()))).unwrap();
     assert_ne!(rejected.launch_id, attempt.launch_id);
+    assert!(cancel().execute(command(Some(operator.clone()))).is_err());
     let retry = reserve().execute(command(Some(operator.clone()))).unwrap();
     assert_eq!(attempt.launch_id, retry.launch_id);
     let states = || {
