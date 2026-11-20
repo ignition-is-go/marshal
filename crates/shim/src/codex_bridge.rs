@@ -261,6 +261,16 @@ struct LauncherState {
     generation: u64,
     connected: bool,
     thread_id: Option<String>,
+    #[serde(default)]
+    active_thread_id: Option<String>,
+}
+
+impl LauncherState {
+    fn recovery_thread_id(&self) -> Option<&str> {
+        self.active_thread_id
+            .as_deref()
+            .or(self.thread_id.as_deref())
+    }
 }
 
 #[derive(Debug)]
@@ -268,6 +278,8 @@ struct LauncherStateWriter {
     path: PathBuf,
     state: LauncherState,
     launch_id: Option<String>,
+    selection_sequence: u64,
+    confirmed_sequence: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -290,6 +302,8 @@ impl LauncherStateWriter {
         Self {
             path,
             launch_id,
+            selection_sequence: 0,
+            confirmed_sequence: 0,
             state: LauncherState {
                 thread_id,
                 ..LauncherState::default()
@@ -327,6 +341,27 @@ impl LauncherStateWriter {
             self.persist()?;
         }
         Ok(())
+    }
+
+    fn selection_requested(&mut self) -> Result<u64> {
+        let sequence = self
+            .selection_sequence
+            .checked_add(1)
+            .context("Codex TUI selection request counter exhausted")?;
+        self.selection_sequence = sequence;
+        Ok(sequence)
+    }
+
+    fn confirmed_selection(&mut self, thread_id: &str, sequence: u64) -> Result<()> {
+        if sequence <= self.confirmed_sequence {
+            return Ok(());
+        }
+        self.state
+            .thread_id
+            .get_or_insert_with(|| thread_id.to_string());
+        self.state.active_thread_id = Some(thread_id.to_string());
+        self.confirmed_sequence = sequence;
+        self.persist()
     }
 
     fn persist(&self) -> Result<()> {
@@ -476,11 +511,14 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
             wait_for_app_server_recovery(&mut bridge, &launcher_state_file, launch_generation)?
         };
 
-        let Some(thread_id) = recovered.and_then(|state| state.thread_id) else {
+        let Some(thread_id) = recovered
+            .as_ref()
+            .and_then(LauncherState::recovery_thread_id)
+        else {
             break status;
         };
         eprintln!("Codex app-server restarted; reconnecting and resuming thread {thread_id} ...");
-        tui_args = codex_resume_args(args, &thread_id);
+        tui_args = codex_resume_args(args, thread_id);
     };
 
     // The bridge is scoped to this interactive launcher. Multiple launchers may
@@ -680,7 +718,9 @@ fn wait_for_app_server_recovery(
         }
         if let Some(state) = read_launcher_state(state_file) {
             saw_disconnect |= !state.connected;
-            if state.generation > launch_generation && state.connected && state.thread_id.is_some()
+            if state.generation > launch_generation
+                && state.connected
+                && state.recovery_thread_id().is_some()
             {
                 return Ok(Some(state));
             }
@@ -872,22 +912,24 @@ where
     Downstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     Upstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let mut pending_thread_starts = Vec::new();
+    let mut pending_selections = Vec::new();
     loop {
         tokio::select! {
             message = downstream.next() => {
                 let message = message.context("Codex TUI closed proxy connection")??;
                 if let WebSocketMessage::Text(text) = &message
                     && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
+                    && let Some(id) = value.get("id")
+                    && let Some(launcher) = launcher.as_ref()
                 {
-                    if let Some(thread_id) = resumed_thread_id(&value)
-                        && let Some(launcher) = launcher.as_ref()
-                    {
-                        launcher.lock().await.selected(thread_id)?;
-                    } else if value.get("method").and_then(Value::as_str) == Some("thread/start")
-                        && let Some(id) = value.get("id")
-                    {
-                        pending_thread_starts.push(id.clone());
+                    let resumed = resumed_thread_id(&value);
+                    if resumed.is_some() || value.get("method").and_then(Value::as_str) == Some("thread/start") {
+                        let mut writer = launcher.lock().await;
+                        let sequence = writer.selection_requested()?;
+                        if let Some(thread_id) = resumed {
+                            writer.selected(thread_id)?;
+                        }
+                        pending_selections.push((id.clone(), resumed.map(str::to_string), sequence));
                     }
                 }
                 let closed = matches!(message, WebSocketMessage::Close(_));
@@ -901,17 +943,20 @@ where
                 if let WebSocketMessage::Text(text) = &message
                     && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
                     && let Some(id) = value.get("id")
-                    && let Some(position) = pending_thread_starts
+                    && let Some(position) = pending_selections
                         .iter()
-                        .position(|pending| pending == id)
+                        .position(|(pending, _, _)| pending == id)
                 {
-                    pending_thread_starts.swap_remove(position);
-                    if let Some(thread_id) = value
+                    let (_, expected_thread, sequence) = pending_selections.swap_remove(position);
+                    if value.get("error").is_none()
+                        && let Some(thread_id) = value
                         .pointer("/result/thread/id")
                         .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        && expected_thread.as_deref().is_none_or(|expected| expected == thread_id)
                         && let Some(launcher) = launcher.as_ref()
                     {
-                        launcher.lock().await.selected(thread_id)?;
+                        launcher.lock().await.confirmed_selection(thread_id, sequence)?;
                     }
                 }
                 let closed = matches!(message, WebSocketMessage::Close(_));
@@ -1672,7 +1717,11 @@ where
     initialize_app_server(websocket).await?;
     let mut request_id = 100_i64;
     if let Some(launcher) = launcher.as_ref() {
-        launcher.lock().await.connected()?;
+        let mut launcher = launcher.lock().await;
+        launcher.connected()?;
+        if let Some(thread_id) = launcher.state.thread_id.as_deref() {
+            decorations.remove(thread_id);
+        }
     }
     if let Some(path) = ready_file.as_ref() {
         // codex-run deliberately starts its TUI only after this marker, so the
@@ -2602,8 +2651,64 @@ mod tests {
                 generation: 2,
                 connected: true,
                 thread_id: Some("owned-thread".into()),
+                active_thread_id: None,
             })
         );
+    }
+
+    #[test]
+    fn launcher_state_recovers_legacy_initial_and_confirmed_active_threads() {
+        let legacy: LauncherState = serde_json::from_str(
+            r#"{"generation":1,"connected":true,"threadId":"initial-thread"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.recovery_thread_id(), Some("initial-thread"));
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("launcher.json");
+        let mut writer = LauncherStateWriter::new(
+            path.clone(),
+            directory.path().into(),
+            None,
+            Some("launch-owner".into()),
+        );
+        let first = writer.selection_requested().unwrap();
+        writer.confirmed_selection("initial-thread", first).unwrap();
+        let next = writer.selection_requested().unwrap();
+        writer.confirmed_selection("active-thread", next).unwrap();
+        writer.disconnected().unwrap();
+        writer.connected().unwrap();
+        let state = read_launcher_state(&path).unwrap();
+        assert_eq!(state.thread_id.as_deref(), Some("initial-thread"));
+        assert_eq!(state.recovery_thread_id(), Some("active-thread"));
+        assert_eq!(
+            writer.registration_binding("initial-thread"),
+            RegistrationBinding::Selected("launch-owner".into())
+        );
+        assert_eq!(
+            writer.registration_binding("active-thread"),
+            RegistrationBinding::OtherThread
+        );
+    }
+
+    #[test]
+    fn selection_counter_exhaustion_leaves_confirmed_state_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut writer = LauncherStateWriter::new(
+            directory.path().join("state.json"),
+            directory.path().into(),
+            None,
+            None,
+        );
+        let selected = writer.selection_requested().unwrap();
+        writer
+            .confirmed_selection("active-thread", selected)
+            .unwrap();
+        let before = writer.state.clone();
+        writer.selection_sequence = u64::MAX;
+        assert!(writer.selection_requested().is_err());
+        assert_eq!(writer.selection_sequence, u64::MAX);
+        assert_eq!(writer.state, before);
     }
 
     #[test]
@@ -3558,6 +3663,172 @@ mod tests {
         proxy.abort();
         app_server.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn tui_proxy_recovers_only_successfully_confirmed_selections() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("launcher.json");
+        let launcher = Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
+            path.clone(),
+            directory.path().into(),
+            None,
+            Some("launch-owner".into()),
+        )));
+        let (tui, downstream) = tokio::io::duplex(4096);
+        let (upstream, app) = tokio::io::duplex(4096);
+        let mut tui = WebSocketStream::from_raw_socket(tui, Role::Client, None).await;
+        let mut app = WebSocketStream::from_raw_socket(app, Role::Server, None).await;
+        let relay = tokio::spawn(relay_tui_websocket(
+            WebSocketStream::from_raw_socket(downstream, Role::Server, None).await,
+            WebSocketStream::from_raw_socket(upstream, Role::Client, None).await,
+            Some(launcher.clone()),
+        ));
+
+        for (request, response, expected) in [
+            (
+                json!({"id":1,"method":"thread/start","params":{}}),
+                json!({"id":1,"result":{"thread":{"id":"initial-thread"}}}),
+                "initial-thread",
+            ),
+            (
+                json!({"id":2,"method":"thread/start","params":{}}),
+                json!({"id":2,"result":{"thread":{"id":"active-thread"}}}),
+                "active-thread",
+            ),
+            (
+                json!({"id":3,"method":"thread/resume","params":{"threadId":"failed-thread"}}),
+                json!({"id":3,"error":{"code":-1,"message":"not found"}}),
+                "active-thread",
+            ),
+            (
+                json!({"id":4,"method":"thread/resume","params":{"threadId":"failed-thread"}}),
+                json!({"id":4,"result":{"thread":{"id":"mismatched-thread"}}}),
+                "active-thread",
+            ),
+            (
+                json!({"id":5,"method":"thread/read","params":{"threadId":"unrelated-thread"}}),
+                json!({"id":5,"result":{"thread":{"id":"unrelated-thread"}}}),
+                "active-thread",
+            ),
+            (
+                json!({"id":6,"method":"thread/resume","params":{"threadId":"empty-thread"}}),
+                json!({"id":6,"result":{"thread":{"id":""}}}),
+                "active-thread",
+            ),
+            (
+                json!({"id":7,"method":"thread/resume","params":{"threadId":"resumed-thread"}}),
+                json!({"id":7,"result":{"thread":{"id":"resumed-thread"}}}),
+                "resumed-thread",
+            ),
+        ] {
+            tui.send(WebSocketMessage::Text(request.to_string().into()))
+                .await
+                .unwrap();
+            let forwarded = app.next().await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(forwarded.to_text().unwrap()).unwrap(),
+                request
+            );
+            app.send(WebSocketMessage::Text(response.to_string().into()))
+                .await
+                .unwrap();
+            let forwarded = tui.next().await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(forwarded.to_text().unwrap()).unwrap(),
+                response
+            );
+            let state = read_launcher_state(&path).unwrap();
+            assert_eq!(state.thread_id.as_deref(), Some("initial-thread"));
+            assert_eq!(state.recovery_thread_id(), Some(expected));
+        }
+        for message in [
+            json!({"id":999,"result":{"thread":{"id":"unknown-reply"}}}),
+            json!({"method":"thread/started","params":{"thread":{"id":"unrelated-thread"}}}),
+        ] {
+            app.send(WebSocketMessage::Text(message.to_string().into()))
+                .await
+                .unwrap();
+            tui.next().await.unwrap().unwrap();
+            assert_eq!(
+                read_launcher_state(&path).unwrap().recovery_thread_id(),
+                Some("resumed-thread")
+            );
+        }
+        let mut writer = launcher.lock().await;
+        writer.connected().unwrap();
+        writer.disconnected().unwrap();
+        writer.connected().unwrap();
+        assert_eq!(writer.state.generation, 2);
+        assert_eq!(writer.state.recovery_thread_id(), Some("resumed-thread"));
+        assert_eq!(
+            writer.registration_binding("initial-thread"),
+            RegistrationBinding::Selected("launch-owner".into())
+        );
+        assert_eq!(
+            writer.registration_binding("resumed-thread"),
+            RegistrationBinding::OtherThread
+        );
+        relay.abort();
+    }
+    #[tokio::test]
+    async fn tui_proxy_keeps_the_newest_successful_request_across_reply_order_and_connections() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for cross_proxy in [false, true] {
+                for newer_succeeds in [true, false] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let path = directory.path().join("launcher.json");
+                    let launcher = Arc::new(tokio::sync::Mutex::new(LauncherStateWriter::new(
+                        path.clone(), directory.path().into(), Some("initial-thread".into()),
+                        Some("launch-owner".into()),
+                    )));
+                    let mut connections = Vec::new();
+                    let mut relays = Vec::new();
+                    for _ in 0..2 {
+                        let (tui, downstream) = tokio::io::duplex(4096);
+                        let (upstream, app) = tokio::io::duplex(4096);
+                        connections.push((
+                            WebSocketStream::from_raw_socket(tui, Role::Client, None).await,
+                            WebSocketStream::from_raw_socket(app, Role::Server, None).await,
+                        ));
+                        relays.push(tokio::spawn(relay_tui_websocket(
+                            WebSocketStream::from_raw_socket(downstream, Role::Server, None).await,
+                            WebSocketStream::from_raw_socket(upstream, Role::Client, None).await,
+                            Some(launcher.clone()),
+                        )));
+                    }
+                    let newer_connection = usize::from(cross_proxy);
+                    for (connection, id) in [(0, 10), (newer_connection, 11)] {
+                        connections[connection].0.send(WebSocketMessage::Text(
+                            json!({"id":id,"method":"thread/start","params":{}}).to_string().into(),
+                        )).await.unwrap();
+                        let request = connections[connection].1.next().await.unwrap().unwrap();
+                        assert_eq!(serde_json::from_str::<Value>(request.to_text().unwrap()).unwrap()["id"], id);
+                    }
+                    let newer_reply = if newer_succeeds {
+                        json!({"id":11,"result":{"thread":{"id":"newer-thread"}}})
+                    } else {
+                        json!({"id":11,"error":{"code":-1,"message":"rejected"}})
+                    };
+                    connections[newer_connection].1.send(WebSocketMessage::Text(newer_reply.to_string().into())).await.unwrap();
+                    connections[newer_connection].0.next().await.unwrap().unwrap();
+                    connections[0].1.send(WebSocketMessage::Text(
+                        json!({"id":10,"result":{"thread":{"id":"older-thread"}}}).to_string().into(),
+                    )).await.unwrap();
+                    connections[0].0.next().await.unwrap().unwrap();
+                    let state = read_launcher_state(&path).unwrap();
+                    assert_eq!(state.thread_id.as_deref(), Some("initial-thread"));
+                    assert_eq!(state.recovery_thread_id(), Some(if newer_succeeds { "newer-thread" } else { "older-thread" }), "cross_proxy={cross_proxy}, newer_succeeds={newer_succeeds}");
+                    assert_eq!(launcher.lock().await.registration_binding("initial-thread"), RegistrationBinding::Selected("launch-owner".into()));
+                    for relay in relays { relay.abort(); }
+                }
+            }
+        }).await.expect("bounded out-of-order proxy transcript");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn tui_proxy_relays_plugin_catalog_larger_than_default_frame_limit() {

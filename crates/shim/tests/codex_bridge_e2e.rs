@@ -613,6 +613,231 @@ async fn unix_multi_process_bridge_elects_one_wake_leader_and_fails_over() {
     follower.stop();
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnect_restores_deleted_initial_launch_session_without_started_notification() {
+    let temp = tempfile::tempdir().unwrap();
+    let cell = CellHarness::spawn(candidate_addr());
+    let mut unrelated = hook_session("unrelated-thread", "/unrelated");
+    unrelated.agent_id = Some("unrelated-owner".into());
+    internal_context(&cell.ctx).emit_set(&unrelated).unwrap();
+    let hook_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let hook_address = hook_listener.local_addr().unwrap();
+    let ctx = Arc::clone(&cell.ctx);
+    let hooks = HookHarness {
+        base_url: format!("http://{hook_address}"),
+        task: tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = hook_listener.accept().await.unwrap();
+                let (target, body) = read_http_request(&mut stream).await.unwrap();
+                assert!(target.starts_with("/hook/session-register?"));
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["session_id"], "initial-thread");
+                assert_eq!(body["agent_id"], "bridge/\"agent\nopaque");
+                let mut session = hook_session("initial-thread", "/initial");
+                session.agent_id = body["agent_id"].as_str().map(str::to_string);
+                internal_context(&ctx).emit_set(&session).unwrap();
+                let body = json!({"session_id":"initial-thread", "nickname": marshal_entities::nickname("initial-thread")}).to_string();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        }),
+    };
+    let app_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let app_address = app_listener.local_addr().unwrap();
+    let name = Arc::new(Mutex::new("literal-name".to_string()));
+    let name_sets = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (disconnect, _) = tokio::sync::broadcast::channel::<()>(1);
+    let disconnect_for_server = disconnect.clone();
+    let name_for_server = Arc::clone(&name);
+    let sets_for_server = Arc::clone(&name_sets);
+    let app_server = FakeAppServer {
+        endpoint: format!("ws://{app_address}"),
+        accepted: Arc::new(Mutex::new(Vec::new())),
+        task: tokio::spawn(async move {
+            loop {
+                let (stream, _) = app_listener.accept().await.unwrap();
+                let mut disconnect = disconnect_for_server.subscribe();
+                let name = Arc::clone(&name_for_server);
+                let name_sets = Arc::clone(&sets_for_server);
+                tokio::spawn(async move {
+                    let mut websocket = accept_async(stream).await.unwrap();
+                    loop {
+                        let frame = tokio::select! {
+                            _ = disconnect.recv() => break,
+                            frame = websocket.next() => frame,
+                        };
+                        let Some(Ok(WebSocketMessage::Text(text))) = frame else {
+                            break;
+                        };
+                        let request: Value = serde_json::from_str(text.as_ref()).unwrap();
+                        let Some(id) = request.get("id") else {
+                            continue;
+                        };
+                        let result = match request["method"].as_str().unwrap() {
+                            "initialize" => {
+                                json!({"userAgent":"recovery-test","platformFamily":"test","platformOs":"linux","codexHome":"/tmp"})
+                            }
+                            "thread/list" => json!({"data":[
+                                {"id":"initial-thread","status":{"type":"notLoaded"}},
+                                {"id":"unrelated-thread","status":{"type":"loaded"}}
+                            ],"nextCursor":null}),
+                            "thread/read" | "thread/resume" => {
+                                let thread = request["params"]["threadId"].as_str().unwrap();
+                                json!({"thread":{"id":thread,"sessionId":thread,"cwd":"/initial","name":name.lock().unwrap().clone()}})
+                            }
+                            "thread/name/set" => {
+                                assert_eq!(request["params"]["threadId"], "initial-thread");
+                                let updated =
+                                    request["params"]["name"].as_str().unwrap().to_string();
+                                *name.lock().unwrap() = updated.clone();
+                                name_sets.lock().unwrap().push(updated);
+                                json!({})
+                            }
+                            method => panic!("unexpected recovery RPC {method}"),
+                        };
+                        if websocket
+                            .send(WebSocketMessage::Text(
+                                json!({"id":id,"result":result}).to_string().into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        }),
+    };
+    let proxy = format!("ws://{}", candidate_addr());
+    let state_file = temp.path().join("launcher.json");
+    let ready_file = temp.path().join("ready");
+    let child = Command::new(SHIM)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("XDG_STATE_HOME", temp.path().join("state"))
+        .env("MARSHAL_LAUNCH_ID", "bridge/\"agent\nopaque")
+        .env("MARSHAL_BASE_URL", &hooks.base_url)
+        .env("MARSHAL_HOST", TEST_HOST)
+        .args([
+            "codex-bridge",
+            "--endpoint",
+            &app_server.endpoint,
+            "--proxy-endpoint",
+            &proxy,
+            "--daemon",
+            &cell.address,
+            "--launcher-thread-id",
+            "initial-thread",
+            "--launcher-cwd",
+            "/initial",
+            "--launcher-state-file",
+        ])
+        .arg(&state_file)
+        .arg("--ready-file")
+        .arg(&ready_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut bridge = BridgeProcess {
+        child: Some(child),
+        ready_file,
+    };
+    bridge.wait_ready().await;
+    let decorated = format!(
+        "[{}] literal-name",
+        marshal_entities::nickname("initial-thread")
+    );
+    for generation in 1..=3 {
+        if generation > 1 {
+            internal_context(&cell.ctx)
+                .emit_del(&hook_session("initial-thread", ""))
+                .unwrap();
+            assert!(
+                internal_context(&cell.ctx)
+                    .exec_query(GetAllSessions {})
+                    .unwrap()
+                    .iter()
+                    .all(|row| row.id.0.as_ref() != "initial-thread")
+            );
+            disconnect.send(()).unwrap();
+        }
+        wait_until("new lifecycle generation", WAIT, || {
+            std::fs::read(&state_file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|state| {
+                    state["generation"].as_u64().unwrap_or(0) >= generation
+                        && state["connected"] == true
+                })
+        })
+        .await;
+        let (mut tui, _) = connect_async(&proxy).await.unwrap();
+        tui.send(WebSocketMessage::Text(
+            json!({"id":1,"method":"initialize","params":{}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        tui.next().await.unwrap().unwrap();
+        tui.send(WebSocketMessage::Text(
+            json!({"method":"initialized"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        tui.send(WebSocketMessage::Text(
+            json!({"id":2,"method":"thread/resume","params":{"threadId":"initial-thread"}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let reply = tui.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(reply.to_text().unwrap()).unwrap()["result"]["thread"]["id"],
+            "initial-thread"
+        );
+        wait_for_sessions(&cell.ctx, &["initial-thread"]).await;
+        wait_until("initial name decoration", WAIT, || {
+            *name.lock().unwrap() == decorated
+        })
+        .await;
+        let sessions = internal_context(&cell.ctx)
+            .exec_query(GetAllSessions {})
+            .unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|row| row.id.0.as_ref() == "initial-thread")
+                .unwrap()
+                .agent_id
+                .as_deref(),
+            Some("bridge/\"agent\nopaque")
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|row| row.id.0.as_ref() == "unrelated-thread")
+                .unwrap()
+                .agent_id
+                .as_deref(),
+            Some("unrelated-owner")
+        );
+        assert_eq!(
+            name_sets.lock().unwrap().as_slice(),
+            std::slice::from_ref(&decorated)
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    bridge.stop();
+}
+
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn windows_isolated_interactive_bridges_wake_only_their_own_threads() {

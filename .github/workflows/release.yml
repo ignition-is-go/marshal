@@ -125,6 +125,8 @@ jobs:
           COMPLETE=true
           for asset in \
             install-codex.sh \
+            marshal-launch-x86_64-unknown-linux-gnu \
+            marshal-launch-ssh-x86_64-unknown-linux-gnu \
             marshal-daemon-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-pc-windows-gnu.exe \
@@ -204,9 +206,14 @@ jobs:
           # already present.
           cargo build --release -p marshal-daemon
           cargo build --release -p marshal-shim
+          cargo build --release -p marshal-launch -p marshal-launch-ssh
+          cp target/release/marshal-launch marshal-launch-x86_64-unknown-linux-gnu
+          cp target/release/marshal-launch-ssh marshal-launch-ssh-x86_64-unknown-linux-gnu
           cp target/release/marshal-daemon  marshal-daemon-x86_64-unknown-linux-gnu
           cp target/release/marshal-shim    marshal-shim-x86_64-unknown-linux-gnu
           gh release upload "v$VERSION" --clobber \
+            marshal-launch-x86_64-unknown-linux-gnu \
+            marshal-launch-ssh-x86_64-unknown-linux-gnu \
             marshal-daemon-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-unknown-linux-gnu \
             scripts/install-codex.sh

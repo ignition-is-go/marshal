@@ -8,10 +8,11 @@ const DOC: &str = include_str!("../../../docs/agent-launcher.md");
 
 /// The first ```json block after `marker`.
 fn json_after(marker: &str) -> serde_json::Value {
-    let at = DOC
+    let doc = DOC.replace("\r\n", "\n");
+    let at = doc
         .find(marker)
         .unwrap_or_else(|| panic!("{marker:?} isn't in the doc"));
-    let rest = &DOC[at..];
+    let rest = &doc[at..];
     let start = rest.find("```json\n").expect("a json block") + "```json\n".len();
     let body = &rest[start..];
     let end = body.find("```").expect("the block's end");
@@ -23,10 +24,11 @@ fn the_docs_launch_request_parses() {
     let v = json_after("**`launch`** — request:");
     let req: LaunchRequest = serde_json::from_value(v.clone()).unwrap();
     assert_eq!(req.version, PROTOCOL_VERSION);
-    assert_eq!(req.harness, "claude");
-    assert_eq!(req.argv, ["claude"]);
-    assert_eq!(req.options, ["--host", "build-03"]);
-    assert_eq!(req.env.get("MARSHAL_AGENT_ID"), Some(&req.agent_id));
+    let process = req.process_request().unwrap();
+    assert_eq!(process.harness, "claude");
+    assert_eq!(process.argv, ["claude"]);
+    assert_eq!(process.options, ["--host", "build-03"]);
+    assert_eq!(process.env.get("MARSHAL_AGENT_ID"), Some(&req.agent_id));
     assert_eq!(req.marshal_version, "0.60.5");
     // Nothing in the doc's example is dropped on the way through.
     assert_eq!(serde_json::to_value(&req).unwrap(), v);
@@ -44,4 +46,12 @@ fn the_docs_launch_response_parses() {
         l.attach.as_deref(),
         Some("ssh -t build-03 'tmux attach -t =marshal-launch-6f1c'")
     );
+}
+
+#[test]
+fn the_docs_start_request_parses() {
+    let wire = json_after("## Service API");
+    let request: marshal_launch::api::StartLaunch = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(request.first_task.as_deref(), Some("Run the failing test"));
+    assert_eq!(serde_json::to_value(request).unwrap(), wire);
 }

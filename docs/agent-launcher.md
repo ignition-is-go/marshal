@@ -33,7 +33,7 @@ listener's existing trust model.
 
 | Path | Request | Response |
 | --- | --- | --- |
-| `/launch/v1/start` | Launch ID, backend, harness, working directory, display name, backend options, preflight choice, join timeout, optional first task | Launch record |
+| `/launch/v1/start` | Launch ID, backend, typed intent, display name, preflight choice, join timeout, optional first task | Launch record |
 | `/launch/v1/get` | `{"launch_id":"launch-…"}` | Launch record with backend status and any observed task acknowledgment |
 | `/launch/v1/list` | `{}` | Launch records with their last recorded process state |
 | `/launch/v1/stop` | `{"launch_id":"launch-…"}` | Launch record |
@@ -42,10 +42,11 @@ listener's existing trust model.
 {
   "launch_id": "launch-068e59ab16294023a4da6dd283b3deaa",
   "backend": "ssh",
-  "harness": "claude",
-  "cwd": "/home/agent/app",
   "name": "test-fix",
-  "options": ["--host", "build-03"],
+  "intent": {
+    "kind": "process", "harness": "claude", "cwd": "/home/agent/app",
+    "options": ["--host", "build-03"]
+  },
   "check": true,
   "timeout_secs": 60,
   "first_task": "Run the failing test"
@@ -77,6 +78,10 @@ Process state, roster registration, and task state are separate fields in
 the response. A task can be pending, delivery uncertain, stored, or
 acknowledged. Acknowledged means the session's inbox reported delivery.
 A launch correlation ID is not a credential.
+For Codex, the launch and its tasks remain bound to the initial conversation.
+If the same TUI successfully starts or resumes another conversation, app-server
+recovery resumes that last confirmed conversation without replaying the original
+prompt. It does not move the launch's tasks to the later conversation.
 Marshal records the first task's stable message ID before sending it to
 the exact joined session. If a restart interrupts that send, Marshal
 recovers the task state from any surviving message or inbox receipt.
@@ -89,30 +94,37 @@ The Rust trait is `LaunchBackend`. Built-in tmux implements it directly.
 Marshal runs external backends as `marshal-launch-<name> <verb>` on the
 daemon's PATH. The subprocess receives one JSON object on stdin and returns
 one on stdout. Diagnostics go to stderr. Each stream is capped at 1 MiB.
-The following is wire version 2.
+The following is wire version 3.
 
 - `check` examines the target without starting a worker.
 - `recover` derives the stable backend handle for a request before startup.
 - `launch` starts the worker and returns the same handle.
-- `inspect` optionally observes a live worker and returns `{"version":2,"launched":{…}}`
-  or `{"version":2,"launched":null}`.
+- `inspect` optionally observes a live worker and returns `{"version":3,"launched":{…}}`
+  or `{"version":3,"launched":null}`.
 - `status` and `stop` take the handle. Status can report running, absent, or
   unknown in the `running` field as `true`, `false`, or `null`. A successful
-  stop returns `{"version":2,"state":"stopped"}` or `{"version":2,"state":"gone"}`.
+  stop returns `{"version":3,"state":"stopped"}` or `{"version":3,"state":"gone"}`.
 
 **`launch`** — request:
 
 ```json
 {
-  "version": 2,
-  "harness": "claude",
-  "argv": ["claude"],
-  "cwd": "~/work/app",
+  "version": 3,
   "name": "claude-app",
   "launch_id": "launch-6f1c",
   "marshal_version": "0.60.5",
-  "env": {"MARSHAL_AGENT_ID":"launch-6f1c"},
-  "options": ["--host", "build-03"]
+  "context": {
+    "daemon_address": "ws://marshal.mesh:6155",
+    "hook_base": null
+  },
+  "intent": {
+    "kind": "process",
+    "harness": "claude",
+    "argv": ["claude"],
+    "cwd": "~/work/app",
+    "env": {"MARSHAL_AGENT_ID":"launch-6f1c"},
+    "options": ["--host", "build-03"]
+  }
 }
 ```
 
@@ -120,7 +132,7 @@ Response:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "handle": "build-03 marshal-launch-6f1c",
   "host": "build-03",
   "cwd": "/home/agent/work/app",
@@ -142,7 +154,7 @@ SSH and tmux use a launch-specific session name and an ownership
 marker. The display name does not select the process to stop.
 
 Both session backends use the published `tmux-session` crate through Marshal's native adapter.
-SSH sends contract-v2 JSON to `marshal-launch-ssh --target`; it never falls
+SSH sends contract-v3 JSON to `marshal-launch-ssh --target`; it never falls
 back to shell commands that manage tmux. A missing or incompatible helper
 fails before launch. Set `MARSHAL_LAUNCH_SSH_HELPER` in the daemon service
 environment to an absolute target path when the helper is outside the target's
@@ -150,6 +162,46 @@ login PATH. Keep that setting available for later inspect and stop calls.
 The optional Claude token file is read inside the target worker process;
 the credential value stays out of requests, responses, and tmux arguments.
 
-Pulse Agents can implement an external backend using its own launch API.
-That backend will pass through the provider's lifecycle handle, and Marshal
-will separately record the worker's Marshal session.
+The external `marshal-launch-pulse` backend uses Pulse's managed launch API.
+It returns the provider's lifecycle handle. Marshal separately records the
+worker's Marshal session and delivers a first task after a unique roster join.
+The native tmux crate and the managed provider protocol have independent
+release boundaries.
+
+## Managed launch intent
+
+The launch API accepts a typed intent. Process intent selects `harness`, `cwd`,
+and backend `options`; Marshal resolves the executable and coordination wiring.
+Managed intent selects a provider-owned launch policy. The Pulse selection is:
+
+```json
+{
+  "kind": "managed",
+  "provider": "pulse",
+  "environment_id": "development",
+  "preset_id": "codex-account",
+  "workspace": {"provider": "session"}
+}
+```
+
+The same managed selector reaches the external backend inside `intent`.
+Marshal supplies the common launch id, label, shim version, and trusted
+`context` containing the daemon address and optional hook base. The selector
+accepts no executable, argv, environment map, endpoint, credential, or first
+turn. Pulse owns harness selection, model/auth settings, permissions, and resume
+policy. Its workspace selector follows Pulse's typed `WorkspaceRequest`,
+including `pulseRoot`, `existingDirectory`, and `pulse` with a named or Levi-task
+identity. Pulse validates those selections and owns workspace mechanics.
+
+`first_task` remains an optional field of the outer Marshal API request. It is
+persisted by Marshal and never sent to a backend. After the backend returns its
+resolved host and working directory, Marshal requires one roster row matching
+that location and the launch id before sending the task through the existing
+message path. Task storage and acknowledgment retain their separate receipts.
+An uncertain startup retains its pre-start handle and never repeats launch.
+
+The contract and dispatch are available for external backend implementations.
+A Pulse backend and Pulse's durable admission endpoint are separate work; this
+change does not provision or call a Pulse service. Built-in tmux and the SSH
+backend accept only process intent. Wire version 3 replaces the unreleased
+version 2 shape; there is no compatibility translation.

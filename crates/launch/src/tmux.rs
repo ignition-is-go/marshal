@@ -10,6 +10,8 @@ use anyhow::Context;
 use anyhow::{Result, bail, ensure};
 
 #[cfg(unix)]
+use crate::ProcessRequest;
+#[cfg(unix)]
 use crate::external::DAEMON_CREDENTIAL_ENV;
 #[cfg(unix)]
 use crate::external::run_bounded;
@@ -105,7 +107,7 @@ impl Tmux {
     #[cfg(unix)]
     fn observation(
         &self,
-        req: &LaunchRequest,
+        req: &ProcessRequest,
         handle: String,
         cwd: String,
         attach: Command,
@@ -265,7 +267,8 @@ impl LaunchBackend for Tmux {
         crate::address::LOCAL_BACKEND
     }
 
-    fn check(&self, req: &LaunchRequest) -> Result<()> {
+    fn check(&self, request: &LaunchRequest) -> Result<()> {
+        let req = &request.process_request()?;
         ensure!(
             !req.argv.is_empty(),
             "the launch request has no command to run"
@@ -317,17 +320,19 @@ impl LaunchBackend for Tmux {
         Ok(())
     }
 
-    fn recovery_handle(&self, req: &LaunchRequest) -> Result<String> {
+    fn recovery_handle(&self, request: &LaunchRequest) -> Result<String> {
+        let req = &request.process_request()?;
         session_key(&req.agent_id)
     }
 
-    fn launch(&self, req: &LaunchRequest) -> Result<Launched> {
+    fn launch(&self, request: &LaunchRequest) -> Result<Launched> {
+        let req = &request.process_request()?;
         ensure!(
             !req.argv.is_empty(),
             "the launch request has no command to run"
         );
-        let handle = self.recovery_handle(req)?;
-        if let Some(launched) = self.recover(req)? {
+        let handle = self.recovery_handle(request)?;
+        if let Some(launched) = self.recover(request)? {
             return Ok(launched);
         }
         let cwd = resolve_cwd(&req.cwd)?;
@@ -371,15 +376,16 @@ impl LaunchBackend for Tmux {
                     ))
                 }
                 Err(error) if error.kind() == tmux_session::ErrorKind::DuplicateName => self
-                    .recover(req)?
+                    .recover(request)?
                     .context("tmux reported a duplicate launch but it could not be recovered"),
                 Err(error) => Err(error.into()),
             },
         )
     }
 
-    fn recover(&self, req: &LaunchRequest) -> Result<Option<Launched>> {
-        let handle = self.recovery_handle(req)?;
+    fn recover(&self, request: &LaunchRequest) -> Result<Option<Launched>> {
+        let req = &request.process_request()?;
+        let handle = self.recovery_handle(request)?;
         self.with_server(|server, runtime| {
             runtime.block_on(async {
                 let Some(session) = owned_session(server, &handle).await? else {
@@ -437,6 +443,7 @@ impl LaunchBackend for Tmux {
         )
     }
     fn recovery_handle(&self, req: &LaunchRequest) -> Result<String> {
+        req.process_request()?;
         session_key(&req.agent_id)
     }
     fn launch(&self, _: &LaunchRequest) -> Result<Launched> {
@@ -496,8 +503,7 @@ mod tests {
     #[test]
     fn a_missing_folder_or_a_bad_name_starts_nothing() {
         let t = Tmux::new("/nonexistent/tmux");
-        let mut req = LaunchRequest {
-            version: crate::PROTOCOL_VERSION,
+        let mut req = LaunchRequest::from(crate::ProcessRequest {
             harness: "claude".into(),
             argv: v(&["claude"]),
             cwd: "/nonexistent/folder".into(),
@@ -506,14 +512,16 @@ mod tests {
             marshal_version: crate::MARSHAL_VERSION.into(),
             env: Default::default(),
             options: vec![],
-        };
+        });
         assert!(
             t.check(&req)
                 .unwrap_err()
                 .to_string()
                 .contains("isn't a folder")
         );
-        req.cwd = "/".into();
+        if let crate::BackendIntent::Process { cwd, .. } = &mut req.intent {
+            *cwd = "/".into();
+        }
         assert!(
             t.check(&req)
                 .unwrap_err()
@@ -524,7 +532,9 @@ mod tests {
         assert!(t.check(&req).is_err());
         assert!(t.launch(&req).is_err());
         req.name = "ok".into();
-        req.options = v(&["--host", "x"]);
+        if let crate::BackendIntent::Process { options, .. } = &mut req.intent {
+            *options = v(&["--host", "x"]);
+        }
         assert!(
             t.check(&req)
                 .unwrap_err()
