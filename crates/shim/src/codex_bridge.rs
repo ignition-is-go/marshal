@@ -378,8 +378,11 @@ impl LauncherStateWriter {
 
     fn persist(&self) -> Result<()> {
         let encoded = serde_json::to_vec(&self.state).context("encoding codex-run state")?;
-        fs::write(&self.path, encoded)
-            .with_context(|| format!("writing codex-run state {}", self.path.display()))
+        let temporary = self.path.with_extension("tmp");
+        fs::write(&temporary, encoded)
+            .with_context(|| format!("writing codex-run state {}", self.path.display()))?;
+        fs::rename(&temporary, &self.path)
+            .with_context(|| format!("replacing codex-run state {}", self.path.display()))
     }
 }
 
@@ -546,7 +549,14 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
             #[cfg(target_os = "linux")]
             let status = if managed.is_some() {
                 let mut frontend = command.spawn().context("starting managed Codex frontend")?;
-                managed::wait_frontend(&mut frontend, &mut bridge)?
+                managed::wait_frontend(
+                    &mut frontend,
+                    &mut bridge,
+                    app_server
+                        .child
+                        .as_mut()
+                        .context("managed server missing")?,
+                )?
             } else {
                 command
                     .status()
@@ -567,14 +577,12 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
                         .as_mut()
                         .context("managed server missing")?,
                 )?;
-                tui_args = read_launcher_state(&launcher_state_file)
-                    .and_then(|state| {
-                        state
-                            .recovery_thread_id()
-                            .filter(|id| state.kept_threads.contains(*id))
-                            .map(str::to_owned)
-                    })
-                    .map(|id| codex_managed_resume_args(args, &id))
+                let state = read_launcher_state(&launcher_state_file)
+                    .context("managed bridge state unavailable")?;
+                tui_args = state
+                    .recovery_thread_id()
+                    .filter(|id| state.kept_threads.contains(*id))
+                    .map(|id| codex_managed_resume_args(args, id))
                     .unwrap_or_else(|| codex_fresh_args(args));
                 continue;
             }

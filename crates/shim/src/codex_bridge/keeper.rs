@@ -65,17 +65,13 @@ impl ThreadKeepers {
         let AppServerEndpoint::WebSocket(endpoint) = &self.endpoint else {
             anyhow::bail!("managed keeper requires its dedicated loopback app-server");
         };
-        let (mut websocket, _) = tokio::time::timeout(
-            RPC_TIMEOUT,
-            connect_async_with_config(
-                endpoint.as_str(),
-                Some(app_server_websocket_config()),
-                false,
-            ),
+        let (mut websocket, _) = connect_async_with_config(
+            endpoint.as_str(),
+            Some(app_server_websocket_config()),
+            false,
         )
-        .await??;
+        .await?;
         initialize_app_server(&mut websocket).await?;
-        let deadline = tokio::time::Instant::now() + RPC_TIMEOUT;
         loop {
             write_rpc(
                 &mut websocket,
@@ -90,7 +86,7 @@ impl ThreadKeepers {
                     );
                     break;
                 }
-                Err(error) if tokio::time::Instant::now() < deadline => {
+                Err(error) if error.to_string().contains("no rollout found") => {
                     log::debug!("[codex-bridge] keeper pending for {thread_id}: {error:#}");
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }

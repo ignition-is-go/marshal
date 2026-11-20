@@ -204,12 +204,18 @@ pub(super) fn process_group(command: &mut Command) {
 pub(super) fn wait_frontend(
     frontend: &mut Child,
     bridge: &mut Child,
+    server: &mut Child,
 ) -> Result<std::process::ExitStatus> {
     loop {
         if let Some(status) = bridge.try_wait()? {
             let _ = frontend.kill();
             let _ = frontend.wait();
             anyhow::bail!("managed Codex bridge exited: {status}");
+        }
+        if let Some(status) = server.try_wait()? {
+            let _ = frontend.kill();
+            let _ = frontend.wait();
+            anyhow::bail!("managed Codex app-server exited: {status}");
         }
         if let Some(status) = frontend.try_wait()? {
             return Ok(status);
