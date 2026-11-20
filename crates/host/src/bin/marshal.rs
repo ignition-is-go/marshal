@@ -11,7 +11,7 @@ use marshal_client::{
     config::{ADDRESS_FILE, config_file_candidates, server_address},
 };
 use marshal_entities::{
-    AcceptTaskAssignment, AddTaskDependency, CompleteTaskAssignment, CoordinationMatches,
+    AcceptTaskAssignment, AddTaskDependency, ClaimTask, CompleteTaskAssignment, CoordinationMatches,
     CreateTask, DispatchAttempt, DispatchHarness, FindCoordination, GetAllDispatchHosts,
     GetAllSessions, GetAllTaskBlockers, GetAllTaskClaims, GetAllTasks, GetTaskById,
     ReleaseTaskClaim, RemoveTaskDependency, RenewTaskClaim, ReserveTaskDispatch, SendMessage,
@@ -39,6 +39,7 @@ const HELP: &str = "Usage: marshal <command>
   task close <id> [commit]           Close a task with optional commit evidence
   task reopen <id>                   Reopen a task
   task accept <id>                   Accept the current launch's task assignment
+  task claim <id> <session-id>       Claim a task for an existing session (operator)
   task claims                        List active claims as JSON (operator)
   task renew <id> <lease-id>         Extend an active lease (operator)
   task release <id> <lease-id>       Release a task lease (operator)
@@ -134,6 +135,9 @@ async fn main() -> Result<()> {
         }
         [command, action, id] if command == "task" && action == "reopen" => {
             set_task_status(id, TaskStatus::Open).await?;
+        }
+        [command, action, id, session] if command == "task" && action == "claim" => {
+            claim_task(id, session).await?;
         }
         [command, action] if command == "task" && action == "claims" => {
             list_claims().await?;
@@ -391,6 +395,19 @@ async fn list_claims() -> Result<()> {
         .filter(|claim| u128::try_from(claim.expires).is_ok_and(|expires| expires > now))
         .collect();
     println!("{}", serde_json::to_string_pretty(&active)?);
+    Ok(())
+}
+
+async fn claim_task(id: &str, session: &str) -> Result<()> {
+    let client = connect().await?;
+    let response = client.send_command::<ClaimTask, TaskClaim>(&ClaimTask {
+        task_id: TaskId(Arc::from(id)),
+        session_id: SessionId(Arc::from(session)),
+    });
+    let claim = await_value(|| response.get())
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    println!("{}", serde_json::to_string(&claim)?);
     Ok(())
 }
 

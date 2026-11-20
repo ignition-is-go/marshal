@@ -146,7 +146,9 @@ over Myko. The launch host supplies a proof scoped to the launch, and Marshal
 grants the claim after verifying the task and session. A worker holding that
 lease can use `marshal task close <id> [commit]` to record completion.
 
-An authenticated operator can list active leases with `marshal task claims`.
+An authenticated operator can claim work for an existing session with
+`marshal task claim <id> <session-id>` and list active leases with
+`marshal task claims`.
 Use its task and lease IDs with `marshal task renew <id> <lease-id>` to extend
 the claim or `marshal task release <id> <lease-id>` to return the task to the
 ready queue when its dependencies permit.
