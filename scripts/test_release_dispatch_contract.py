@@ -27,6 +27,18 @@ class ReleaseDispatchContractTests(unittest.TestCase):
                 if isinstance(spec, dict) and "git" in spec:
                     self.fail(f"{package['name']} cannot publish Git dependency {name} to crates.io")
 
+    def test_linux_launch_assets_are_required_and_uploaded_before_publication(self) -> None:
+        release, publish = self.workflow.split("  publish-packages:", 1)
+        guard = release.split("for asset in", 1)[1].split("; do", 1)[0]
+        upload = release.split('gh release upload "v$VERSION" --clobber', 1)[1].split("rustup target add", 1)[0]
+        self.assertIn("needs: release", publish.split("  build-macos:", 1)[0])
+        self.assertIn("cargo build --release -p marshal-launch -p marshal-launch-ssh", release)
+        for binary in ("marshal-launch", "marshal-launch-ssh"):
+            asset = f"{binary}-x86_64-unknown-linux-gnu"
+            self.assertIn(asset, guard)
+            self.assertIn(f"cp target/release/{binary} {asset}", release)
+            self.assertIn(asset, upload)
+
     def test_dispatch_waits_for_every_release_producer(self) -> None:
         self.assertIn("needs: [release, publish-packages, build-macos]", self.workflow)
         for job in ("release", "publish-packages", "build-macos"):
