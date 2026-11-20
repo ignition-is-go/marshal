@@ -75,7 +75,10 @@ enable it explicitly. Launch-enabled hosts require tmux and a
 `MARSHAL_HOST_WORKSPACE_ROOT` directory. A launch workspace must exist within
 that directory.
 
-Install both binaries with `cargo install --path crates/host`.
+Install both binaries with `cargo install --path crates/host`. When using
+release assets, download the `marshal-<target>` and `marshal-host-<target>`
+files for your platform into the same directory. Rename them to `marshal`
+and `marshal-host`, keeping the `.exe` extension on Windows.
 `marshal configure <server-ws-url> <host-ws-url>` saves both endpoints.
 With the host ID and token-file variables set, `marshal service install`
 installs and starts the host under your account using systemd on Linux,

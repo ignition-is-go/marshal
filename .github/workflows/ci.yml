@@ -265,8 +265,8 @@ jobs:
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
           sudo apt-get install -y -o Acquire::Retries=3 build-essential pkg-config mingw-w64
-      - name: Cross-compile the Windows shim
-        run: cargo check -p marshal-stdio --target x86_64-pc-windows-gnu
+      - name: Check the Windows stdio and host binaries
+        run: cargo check --locked -p marshal-stdio -p marshal-host --all-targets --target x86_64-pc-windows-gnu
 
       - name: Report runner resources
         if: always()
