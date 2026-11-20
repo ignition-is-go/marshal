@@ -61,6 +61,15 @@ impl Execution {
                 if exists(&target).await? {
                     verify_intent(&target, &intent).await?;
                 } else {
+                    require_executable(launcher[0])?;
+                    let codex_env = if harness == Harness::Codex {
+                        let codex =
+                            std::env::var("MARSHAL_CODEX_BIN").unwrap_or_else(|_| "codex".into());
+                        require_executable(&codex)?;
+                        Some(format!("MARSHAL_CODEX_BIN={codex}"))
+                    } else {
+                        None
+                    };
                     // Keep the directory before calling tmux: a timeout can
                     // leave a running process that still has to report its join.
                     let mut state = tempfile::Builder::new();
@@ -85,6 +94,13 @@ impl Execution {
                     let launch_env = format!("MARSHAL_AGENT_ID={launch_id}");
                     let proof_env = format!("MARSHAL_ASSIGNMENT_PROOF_FILE={proof_file}");
                     let join_dir = join_dir.keep();
+                    let path_env = std::env::var("PATH")
+                        .ok()
+                        .map(|value| format!("PATH={value}"));
+                    let server_env = format!(
+                        "MARSHAL_DAEMON_ADDRESS={}",
+                        marshal_client::config::server_address()
+                    );
                     let mut args = vec![
                         "new-session",
                         "-d",
@@ -96,10 +112,14 @@ impl Execution {
                         &intent_env,
                         "-e",
                         &join_env,
-                        "env",
-                        &launch_env,
-                        &proof_env,
                     ];
+                    if let Some(path) = &path_env {
+                        args.extend(["-e", path]);
+                    }
+                    if let Some(codex) = &codex_env {
+                        args.extend(["-e", codex]);
+                    }
+                    args.extend(["-e", &server_env, "env", &launch_env, &proof_env]);
                     args.extend_from_slice(launcher);
                     match tmux(&args).await {
                         Ok(output) if output.status.success() => {}
@@ -222,6 +242,41 @@ async fn verify_intent(target: &str, expected: &str) -> Result<()> {
         "launch ID unavailable or already used for a different request"
     );
     Ok(())
+}
+
+fn require_executable(program: &str) -> Result<()> {
+    let candidate = Path::new(program);
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    let executable = if candidate.components().count() > 1 {
+        executable_file(candidate)
+    } else {
+        std::env::split_paths(&search).any(|directory| {
+            executable_file(&directory.join(program))
+                || (cfg!(windows)
+                    && candidate.extension().is_none()
+                    && executable_file(&directory.join(format!("{program}.exe"))))
+        })
+    };
+    anyhow::ensure!(
+        executable,
+        "launch executable {program} is unavailable to marshal-host"
+    );
+    Ok(())
+}
+
+fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
 }
 
 async fn tmux(args: &[&str]) -> Result<std::process::Output> {

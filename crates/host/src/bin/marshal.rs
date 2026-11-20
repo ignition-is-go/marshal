@@ -620,6 +620,13 @@ fn install_service(flags: &[String]) -> Result<()> {
     if let Ok(path) = std::env::var("PATH") {
         settings.insert("PATH", path);
     }
+    for key in ["MARSHAL_DAEMON_ADDRESS", "MARSHAL_CODEX_BIN"] {
+        if let Ok(value) = std::env::var(key)
+            && !value.is_empty()
+        {
+            settings.insert(key, value);
+        }
+    }
     let binary = binary.to_str().context("marshal-host path is not UTF-8")?;
     match std::env::consts::OS {
         "linux" => install_systemd(binary, flags, &settings),
