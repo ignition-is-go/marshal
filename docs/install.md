@@ -108,7 +108,8 @@ configuration with `marshal-stdio codex-setup` during the upgrade.
 
 ## Work with server tasks
 
-Create tasks with `marshal task create "Task title"`. The command groups
+Use `marshal task list [--project <name>]` or `marshal task show <id>` to
+inspect server tasks. Create tasks with `marshal task create "Task title"`. The command groups
 checkouts by their Git origin. Use `--project <name>` to choose a project
 explicitly. `marshal task close <id> [commit]` records completion with optional
 commit evidence, and `marshal task reopen <id>` reopens the task.

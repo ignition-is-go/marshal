@@ -12,9 +12,9 @@ use marshal_client::{
 };
 use marshal_entities::{
     AcceptTaskAssignment, CoordinationMatches, CreateTask, DispatchAttempt, DispatchHarness,
-    FindCoordination, GetAllDispatchHosts, GetAllSessions, GetAllTaskClaims, ReleaseTaskClaim,
-    RenewTaskClaim, ReserveTaskDispatch, SendMessage, SendMessageResult, SessionId, SetTaskStatus,
-    TaskClaim, TaskId, TaskPriority, TaskStatus,
+    FindCoordination, GetAllDispatchHosts, GetAllSessions, GetAllTaskClaims, GetAllTasks,
+    GetTaskById, ReleaseTaskClaim, RenewTaskClaim, ReserveTaskDispatch, SendMessage,
+    SendMessageResult, SessionId, SetTaskStatus, Task, TaskClaim, TaskId, TaskPriority, TaskStatus,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -26,6 +26,8 @@ const HELP: &str = "Usage: marshal <command>
   agents                             List sessions as JSON
   hosts                              List connected dispatch hosts as JSON (operator)
   find [--project <name>] [query]    Find task owners and idle agents as JSON
+  task list [--project <name>]      List tasks as JSON (operator)
+  task show <id>                    Show a task as JSON (operator)
   task create [--project <name>] <title>
                                      Create a task, defaulting to Git origin
   task close <id> [commit]           Close a task with optional commit evidence
@@ -85,6 +87,17 @@ async fn main() -> Result<()> {
                 "send requires recipients and a message"
             );
             send_messages(session, recipients, &body).await?;
+        }
+        [command, action] if command == "task" && action == "list" => {
+            list_tasks(None).await?;
+        }
+        [command, action, flag, project]
+            if command == "task" && action == "list" && flag == "--project" =>
+        {
+            list_tasks(Some(project)).await?;
+        }
+        [command, action, id] if command == "task" && action == "show" => {
+            show_task(id).await?;
         }
         [command, action, title] if command == "task" && action == "create" => {
             create_task(infer_project()?, title).await?;
@@ -149,6 +162,43 @@ async fn connect() -> Result<MarshalClient> {
     .await
     .context("connecting to marshal-server")?;
     Ok(client)
+}
+
+async fn list_tasks(project: Option<&str>) -> Result<()> {
+    let client = connect().await?;
+    let watch = client.watch_query_state::<GetAllTasks>(GetAllTasks {});
+    let mut tasks = await_value(|| {
+        if let Some(error) = watch.error().get() {
+            Some(Err(anyhow::anyhow!("{error}")))
+        } else {
+            watch.ready().get().then(|| Ok(watch.items().get()))
+        }
+    })
+    .await??;
+    tasks.retain(|task| project.is_none_or(|project| task.project == project));
+    tasks.sort_unstable_by(|left, right| {
+        (&left.project, left.priority, left.created, &left.id.0).cmp(&(
+            &right.project,
+            right.priority,
+            right.created,
+            &right.id.0,
+        ))
+    });
+    println!("{}", serde_json::to_string_pretty(&tasks)?);
+    Ok(())
+}
+
+async fn show_task(id: &str) -> Result<()> {
+    let client = connect().await?;
+    let watch = client.watch_report_result::<GetTaskById, Option<Arc<Task>>>(GetTaskById {
+        id: TaskId(Arc::from(id)),
+    });
+    let task = await_value(|| watch.get())
+        .await?
+        .map_err(anyhow::Error::msg)?
+        .context("task not found")?;
+    println!("{}", serde_json::to_string_pretty(&task)?);
+    Ok(())
 }
 
 async fn create_task(project: String, title: &str) -> Result<()> {
