@@ -574,7 +574,7 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
                             .filter(|id| state.kept_threads.contains(*id))
                             .map(str::to_owned)
                     })
-                    .map(|id| codex_resume_args(args, &id))
+                    .map(|id| codex_managed_resume_args(args, &id))
                     .unwrap_or_else(|| codex_fresh_args(args));
                 continue;
             }
@@ -679,6 +679,58 @@ fn codex_resume_args(original: &[String], thread_id: &str) -> Vec<String> {
     recovered
 }
 
+fn codex_managed_resume_args(original: &[String], thread_id: &str) -> Vec<String> {
+    let mut arguments = codex_fresh_args(original).into_iter();
+    let mut resumed = Vec::new();
+    while let Some(argument) = arguments.next() {
+        if matches!(
+            argument.as_str(),
+            "-a" | "--ask-for-approval" | "-s" | "--sandbox" | "--add-dir"
+        ) {
+            arguments.next();
+        } else if matches!(argument.as_str(), "-c" | "--config") {
+            if let Some(value) = arguments.next()
+                && !permission_config_override(&value)
+            {
+                resumed.extend([argument, value]);
+            }
+        } else if !matches!(
+            argument.as_str(),
+            "--yolo"
+                | "--approve-for-me"
+                | "--not-so-yolo"
+                | "--dangerously-bypass-approvals-and-sandbox"
+        ) && !argument.starts_with("--ask-for-approval=")
+            && !argument.starts_with("--sandbox=")
+            && !argument.starts_with("--add-dir=")
+            && !argument
+                .strip_prefix("--config=")
+                .is_some_and(permission_config_override)
+        {
+            resumed.push(argument);
+        }
+    }
+    resumed.extend(["resume".to_owned(), thread_id.to_owned()]);
+    resumed
+}
+
+fn permission_config_override(value: &str) -> bool {
+    let key = value.split('=').next().unwrap_or(value).trim();
+    matches!(
+        key.split('.')
+            .next()
+            .unwrap_or(key)
+            .trim_matches(['\'', '"']),
+        "approval_policy"
+            | "approvals_reviewer"
+            | "default_permissions"
+            | "sandbox_mode"
+            | "sandbox_workspace_write"
+            | "permissions"
+            | "network"
+    )
+}
+
 fn codex_fresh_args(original: &[String]) -> Vec<String> {
     const VALUE_OPTIONS: &[&str] = &[
         "-c",
@@ -702,6 +754,7 @@ fn codex_fresh_args(original: &[String]) -> Vec<String> {
     const FLAG_OPTIONS: &[&str] = &[
         "--oss",
         "--approve-for-me",
+        "--not-so-yolo",
         "--dangerously-bypass-approvals-and-sandbox",
         "--dangerously-bypass-hook-trust",
         "--search",
@@ -1012,6 +1065,8 @@ where
     };
     let mut pending_selections = Vec::new();
     let mut pending_turns = Vec::new();
+    let mut pending_ephemeral = Vec::new();
+    let mut ephemeral_threads = HashSet::new();
     loop {
         tokio::select! {
             message = downstream.next() => {
@@ -1021,15 +1076,18 @@ where
                     && let Some(id) = value.get("id")
                 {
                     let method = value.get("method").and_then(Value::as_str);
+                    let ephemeral = method == Some("thread/start") && value.pointer("/params/ephemeral").and_then(Value::as_bool) == Some(true);
+                    if ephemeral { pending_ephemeral.push(id.clone()); }
                     if method == Some("thread/resume") && let Some(keepers) = &keepers { keepers.check().await?; }
                     if method == Some("turn/start") && keepers.is_some()
                         && let Some(thread_id) = value.pointer("/params/threadId").and_then(Value::as_str)
+                        && !ephemeral_threads.contains(thread_id)
                     {
                         pending_turns.push((id.clone(), thread_id.to_owned()));
                     }
                     if let Some(launcher) = launcher.as_ref() {
                         let resumed = resumed_thread_id(&value);
-                        if resumed.is_some() || method == Some("thread/start") {
+                        if !ephemeral && (resumed.is_some() || method == Some("thread/start")) {
                             let mut writer = launcher.lock().await;
                             let sequence = writer.selection_requested()?;
                             if let Some(thread_id) = resumed { writer.selected(thread_id)?; }
@@ -1047,6 +1105,10 @@ where
                     && let Ok(value) = serde_json::from_str::<Value>(text.as_ref())
                     && let Some(id) = value.get("id")
                 {
+                    if let Some(position) = pending_ephemeral.iter().position(|pending| pending == id) {
+                        pending_ephemeral.swap_remove(position);
+                        if let Some(thread_id) = value.pointer("/result/thread/id").and_then(Value::as_str) { ephemeral_threads.insert(thread_id.to_owned()); }
+                    }
                     if let Some(position) = pending_turns.iter().position(|(pending, _)| pending == id) {
                         let (_, thread_id) = pending_turns.swap_remove(position);
                         if value.get("error").is_none() && let Some(keepers) = &keepers {
@@ -2673,6 +2735,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_resume_uses_saved_permissions_and_does_not_replay_inputs() {
+        let original = [
+            "--yolo",
+            "-a",
+            "never",
+            "--sandbox=danger-full-access",
+            "--model",
+            "fixture",
+            "--no-alt-screen",
+            "-i",
+            "image.png",
+            "original prompt",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            codex_managed_resume_args(&original, "kept-thread"),
+            [
+                "--model",
+                "fixture",
+                "--no-alt-screen",
+                "resume",
+                "kept-thread"
+            ]
+        );
+    }
     use marshal_entities::{HostInfo, MessageId, MessageReadId};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::{accept_async, connect_async};

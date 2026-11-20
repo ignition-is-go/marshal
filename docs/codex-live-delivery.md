@@ -231,7 +231,24 @@ that server through its managed daemon lifecycle.
 The wrapper is a Marshal integration boundary, not a replacement Codex
 client. Marshal needs a second app-server connection because Codex hooks only
 run at turn boundaries and therefore cannot wake an idle TUI. The TUI remains
-the normal Codex executable and owns all user interaction and thread state.
+the normal Codex executable and owns user interaction and thread selection.
+
+On Linux, a native Marshal tmux launch keeps its runtime after the frontend
+exits. The shim verifies the launch key against the current tmux socket,
+session ownership marker, and pane PID before enabling this behavior. A launch
+ID alone does not enable persistence. Each managed launch owns a dedicated
+app-server and a bridge that retains real thread subscriptions.
+
+A new empty thread remains pending until its first turn makes it resumable.
+The bridge acquires its keeper subscription before releasing the frontend's
+subscription. `/exit` and Ctrl+D close the frontend. Ctrl+C still interrupts an
+active turn. After frontend exit, the owner detaches the session's current
+clients and waits for an attachment. The existing raw tmux attach command opens
+a fresh frontend on the last confirmed retained thread without replaying the
+original prompt or images. Stopping the managed launch ends its owned runtime.
+A closed keeper thread or failed bridge ends that runtime instead of silently
+reloading a transcript. Other platforms and ordinary `codex-run` invocations
+retain their existing cleanup behavior.
 
 The per-TUI proxy records the selected `thread.id` from an explicit
 `thread/resume` request or the response to that TUI's `thread/start` request.
@@ -242,8 +259,8 @@ the lifecycle connection reports an app-server disconnect and a successfully
 initialized replacement connection, the launcher starts a fresh TUI process
 with `resume <thread.id>`. It preserves invocation-level model, profile,
 permission, working-directory, and display flags, but never replays positional
-prompts or image inputs. Normal user exits and non-transport failures are not
-restarted. An explicit UUID passed to `codex resume` pins the launcher to that
+prompts or image inputs. For ordinary invocations, normal user exits and non-transport failures
+are not restarted. An explicit UUID passed to `codex resume` pins the launcher to that
 thread immediately. A new or picker-selected session learns the id from its
 own proxied request and response, then keeps it across later server generations.
 
@@ -274,8 +291,8 @@ Codex does not provide that managed daemon on native Windows. There,
 the child when the TUI exits. The bridge refuses non-loopback WebSocket
 endpoints; no unauthenticated app-server listener is exposed to the network.
 
-The bridge normally exits with that TUI. During a managed Unix app-server
-replacement it remains alive long enough to reconnect and supervise the TUI
+Outside a managed Linux tmux launch, the bridge exits with that TUI.
+During a managed Unix app-server replacement it remains alive long enough to reconnect and supervise the TUI
 resume. More than one live launcher may run on a host; Unix bridges elect one
 wake leader while all of them continue lifecycle registration. Windows
 launchers use separate ephemeral ports.

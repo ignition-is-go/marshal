@@ -31,7 +31,10 @@ impl ManagedContext {
         let session = parts.next().context("missing tmux session")?;
         let _server_pid = parts.next().context("missing tmux server PID")?;
         let socket = parts.next().context("missing tmux socket")?;
-        let tmux = Tmux::builder().socket_path(socket).build()?;
+        let tmux = Tmux::builder()
+            .executable(std::env::var_os("MARSHAL_TMUX_BIN").unwrap_or_else(|| "tmux".into()))
+            .socket_path(socket)
+            .build()?;
         let runtime = tmux_session::Runtime::new()?;
         let target = OwnedSession::new(
             SessionName::new(&key)?,
