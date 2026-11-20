@@ -179,7 +179,70 @@ fn codex_run_death_stops_bridge() {
     assert_process_exits(bridge);
 }
 
+#[test]
+fn codex_run_replacement_tui_resumes_confirmed_active_thread_without_prompt_replay() {
+    let mut launcher = start_launcher_with_args(false, &["--yolo", "original prompt"]);
+    let bridge = start_tui(&mut launcher);
+    let tui = child_pids(launcher.child.id())
+        .into_iter()
+        .find(|pid| *pid != bridge)
+        .expect("owned fake TUI process");
+    let codex = launcher._temp.path().join("codex");
+    let recorded_args = launcher._temp.path().join("tui-started.args");
+    fs::write(
+        codex,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_CODEX_MARKER.args\"\n",
+    )
+    .unwrap();
+    let bridge_args = process_args(bridge).unwrap();
+    let state_index = bridge_args
+        .iter()
+        .position(|arg| arg == "--launcher-state-file")
+        .unwrap();
+    let state_file = Path::new(&bridge_args[state_index + 1]);
+    wait_until(
+        STARTUP_TIMEOUT,
+        || {
+            fs::read(state_file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|state| state["connected"] == true)
+        },
+        "bridge did not persist its initial connection",
+    );
+    fs::write(
+        state_file,
+        json!({
+            "generation": 2,
+            "connected": true,
+            "threadId": "initial-thread",
+            "activeThreadId": "active-thread"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    unsafe { libc::kill(tui as libc::pid_t, libc::SIGTERM) };
+    wait_until(
+        STARTUP_TIMEOUT,
+        || launcher.child.try_wait().unwrap().is_some(),
+        "replacement TUI did not exit",
+    );
+    assert!(launcher.child.wait().unwrap().success());
+    let args = fs::read_to_string(recorded_args).unwrap();
+    let args: Vec<_> = args.lines().collect();
+    assert_eq!(args[0], "--remote");
+    assert!(args[1].starts_with("unix://"));
+    assert_eq!(args[2], "--cd");
+    assert_eq!(args[3], std::env::current_dir().unwrap().to_str().unwrap());
+    assert_eq!(&args[4..], ["--yolo", "resume", "active-thread"]);
+    assert_process_exits(bridge);
+}
+
 fn start_launcher(exit_tui: bool) -> RunningLauncher {
+    start_launcher_with_args(exit_tui, &[])
+}
+
+fn start_launcher_with_args(exit_tui: bool, args: &[&str]) -> RunningLauncher {
     let temp = tempfile::tempdir().expect("temporary fake Codex directory");
     let app_server = FakeAppServer::spawn(&temp.path().join("app-server.sock"));
     let codex = temp.path().join("codex");
@@ -194,6 +257,7 @@ fn start_launcher(exit_tui: bool) -> RunningLauncher {
 
     let child = Command::new(env!("CARGO_BIN_EXE_marshal-shim"))
         .arg("codex-run")
+        .args(args)
         .env("MARSHAL_CODEX_BIN", &codex)
         .env("FAKE_CODEX_MARKER", &marker)
         .env("FAKE_CODEX_EXIT", if exit_tui { "1" } else { "0" })
