@@ -78,6 +78,10 @@ Process state, roster registration, and task state are separate fields in
 the response. A task can be pending, delivery uncertain, stored, or
 acknowledged. Acknowledged means the session's inbox reported delivery.
 A launch correlation ID is not a credential.
+For Codex, the launch and its tasks remain bound to the initial conversation.
+If the same TUI successfully starts or resumes another conversation, app-server
+recovery resumes that last confirmed conversation without replaying the original
+prompt. It does not move the launch's tasks to the later conversation.
 Marshal records the first task's stable message ID before sending it to
 the exact joined session. If a restart interrupts that send, Marshal
 recovers the task state from any surviving message or inbox receipt.
