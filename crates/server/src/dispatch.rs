@@ -8,7 +8,7 @@ use marshal_client::host::{ExecutionRequest, ExecutionResult, Harness, HostRegis
 use marshal_entities::{
     DispatchAttempt, DispatchHarness, DispatchState, GetAllDispatchAttempts, GetAllSessions,
     GetSessionById, SessionId, accept_dispatched_task, begin_dispatch, observe_dispatch_delivery,
-    offer_dispatched_task,
+    offer_dispatched_task, reject_reserved_dispatch,
 };
 use myko::{
     command::{CommandContext, CommandError},
@@ -84,7 +84,16 @@ async fn reconcile_host(
             DispatchHarness::Codex => Harness::Codex,
         };
         let request = match attempt.state {
-            DispatchState::Reserved if host.launch_harnesses.contains(&harness) => {
+            DispatchState::Reserved => {
+                if !host.launch_harnesses.contains(&harness) {
+                    reject_reserved_dispatch(
+                        command,
+                        &attempt.id,
+                        &attempt.launch_id,
+                        "Host has not opted into this harness".into(),
+                    )?;
+                    continue;
+                }
                 if !begin_dispatch(command, &attempt.id)? {
                     continue;
                 }

@@ -177,6 +177,26 @@ pub fn begin_dispatch(ctx: &CommandContext, id: &DispatchAttemptId) -> Result<bo
     Ok(ready)
 }
 
+/// Reject a reservation without recording a start on the host.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reject_reserved_dispatch(
+    ctx: &CommandContext,
+    id: &DispatchAttemptId,
+    launch_id: &str,
+    reason: String,
+) -> Result<(), CommandError> {
+    let _guard = crate::task_dependency::lock_task_state(ctx)?;
+    let Some(attempt) = ctx.exec_report(GetDispatchAttemptById { id: id.clone() })? else {
+        return Ok(());
+    };
+    if attempt.launch_id == launch_id && attempt.state == DispatchState::Reserved {
+        let mut updated = attempt.as_ref().clone();
+        updated.state = DispatchState::Rejected { reason };
+        ctx.emit_set(&updated)?;
+    }
+    Ok(())
+}
+
 /// Store one assignment in the joined session's inbox. The message key is
 /// derived from the launch ID so reprocessing a joined row can safely resume.
 #[cfg(not(target_arch = "wasm32"))]
