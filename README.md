@@ -220,7 +220,12 @@ idle, the interactive CLI must run through:
 marshal-shim codex-run [CODEX_ARGS...]
 ```
 
-On Linux and macOS this attaches the TUI to Codex's managed app-server. On
+Linux native managed tmux launches keep a dedicated Codex runtime and Marshal
+bridge after the frontend exits. The same raw tmux attach command reopens the
+retained live thread without replaying the original prompt. Explicit managed
+stop ends that runtime; Ctrl+C still interrupts an active turn.
+
+Ordinary Linux and macOS invocations attach the TUI to Codex's managed app-server. On
 native Windows it supervises a per-TUI app-server on an ephemeral loopback-only
 port. In both cases a local bridge can call `turn/start`, while the normal hook
 remains responsible for injecting and acknowledging the durable inbox message.

@@ -3369,6 +3369,7 @@ dependencies = [
  "sha2 0.10.9",
  "socket2",
  "tempfile",
+ "tmux-session",
  "tokio",
  "tokio-tungstenite",
  "uuid",
@@ -6447,9 +6448,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tmux-session"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd32ec27e4fb28e8f3c2290880432c0638ea308300761fc377ae1f6dd49be391"
+checksum = "c42790e4d9509c7a340b2910567d9cc65282fe6ab205a909af52835f521ae581"
 dependencies = [
  "libc",
  "tokio",

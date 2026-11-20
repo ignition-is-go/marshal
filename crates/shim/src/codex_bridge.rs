@@ -11,7 +11,11 @@
 //! 2. subscribe this bridge to app-server lifecycle events;
 //! 3. attach the TUI with `codex --remote`.
 //!
-//! Unix uses Codex's managed Unix-domain-socket daemon. Native Windows does not
+//! A validated Linux native tmux launch owns a dedicated server and persistent
+//! bridge. Its pane supervisor replaces exited frontends on the next raw tmux
+//! attachment. The bridge retains real subscriptions to resumable threads until
+//! explicit managed stop. Other Unix launches use Codex's managed daemon.
+//! Native Windows does not
 //! have that daemon. Windows discovers the persistent authenticated server
 //! in CODEX_HOME/remote-control, or uses MARSHAL_CODEX_APP_SERVER_CONNECTION_FILE
 //! when explicitly set. Unmanaged homes use an isolated server for the TUI.
@@ -273,6 +277,8 @@ struct LauncherState {
     active_thread_id: Option<String>,
     #[serde(default)]
     kept_threads: HashSet<String>,
+    #[serde(default)]
+    retained_thread_id: Option<String>,
 }
 
 impl LauncherState {
@@ -280,6 +286,12 @@ impl LauncherState {
         self.active_thread_id
             .as_deref()
             .or(self.thread_id.as_deref())
+    }
+
+    fn managed_thread_id(&self) -> Option<&str> {
+        self.recovery_thread_id()
+            .filter(|id| self.kept_threads.contains(*id))
+            .or(self.retained_thread_id.as_deref())
     }
 }
 
@@ -372,7 +384,18 @@ impl LauncherStateWriter {
             .thread_id
             .get_or_insert_with(|| thread_id.to_string());
         self.state.active_thread_id = Some(thread_id.to_string());
+        if self.state.kept_threads.contains(thread_id) {
+            self.state.retained_thread_id = Some(thread_id.to_owned());
+        }
         self.confirmed_sequence = sequence;
+        self.persist()
+    }
+
+    fn kept(&mut self, thread_id: &str) -> Result<()> {
+        self.state.kept_threads.insert(thread_id.to_owned());
+        if self.state.recovery_thread_id() == Some(thread_id) {
+            self.state.retained_thread_id = Some(thread_id.to_owned());
+        }
         self.persist()
     }
 
@@ -580,8 +603,7 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
                 let state = read_launcher_state(&launcher_state_file)
                     .context("managed bridge state unavailable")?;
                 tui_args = state
-                    .recovery_thread_id()
-                    .filter(|id| state.kept_threads.contains(*id))
+                    .managed_thread_id()
                     .map(|id| codex_managed_resume_args(args, id))
                     .unwrap_or_else(|| codex_fresh_args(args));
                 continue;
@@ -614,9 +636,8 @@ fn run_codex_binary(codex: &str, args: &[String]) -> Result<()> {
         Ok(status)
     })();
 
-    // The bridge is scoped to this interactive launcher. Multiple launchers may
-    // coexist; Unix bridges elect one wake leader for their shared app-server,
-    // and persistent Windows servers use exclusive file handles for election.
+    // A managed pane owner reaches cleanup only when its runtime ends. Ordinary
+    // launchers reach it when their interactive frontend exits.
     let _ = bridge.kill();
     let _ = bridge.wait();
     let _ = fs::remove_file(&ready_file);
@@ -1123,8 +1144,7 @@ where
                             keepers.retain(&thread_id).await?;
                             if let Some(launcher) = &launcher {
                                 let mut writer = launcher.lock().await;
-                                writer.state.kept_threads.insert(thread_id);
-                                writer.persist()?;
+                                writer.kept(&thread_id)?;
                             }
                         }
                     }
@@ -1550,8 +1570,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                         keepers.retain(session_id.0.as_ref()).await?;
                         if let Some(launcher) = &launcher {
                             let mut writer = launcher.lock().await;
-                            writer.state.kept_threads.insert(session_id.0.to_string());
-                            writer.persist()?;
+                            writer.kept(session_id.0.as_ref())?;
                         }
                     }
                     log::info!("[codex-bridge] woke thread={} turn={turn_id}", session_id.0);
@@ -2743,6 +2762,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marshal_entities::{HostInfo, MessageId, MessageReadId};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::{accept_async, connect_async};
 
     #[test]
     fn managed_resume_uses_saved_permissions_and_does_not_replay_inputs() {
@@ -2751,6 +2773,15 @@ mod tests {
             "-a",
             "never",
             "--sandbox=danger-full-access",
+            "--add-dir",
+            "/extra",
+            "--config=approval_policy=never",
+            "-c",
+            "sandbox_workspace_write.writable_roots=['/extra']",
+            "-c",
+            "model_reasoning_effort='low'",
+            "--profile",
+            "presentation",
             "--model",
             "fixture",
             "--no-alt-screen",
@@ -2762,6 +2793,10 @@ mod tests {
         assert_eq!(
             codex_managed_resume_args(&original, "kept-thread"),
             [
+                "-c",
+                "model_reasoning_effort='low'",
+                "--profile",
+                "presentation",
                 "--model",
                 "fixture",
                 "--no-alt-screen",
@@ -2770,9 +2805,41 @@ mod tests {
             ]
         );
     }
-    use marshal_entities::{HostInfo, MessageId, MessageReadId};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio_tungstenite::{accept_async, connect_async};
+
+    #[test]
+    fn managed_reattach_keeps_last_retained_selection_through_pending_and_stale_transfers() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut writer = LauncherStateWriter::new(
+            directory.path().join("state.json"),
+            directory.path().into(),
+            None,
+            None,
+        );
+        let first = writer.selection_requested().unwrap();
+        writer.confirmed_selection("kept-a", first).unwrap();
+        writer.kept("kept-a").unwrap();
+        let second = writer.selection_requested().unwrap();
+        writer.confirmed_selection("kept-b", second).unwrap();
+        writer.kept("kept-b").unwrap();
+        let pending = writer.selection_requested().unwrap();
+        writer.confirmed_selection("pending-new", pending).unwrap();
+        assert_eq!(writer.state.managed_thread_id(), Some("kept-b"));
+        writer.kept("kept-a").unwrap();
+        writer.confirmed_selection("kept-a", first).unwrap();
+        assert_eq!(
+            read_launcher_state(&writer.path)
+                .unwrap()
+                .managed_thread_id(),
+            Some("kept-b")
+        );
+        writer.kept("pending-new").unwrap();
+        assert_eq!(
+            read_launcher_state(&writer.path)
+                .unwrap()
+                .managed_thread_id(),
+            Some("pending-new")
+        );
+    }
 
     #[test]
     fn detects_explicit_codex_working_directory_arguments() {
@@ -2920,6 +2987,7 @@ mod tests {
                 thread_id: Some("owned-thread".into()),
                 active_thread_id: None,
                 kept_threads: HashSet::new(),
+                retained_thread_id: None,
             })
         );
     }
