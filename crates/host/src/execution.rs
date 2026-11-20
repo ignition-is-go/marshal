@@ -13,8 +13,8 @@ pub struct Execution {
 }
 
 impl Execution {
-    pub async fn execute(&self, request: ExecutionRequest) -> ExecutionResult {
-        match self.run(request).await {
+    pub async fn execute(&self, request: ExecutionRequest, host_token: &str) -> ExecutionResult {
+        match self.run(request, host_token).await {
             Ok(result) => result,
             Err(error) => ExecutionResult::Rejected {
                 reason: error.to_string(),
@@ -22,7 +22,7 @@ impl Execution {
         }
     }
 
-    async fn run(&self, request: ExecutionRequest) -> Result<ExecutionResult> {
+    async fn run(&self, request: ExecutionRequest, host_token: &str) -> Result<ExecutionResult> {
         let launch_id = match &request {
             ExecutionRequest::Start { launch_id, .. }
             | ExecutionRequest::Inspect { launch_id }
@@ -63,15 +63,28 @@ impl Execution {
                 } else {
                     // Keep the directory before calling tmux: a timeout can
                     // leave a running process that still has to report its join.
-                    let join_dir = tempfile::Builder::new()
-                        .prefix("marshal-join-")
-                        .tempdir()?
-                        .keep();
-                    let join_file = join_dir.join("session");
+                    let mut state = tempfile::Builder::new();
+                    state.prefix("marshal-join-");
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt as _;
+                        state.permissions(std::fs::Permissions::from_mode(0o700));
+                    }
+                    let join_dir = state.tempdir()?;
+                    let proof_file = join_dir.path().join("assignment-proof");
+                    std::fs::write(
+                        &proof_file,
+                        marshal_entities::assignment_proof(host_token, &launch_id.to_string()),
+                    )
+                    .context("writing launch assignment proof")?;
+                    let proof_file = proof_file.to_str().context("proof path is not UTF-8")?;
+                    let join_file = join_dir.path().join("session");
                     let join_file = join_file.to_str().context("join path is not UTF-8")?;
                     let intent_env = format!("MARSHAL_LAUNCH_INTENT={intent}");
                     let join_env = format!("MARSHAL_HOST_JOIN_FILE={join_file}");
                     let launch_env = format!("MARSHAL_AGENT_ID={launch_id}");
+                    let proof_env = format!("MARSHAL_ASSIGNMENT_PROOF_FILE={proof_file}");
+                    let join_dir = join_dir.keep();
                     let mut args = vec![
                         "new-session",
                         "-d",
@@ -85,6 +98,7 @@ impl Execution {
                         &join_env,
                         "env",
                         &launch_env,
+                        &proof_env,
                     ];
                     args.extend_from_slice(launcher);
                     match tmux(&args).await {

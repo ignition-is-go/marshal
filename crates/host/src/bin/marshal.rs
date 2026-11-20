@@ -304,10 +304,18 @@ async fn accept_assignment(id: &str) -> Result<()> {
     let session: String =
         serde_json::from_slice(&std::fs::read(&join).context("reading launch session identity")?)?;
     anyhow::ensure!(!session.is_empty(), "launch session has not joined yet");
-    if let Some(proof) = std::env::var_os("MARSHAL_ASSIGNMENT_PROOF") {
-        let proof = proof
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("invalid assignment proof"))?;
+    let proof = if let Some(path) = std::env::var_os("MARSHAL_ASSIGNMENT_PROOF_FILE") {
+        Some(std::fs::read_to_string(path).context("reading launch assignment proof")?)
+    } else {
+        std::env::var_os("MARSHAL_ASSIGNMENT_PROOF")
+            .map(|proof| {
+                proof
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("invalid assignment proof"))
+            })
+            .transpose()?
+    };
+    if let Some(proof) = proof {
         let launch_id =
             marshal_client::hooks::agent_id_from_env().context("missing Marshal launch ID")?;
         let client = connect().await?;

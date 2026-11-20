@@ -138,9 +138,9 @@ Install the matching Claude or Codex session-start hooks on launch-enabled
 hosts. A launch only moves to Joined when its host reports a session that also
 registered the matching launch ID. Offered means the assignment is in that
 session's inbox. Delivered means that session acknowledged the inbox message.
-The launched worker uses `marshal task accept <id>` to record acceptance on
-its host. Marshal creates the claim when the authenticated host reports the
-matching task and session.
+The launched worker uses `marshal task accept <id>` to submit acceptance
+over Myko. The launch host supplies a proof scoped to the launch, and Marshal
+grants the claim after verifying the task and session.
 
 An authenticated operator can list active leases with `marshal task claims`.
 Use its task and lease IDs with `marshal task renew <id> <lease-id>` to extend

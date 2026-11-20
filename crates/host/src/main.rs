@@ -98,5 +98,7 @@ async fn run_connection(
     )
     .await??;
     log::info!("registered host {}", connection.host_id);
-    connection.run(|request| execution.execute(request)).await
+    connection
+        .run(|request| execution.execute(request, token))
+        .await
 }
