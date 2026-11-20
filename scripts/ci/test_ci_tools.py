@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import check_workflows
+import clean_failed_restore
 import qualify_compiler_cache
 import report_resources
 
@@ -77,6 +78,76 @@ class WorkflowValidationTests(unittest.TestCase):
                 capture_output=True, text=True, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class FailedRestoreCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name).resolve()
+        self.target = self.root / "target"
+        self.target.mkdir()
+        (self.target / "partial-artifact").write_text("incomplete")
+        (self.root / "Cargo.toml").write_text("source")
+        (self.root / "src").mkdir()
+        (self.root / "src/lib.rs").write_text("source code")
+
+    def clean(self, target=None, build=None):
+        metadata = {"target_directory": str(target if target is not None else self.target)}
+        if build is not None:
+            metadata["build_directory"] = str(build)
+        with patch.object(clean_failed_restore.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(metadata))):
+            clean_failed_restore.clean_failed_restore(self.root)
+
+    def test_discards_partial_outputs_without_touching_source_or_sibling(self):
+        sibling = self.root / "unrelated-target"
+        sibling.mkdir()
+        (sibling / "keep").write_text("other job")
+        self.clean(build=self.target / "build")
+        self.assertFalse(self.target.exists())
+        self.assertEqual((self.root / "Cargo.toml").read_text(), "source")
+        self.assertEqual((sibling / "keep").read_text(), "other job")
+
+    def test_all_paths_are_validated_before_any_cleanup(self):
+        for unsafe in [self.root, self.root / "src", self.root.parent / "shared-target"]:
+            with self.subTest(unsafe=unsafe), self.assertRaises(ValueError):
+                self.clean(build=unsafe)
+            self.assertEqual((self.target / "partial-artifact").read_text(), "incomplete")
+            self.assertEqual((self.root / "src/lib.rs").read_text(), "source code")
+
+    def test_relative_target_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.clean(target=Path("target"))
+        self.assertTrue((self.target / "partial-artifact").exists())
+
+    @unittest.skipIf(os.name == "nt", "Symlink fixture requires Unix")
+    def test_symlink_target_is_rejected_without_following_it(self):
+        with tempfile.TemporaryDirectory() as outside:
+            other = Path(outside)
+            (other / "keep").write_text("shared")
+            link = self.target / "linked-build"
+            link.symlink_to(other, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                self.clean(build=link)
+            self.assertEqual((other / "keep").read_text(), "shared")
+            self.assertTrue((self.target / "partial-artifact").exists())
+
+    def test_restore_failure_recovers_before_unchanged_build_gates(self):
+        import yaml
+        workflow = yaml.safe_load((Path(check_workflows.ROOT) / ".github/workflows/ci.yml").read_text())
+        for name in ["check", "browser-auth", "windows-cross-check"]:
+            steps = workflow["jobs"][name]["steps"]
+            restore = next(i for i, step in enumerate(steps) if step.get("id") == "compiler-snapshot")
+            self.assertIs(steps[restore]["continue-on-error"], True)
+            recovery = steps[restore + 1]
+            self.assertEqual(recovery["if"], "steps.compiler-snapshot.outcome == 'failure'")
+            self.assertEqual(recovery["run"], "python3 scripts/ci/clean_failed_restore.py")
+            self.assertNotIn("continue-on-error", recovery)
+        check_runs = [step.get("run") for step in workflow["jobs"]["check"]["steps"]]
+        for gate in ["cargo flux run check", "cargo flux run lint", "cargo flux run test"]:
+            self.assertIn(gate, check_runs)
+            step = next(step for step in workflow["jobs"]["check"]["steps"] if step.get("run") == gate)
+            self.assertNotIn("continue-on-error", step)
 
 
 class ResourceReportingTests(unittest.TestCase):

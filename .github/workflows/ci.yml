@@ -14,7 +14,7 @@ jobs:
     runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
     # Backstop so a stuck step (e.g. a flaky apt mirror, a hung runner) fails
     # in minutes instead of burning to GitHub's 6-hour default.
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -31,7 +31,7 @@ jobs:
         timeout-minutes: 1
         run: python3 scripts/ci/report_resources.py
 
-      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev python3-venv
+      - run: sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev python3-venv tmux strace
       - name: Install pinned workflow validator
         run: |
           bash scripts/ci/install-actionlint.sh "$RUNNER_TEMP/actionlint"
@@ -49,7 +49,30 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      - run: cargo install cargo-flux
+        with:
+          save-if: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+          cache-targets: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+      - name: Set up Cargo Flux and ROSE cache
+        uses: ignition-is-go/cargo-flux@ae2ffa5f4420add3ab3c98665a4b5c0374bf2a5b
+        with:
+          version: 0.12.0
+          cache: ${{ env.CI_NATIVE_CACHE_CONFIGURED == 'true' && 's3' || '' }}
+          cache-endpoint: ${{ vars.CI_CACHE_S3_ENDPOINT || secrets.CI_CACHE_ENDPOINT }}
+          cache-bucket: ${{ vars.CI_CACHE_S3_BUCKET || secrets.CI_CACHE_BUCKET }}
+          cache-access-key-id: ${{ secrets.CI_CACHE_S3_ACCESS_KEY_ID || secrets.CI_CACHE_ACCESS_KEY }}
+          cache-secret-access-key: ${{ secrets.CI_CACHE_S3_SECRET_ACCESS_KEY || secrets.CI_CACHE_SECRET_KEY }}
+      - name: Restore ROSE compiler snapshot
+        id: compiler-snapshot
+        continue-on-error: true
+        if: env.CI_NATIVE_CACHE_CONFIGURED == 'true'
+        uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
+        with:
+          operation: restore
+          scope: check
+          plugin: cargo
+      - name: Discard failed ROSE snapshot before a cold build
+        if: steps.compiler-snapshot.outcome == 'failure'
+        run: python3 scripts/ci/clean_failed_restore.py
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
@@ -67,6 +90,14 @@ jobs:
       - run: cargo flux run check
       - run: cargo flux run lint
       - run: cargo flux run test
+      - name: Preserve native process failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-tmux-processes
+          path: ${{ runner.temp }}/native-tmux-processes
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Test native embedding-agent registration and reconnect
         run: |
           cargo build -p marshal-daemon -p marshal-shim --bins
@@ -88,11 +119,21 @@ jobs:
         timeout-minutes: 1
         run: python3 scripts/ci/report_resources.py
 
+      - name: Save ROSE snapshot and clean local Cargo targets
+        if: success() && steps.compiler-snapshot.outputs.state != ''
+        uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
+        with:
+          operation: save
+          state: ${{ steps.compiler-snapshot.outputs.state }}
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/scripts/ci/native-test-runner.sh
+      CI_NATIVE_CACHE_CONFIGURED: ${{ (secrets.CI_CACHE_S3_ACCESS_KEY_ID || secrets.CI_CACHE_ACCESS_KEY) != '' }}
   browser-auth:
     runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
     timeout-minutes: 30
     env:
       NO_COLOR: "true"
+      CI_NATIVE_CACHE_CONFIGURED: ${{ (secrets.CI_CACHE_S3_ACCESS_KEY_ID || secrets.CI_CACHE_ACCESS_KEY) != '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Authenticate private Cargo dependencies
@@ -105,6 +146,30 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+          cache-targets: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+      - name: Set up Cargo Flux and ROSE cache
+        uses: ignition-is-go/cargo-flux@ae2ffa5f4420add3ab3c98665a4b5c0374bf2a5b
+        with:
+          version: 0.12.0
+          cache: ${{ env.CI_NATIVE_CACHE_CONFIGURED == 'true' && 's3' || '' }}
+          cache-endpoint: ${{ vars.CI_CACHE_S3_ENDPOINT || secrets.CI_CACHE_ENDPOINT }}
+          cache-bucket: ${{ vars.CI_CACHE_S3_BUCKET || secrets.CI_CACHE_BUCKET }}
+          cache-access-key-id: ${{ secrets.CI_CACHE_S3_ACCESS_KEY_ID || secrets.CI_CACHE_ACCESS_KEY }}
+          cache-secret-access-key: ${{ secrets.CI_CACHE_S3_SECRET_ACCESS_KEY || secrets.CI_CACHE_SECRET_KEY }}
+      - name: Restore ROSE compiler snapshot
+        id: compiler-snapshot
+        continue-on-error: true
+        if: env.CI_NATIVE_CACHE_CONFIGURED == 'true'
+        uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
+        with:
+          operation: restore
+          scope: browser-auth
+          plugin: cargo
+      - name: Discard failed ROSE snapshot before a cold build
+        if: steps.compiler-snapshot.outcome == 'failure'
+        run: python3 scripts/ci/clean_failed_restore.py
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2
         with:
           tool: trunk@0.21.14
@@ -160,6 +225,12 @@ jobs:
   # weeks because nothing in CI ever cross-compiled it. This job does, on
   # every PR, so a Windows-only break fails the check instead of the next
   # manual cross-build.
+      - name: Save ROSE snapshot and clean local Cargo targets
+        if: success() && steps.compiler-snapshot.outputs.state != ''
+        uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
+        with:
+          operation: save
+          state: ${{ steps.compiler-snapshot.outputs.state }}
   windows-cross-check:
     runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
     timeout-minutes: 20
@@ -181,6 +252,30 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+          cache-targets: ${{ env.CI_NATIVE_CACHE_CONFIGURED != 'true' }}
+      - name: Set up Cargo Flux and ROSE cache
+        uses: ignition-is-go/cargo-flux@ae2ffa5f4420add3ab3c98665a4b5c0374bf2a5b
+        with:
+          version: 0.12.0
+          cache: ${{ env.CI_NATIVE_CACHE_CONFIGURED == 'true' && 's3' || '' }}
+          cache-endpoint: ${{ vars.CI_CACHE_S3_ENDPOINT || secrets.CI_CACHE_ENDPOINT }}
+          cache-bucket: ${{ vars.CI_CACHE_S3_BUCKET || secrets.CI_CACHE_BUCKET }}
+          cache-access-key-id: ${{ secrets.CI_CACHE_S3_ACCESS_KEY_ID || secrets.CI_CACHE_ACCESS_KEY }}
+          cache-secret-access-key: ${{ secrets.CI_CACHE_S3_SECRET_ACCESS_KEY || secrets.CI_CACHE_SECRET_KEY }}
+      - name: Restore ROSE compiler snapshot
+        id: compiler-snapshot
+        continue-on-error: true
+        if: env.CI_NATIVE_CACHE_CONFIGURED == 'true'
+        uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
+        with:
+          operation: restore
+          scope: windows-cross-check
+          plugin: cargo
+      - name: Discard failed ROSE snapshot before a cold build
+        if: steps.compiler-snapshot.outcome == 'failure'
+        run: python3 scripts/ci/clean_failed_restore.py
       - name: Install mingw-w64 cross linker
         # Bound apt's network waits (Acquire timeouts + retries) so a flaky
         # azure.archive.ubuntu.com mirror can't hang the job indefinitely —
@@ -204,6 +299,14 @@ jobs:
   # the launcher/bridge behavior. Run the real multi-process wake canary on a
   # native Windows host as well: Windows Codex TUIs own isolated loopback
   # app-servers, so each bridge must wake only the thread its endpoint owns.
+      - name: Save ROSE snapshot and clean local Cargo targets
+        if: success() && steps.compiler-snapshot.outputs.state != ''
+        uses: ignition-is-go/pulse-actions/actions/flux-target-cache@9a22a3c3987bfa13c1619f6bc3ff14de893e35e8
+        with:
+          operation: save
+          state: ${{ steps.compiler-snapshot.outputs.state }}
+    env:
+      CI_NATIVE_CACHE_CONFIGURED: ${{ (secrets.CI_CACHE_S3_ACCESS_KEY_ID || secrets.CI_CACHE_ACCESS_KEY) != '' }}
   windows-native-wake:
     runs-on: {group: ci-windows-ephemeral, labels: [self-hosted, Windows, X64, ram-ge-8g, disk-ge-100g]}
     timeout-minutes: 20
