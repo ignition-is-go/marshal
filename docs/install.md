@@ -119,6 +119,14 @@ when recreating an existing task. Use `marshal task dep add <id> <blocker-id>`
 to link tasks after both exist. `marshal task close <id> [commit]` records completion with optional
 commit evidence, and `marshal task reopen <id>` reopens the task.
 
+For a manual Levi migration, create the tasks you want to carry over first and
+record the Marshal ID printed for each Levi ID. Include the original ID in a
+label such as `levi:lv-abcd` if agents still refer to it. Recreate dependency
+edges using the new IDs on both ends. Use the project’s Git origin as its
+Marshal project key so the board and repo discovery find the same tasks. For
+work already in progress, use an authenticated operator to claim the new task
+for the current session.
+
 Press `t` in `marshal-tui` to open the task board and use `[` and `]` to
 filter by project. Press `d` to select a task, host, and harness, then enter
 the workspace and press Enter to dispatch. When server authentication is enabled, set
