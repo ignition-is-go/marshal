@@ -3893,6 +3893,11 @@ mod tests {
                 json!({"id":7,"result":{"thread":{"id":"resumed-thread"}}}),
                 "resumed-thread",
             ),
+            (
+                json!({"id":8,"method":"thread/start","params":{"ephemeral":true}}),
+                json!({"id":8,"result":{"thread":{"id":"title-thread"}}}),
+                "resumed-thread",
+            ),
         ] {
             tui.send(WebSocketMessage::Text(request.to_string().into()))
                 .await
