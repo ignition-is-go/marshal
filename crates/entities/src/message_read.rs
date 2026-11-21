@@ -10,7 +10,7 @@
 //! idempotent.
 
 use myko::myko_item;
-use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
+use myko::prelude::{EventPublishing as _, Querying as _, RequestScoped as _};
 
 use crate::message::Message;
 
