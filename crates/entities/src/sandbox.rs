@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use myko::command::{CommandContext, CommandError, CommandHandler};
-use myko::prelude::{EventPublishing as _, Querying as _, RegistryScoped as _, RequestScoped as _};
+use myko::prelude::{EventPublishing as _, Querying as _, RequestScoped as _};
 use myko::{myko_command, myko_item};
 use serde::{Deserialize, Serialize};
 
