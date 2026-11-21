@@ -20,7 +20,7 @@ case "$1" in
           cat "/sys/fs/cgroup/$resource"
         fi
       done > "$traces/cgroup-$$.txt"
-      timeout --kill-after=5s 60s strace -f -s 128 \
+      timeout --kill-after=5s 60s strace -f -ttt -T -s 128 \
         -e trace=process,pipe,pipe2,dup,dup2,dup3,chdir,fchdir,prlimit64,setpgid \
         -e raw=execve,execveat,chdir \
         -o "$traces/trace-$$.log" "$@"

@@ -278,7 +278,7 @@ class NativeTestRunnerTests(unittest.TestCase):
                                    'shift 2\nexec "$@"\n')
                     env = dict(os.environ, PATH=str(bindir), RUNNER_TEMP=str(root),
                                CALLS=str(root / "calls"), EVENTS=str(root / "events"),
-                               DIRECT_STATUS=str(direct), DIAG_STATUS=str(diagnostic),
+                               DIRECT_STATUS=str(direct), DIAG_STATUS=str(diagnostic), DIAGNOSTIC="0",
                                TIMEOUT_MODE=tools)
                     result = subprocess.run(["/bin/bash", str(runner), str(binary), "literal argument", "--exact"],
                                             env=env, capture_output=True, text=True, timeout=5)
@@ -291,7 +291,7 @@ class NativeTestRunnerTests(unittest.TestCase):
                         self.assertEqual(events, "")
                         self.assertFalse((root / "native-tmux-processes").exists())
                     elif tools in ("all", "timeout"):
-                        self.assertIn("--kill-after=5s 60s strace", events)
+                        self.assertIn("--kill-after=5s 60s strace -f -ttt -T -s 128", events)
 
 
 if __name__ == "__main__":
