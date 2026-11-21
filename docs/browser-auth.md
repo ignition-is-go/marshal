@@ -3,7 +3,6 @@
 Marshal serves agent coordination over Myko. Bind the agent WebSocket, HTTP
 MCP, and hooks to loopback or a trusted VPN network. Agents on that network
 can keep their existing MCP configuration and coordinate without credentials.
-Verified operator console operations cannot be called anonymously.
 
 The separate Pulse Marshal UI repository owns the browser dashboard and its
 Pulse sign-in and presence service. Browser credential handling lives on that
@@ -32,9 +31,21 @@ OAuth resource metadata and validates the issuer, audience, and token expiry.
 Marshal requires the `marshal:coordinate` scope and limits the credential to
 coordination operations.
 
-Route the published MCP endpoint and its resource metadata only to this
-listener. Keep the trusted relay, hook, and dashboard monitoring routes inside
-the VPN. Existing VPN MCP configurations need no changes.
+On the public HTTPS origin, forward `/myko/mcp` and these metadata paths
+to the authenticated listener without rewriting the request path.
+
+- `/.well-known/oauth-protected-resource/myko/mcp`
+- `/.well-known/oauth-protected-resource`
+
+Keep the WebSocket relay, hook endpoints, and dashboard origin inside the VPN.
+Existing VPN MCP configurations need no changes.
+
+Verify the public URL from outside the VPN. An anonymous MCP coordination
+request returns `401` with a `WWW-Authenticate` header. Follow its
+`resource_metadata` URL and confirm the metadata lists the public MCP URL,
+the configured issuer, and the `marshal:coordinate` scope. Repeat the request
+with a token issued for the configured audience and scope. From inside the
+VPN, run the agent delivery check against the existing MCP and hook endpoints.
 
 ## Local compatibility checks
 
