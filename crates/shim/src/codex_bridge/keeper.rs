@@ -185,7 +185,7 @@ mod tests {
                 let reply = if resumable {
                     json!({"id":2,"result":{"thread":{"id":"kept-thread"}}})
                 } else {
-                    json!({"id":2,"error":{"code":-32600,"message":"no rollout found"}})
+                    json!({"id":2,"error":{"code":-32600,"message":"invalid paginated history lineage for kept-thread: missing source rollout"}})
                 };
                 write_rpc(&mut websocket, &reply).await.unwrap();
             }
