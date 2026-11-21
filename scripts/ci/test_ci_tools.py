@@ -245,5 +245,54 @@ class CompilerCacheProbeTests(unittest.TestCase):
         self.assertNotIn("startup", report)
 
 
+@unittest.skipUnless(os.name == "posix", "requires the native Linux runner")
+class NativeTestRunnerTests(unittest.TestCase):
+    def test_direct_status_is_authoritative_and_diagnostics_are_bounded(self):
+        runner = Path(__file__).with_name("native-test-runner.sh").resolve()
+        for direct, diagnostic, tools in [
+            (0, 0, "all"), (23, 0, "all"), (23, 31, "all"),
+            (23, 0, "missing-strace"), (23, 0, "missing-timeout"),
+            (23, 0, "timeout"),
+        ]:
+            with self.subTest(direct=direct, diagnostic=diagnostic, tools=tools):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    binary = root / "tmux_adapter-fixture"
+                    bindir = root / "bin"
+                    bindir.mkdir()
+                    def executable(path, body):
+                        path.write_text("#!/bin/sh\n" + body)
+                        path.chmod(0o700)
+                    executable(binary, 'printf "%s\\n" "$@" >> "$CALLS"\n'
+                               'if [ "${DIAGNOSTIC:-}" = 1 ]; then exit "$DIAG_STATUS"; fi\n'
+                               'exit "$DIRECT_STATUS"\n')
+                    for tool in ("cat", "mkdir"):
+                        (bindir / tool).symlink_to(shutil.which(tool))
+                    if tools != "missing-strace":
+                        executable(bindir / "strace", 'printf "trace\\n" >> "$EVENTS"\n'
+                                   'while [ "$1" != -o ]; do shift; done\nshift 2\n'
+                                   'DIAGNOSTIC=1; export DIAGNOSTIC\nexec "$@"\n')
+                    if tools != "missing-timeout":
+                        executable(bindir / "timeout", 'printf "%s\\n" "$*" >> "$EVENTS"\n'
+                                   'if [ "$TIMEOUT_MODE" = timeout ]; then exit 124; fi\n'
+                                   'shift 2\nexec "$@"\n')
+                    env = dict(os.environ, PATH=str(bindir), RUNNER_TEMP=str(root),
+                               CALLS=str(root / "calls"), EVENTS=str(root / "events"),
+                               DIRECT_STATUS=str(direct), DIAG_STATUS=str(diagnostic), DIAGNOSTIC="0",
+                               TIMEOUT_MODE=tools)
+                    result = subprocess.run(["/bin/bash", str(runner), str(binary), "literal argument", "--exact"],
+                                            env=env, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, direct, result.stderr)
+                    calls = (root / "calls").read_text().splitlines()
+                    expected = 2 if direct and tools == "all" else 1
+                    self.assertEqual(calls, ["literal argument", "--exact"] * expected)
+                    events = (root / "events").read_text() if (root / "events").exists() else ""
+                    if direct == 0:
+                        self.assertEqual(events, "")
+                        self.assertFalse((root / "native-tmux-processes").exists())
+                    elif tools in ("all", "timeout"):
+                        self.assertIn("--kill-after=5s 60s strace -f -ttt -T -s 128", events)
+
+
 if __name__ == "__main__":
     unittest.main()

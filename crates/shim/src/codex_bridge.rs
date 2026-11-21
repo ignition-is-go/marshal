@@ -2669,6 +2669,23 @@ where
     .context("writing app-server request")
 }
 
+#[derive(Debug)]
+struct AppServerRpcError {
+    error: Value,
+}
+
+impl std::fmt::Display for AppServerRpcError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Codex app-server rejected request: {}",
+            self.error
+        )
+    }
+}
+
+impl std::error::Error for AppServerRpcError {}
+
 async fn read_response<S>(websocket: &mut WebSocketStream<S>, wanted_id: i64) -> Result<Value>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -2699,7 +2716,10 @@ where
             continue;
         }
         if let Some(error) = message.get("error") {
-            anyhow::bail!("Codex app-server rejected request: {error}");
+            return Err(AppServerRpcError {
+                error: error.clone(),
+            }
+            .into());
         }
         return message
             .get("result")
@@ -2743,7 +2763,10 @@ where
             serde_json::from_str(text.as_ref()).context("decoding app-server response")?;
         if message.get("id").and_then(Value::as_i64) == Some(wanted_id) {
             if let Some(error) = message.get("error") {
-                anyhow::bail!("Codex app-server rejected request: {error}");
+                return Err(AppServerRpcError {
+                    error: error.clone(),
+                }
+                .into());
             }
             let result = message
                 .get("result")
@@ -2763,6 +2786,40 @@ mod tests {
     use marshal_entities::{HostInfo, MessageId, MessageReadId};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::{accept_async, connect_async};
+
+    #[tokio::test]
+    async fn response_readers_preserve_rpc_errors_through_anyhow_context() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        for collecting in [false, true] {
+            let error_value = json!({"code":-32600,"message":"requested thread is unavailable","data":{"threadId":"requested-thread"}});
+            let (client, server) = tokio::io::duplex(4096);
+            let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+            write_rpc(&mut server, &json!({"id":42,"error":error_value}))
+                .await
+                .unwrap();
+            let error = if collecting {
+                read_response_collecting(&mut client, 42)
+                    .await
+                    .map(|(value, _)| value)
+            } else {
+                read_response(&mut client, 42).await
+            }
+            .unwrap_err();
+            let display = format!("Codex app-server rejected request: {error_value}");
+            assert_eq!(error.to_string(), display);
+            let error = error.context("keeper subscription");
+            assert_eq!(
+                error.downcast_ref::<AppServerRpcError>().unwrap().error,
+                error_value
+            );
+            assert_eq!(
+                format!("{error:#}"),
+                format!("keeper subscription: {display}")
+            );
+        }
+    }
 
     #[test]
     fn managed_resume_uses_saved_permissions_and_does_not_replay_inputs() {
