@@ -166,6 +166,10 @@ mod tests {
         json!({"code":-32600,"message":"invalid paginated history lineage for 01a1fbd0-cfa8-7e30-b0f5-ccbaa27034bc: missing source rollout"})
     }
 
+    fn unsupported_error() -> Value {
+        json!({"code":-32601,"message":"list_turns is not supported yet"})
+    }
+
     async fn request(websocket: &mut Peer) -> Value {
         serde_json::from_str(websocket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()
     }
@@ -273,6 +277,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(request(&mut websocket).await, first);
+            write_rpc(&mut websocket, &json!({"id":2,"error":unsupported_error()}))
+                .await
+                .unwrap();
+            assert_eq!(request(&mut websocket).await, first);
             assert!(
                 tokio::time::timeout(Duration::from_millis(100), websocket.next())
                     .await
@@ -327,6 +335,9 @@ mod tests {
             Some(json!({"id":2,"error":{"code":-32600,"message":"permission denied"}})),
             Some(json!({"id":2,"error":{"code":-32603,"message":lineage_error()["message"]}})),
             Some(json!({"id":2,"error":{"code":"-32600","message":lineage_error()["message"]}})),
+            Some(json!({"id":2,"error":{"code":-32601,"message":"list_items is not supported yet"}})),
+            Some(json!({"id":2,"error":{"code":-32600,"message":"list_turns is not supported yet"}})),
+            Some(json!({"id":2,"error":{"code":"-32601","message":"list_turns is not supported yet"}})),
             Some(json!({"id":2,"error":null})),
             Some(json!({"id":2,"result":{"thread":{"id":"different-thread"}}})),
             None,
@@ -363,6 +374,15 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_retryable_errors_share_the_total_initialization_and_retry_deadline() {
+        assert_retry_deadline(lineage_error()).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_unsupported_history_never_becomes_kept_and_times_out() {
+        assert_retry_deadline(unsupported_error()).await;
+    }
+
+    async fn assert_retry_deadline(rejection: Value) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("ws://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -382,7 +402,7 @@ mod tests {
                     json!({"id":2,"method":"thread/resume","params":{"threadId":THREAD_ID}})
                 );
                 attempts += 1;
-                if write_rpc(&mut websocket, &json!({"id":2,"error":lineage_error()}))
+                if write_rpc(&mut websocket, &json!({"id":2,"error":rejection}))
                     .await
                     .is_err()
                 {
