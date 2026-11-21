@@ -239,6 +239,9 @@ session ownership marker, and pane PID before enabling this behavior. A launch
 ID alone does not enable persistence. Each managed launch owns a dedicated
 app-server and a bridge that retains real thread subscriptions.
 
+Codex 0.171.0 is the tested baseline and minimum supported version for this
+managed runtime mode. Earlier versions have not been verified.
+
 A new empty thread remains pending until its first turn makes it resumable.
 The bridge acquires its keeper subscription before releasing the frontend's
 subscription. `/exit` and Ctrl+D close the frontend. Ctrl+C still interrupts an
