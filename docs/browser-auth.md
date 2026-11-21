@@ -1,147 +1,75 @@
-# Browser authentication and agent compatibility
+# Dashboard sign-in and Marshal access
 
-Marshal follows [rship #845](https://github.com/ignition-is-go/rship/pull/845):
-`PreparedMykoAuth` installs the shared Pulse authentication provider on the existing
-Myko listener. `MykoAuthService` is installed after replay. The UI provides Myko
-before `provide_auth`, then mounts its authenticated application through the shared
-`AuthGate` and `provide_authenticated_myko`. There is no application HTTP auth
-router, second Myko listener, custom login implementation, or credential store.
+Marshal serves agent coordination over Myko. Bind the agent WebSocket, HTTP
+MCP, and hooks to loopback or a trusted VPN network. Agents on that network
+can keep their existing MCP configuration and coordinate without credentials.
+Verified operator console operations cannot be called anonymously.
 
-The UI uses shared participant bubbles and profile menu. Roster occupies the left
-61.8% of the default layout and Session the right 38.2%. Activities are flat.
+The separate Pulse Marshal UI repository owns the browser dashboard and its
+Pulse sign-in and presence service. Browser credential handling lives on that
+service. The dashboard reads the Marshal roster, rooms, and message feed over
+a separate Myko WebSocket.
 
-## Agent contract
+## Read-only monitoring
 
-Existing coordination operations explicitly use Myko's public-operation and public
-Session SET/DEL declarations, following the reference's SDK contract. Ordinary
-agent registrations, heartbeat, messaging, named rooms, and roster queries retain
-their existing protocol. These identities remain self-asserted. Keep coordination
-and the existing HTTP hook listener on loopback or the private mesh. Browser login
-does not make that coordination data private.
+Set `MARSHAL_VIEW_BIND` to an unused loopback address such as
+`127.0.0.1:6162` to enable monitoring. It starts after Myko replay and uses
+the same live store as the agent listener. The Myko gateway rejects commands,
+client events and HTTP MCP on this listener.
 
-Verified operator consoles use a separate protected `RegisterOperatorConsole`
-command. The server derives the operator email and binds the console ID to the
-verified user. Public agent operations cannot create, mutate, delete, or send as a
-verified console. Presence participants are separate from the agent roster;
-signing in alone does not register an agent.
+On the restricted dashboard origin, route `/myko` to the Pulse auth service.
+Route the dashboard's `/marshal-view` WebSocket to `/myko` on
+`MARSHAL_VIEW_BIND`. Keep the proxy inside the VPN boundary. The read-only
+socket exposes the coordination data available to trusted clients.
 
-With the optional OAuth issuer/resource pair configured, Myko supplies standard
-MCP discovery, authorization handoff, and token admission. MCP hosts authenticate
-against the selected server using their existing OAuth support. Marshal adds no
-client-specific login flow or authenticated binary. Anonymous native coordination
-operations retain the explicitly public contract. Hook transport remains the
-existing trusted-network interface. No deployment changes are included.
+## Authenticated HTTP MCP
 
-## Configuration
+To publish MCP outside the VPN, configure a separate loopback listener with
+`MARSHAL_MCP_AUTH_BIND`. Set `MARSHAL_MCP_AUTH_ISSUER` to the Auth0 issuer,
+`MARSHAL_MCP_AUTH_AUDIENCE` to the Marshal API audience, and
+`MARSHAL_MCP_AUTH_RESOURCE` to the published HTTPS MCP endpoint. Myko advertises
+OAuth resource metadata and validates the issuer, audience, and token expiry.
+Marshal requires the `marshal:coordinate` scope and limits the credential to
+coordination operations.
 
-Without auth configuration, the daemon retains its existing trusted-agent mode.
-Configuring auth requires all five values below and a persistent session database.
-Partial configuration fails startup.
+Route the published MCP endpoint and its resource metadata only to this
+listener. Keep the trusted relay, hook, and dashboard monitoring routes inside
+the VPN. Existing VPN MCP configurations need no changes.
+
+## Local compatibility checks
+
+Build Marshal and the dashboard's auth service and WASM bundle in their
+respective checkouts. Set the following variables before running the verifier.
 
 | Variable | Value |
 | --- | --- |
-| `MARSHAL_AUTH_ISSUER` | Trusted OIDC issuer |
-| `MARSHAL_AUTH_CLIENT_ID` | Browser provider client ID |
-| `MARSHAL_AUTH_CLIENT_SECRET` | Provider secret |
-| `MARSHAL_AUTH_ORIGIN` | Exact browser origin |
-| `MARSHAL_AUTH_EMAIL_DOMAINS` | Comma-separated admitted verified domains |
-| `MARSHAL_AUTH_POSTGRES_URL` | Session database; falls back to `MYKO_POSTGRES_URL` |
-| `MARSHAL_AUTH_CA_CERT` | Optional PEM root for a private development identity provider; default public roots remain trusted |
-| `MARSHAL_AUTH_OAUTH_ISSUER` | Optional Myko OAuth authorization server issuer |
-| `MARSHAL_AUTH_OAUTH_RESOURCE` | Optional protected MCP resource; requires OAuth issuer |
-
-Serve the built UI with the existing static hosting arrangement. Forward `/myko`
-HTTP requests and WebSocket upgrades to `MARSHAL_BIND`, including Myko's OAuth
-metadata routes when OAuth is enabled. The shared browser callback is `/`.
-`/auth/user` is the shared client scope, not a Marshal HTTP route.
-
-## Validation
-
-Dependencies use Myko 6.15.1 and pulse-multi-user revision `7c3d286`, including
-[pulse-multi-user #35](https://github.com/ignition-is-go/pulse-multi-user/pull/35)
-for explicit presence operation names. Shared Pulse crates remain private source
-dependencies; crates.io packaging is unresolved and this PR is not a release.
+| `MARSHAL_FRONTEND_DIST` | Built dashboard bundle directory |
+| `MARSHAL_UI_AUTH_BINARY` | Path to the compiled Pulse dashboard auth service |
+| `PULSE_MARSHAL_UI_AUTH_POSTGRES_URL` | Disposable Postgres database for browser auth |
+| `MARSHAL_BROWSER_FIXTURE` | Optional daemon binary override |
 
 ```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo build -p marshal-daemon --example browser_fixture
-(cd crates/ui && NO_COLOR=true trunk build)
-(cd scripts/browser && npm ci && npm run verify && MARSHAL_VERIFY_OAUTH=1 npm run verify)
+cargo build --locked -p marshal-daemon
+npm ci --prefix scripts/browser
+npm --prefix scripts/browser run verify
 ```
 
-The browser fixture uses a signed local OIDC issuer, disposable in-memory sessions,
-and a fixture static proxy. It blocks `/auth/user/*` and sends browser and historical
-Myko 6.11.5 agent traffic to one Myko listener. Artifacts go under
-`scripts/browser/artifacts`. Production OIDC configuration, database persistence,
-and session expiry require separate deployment validation.
+This uses a signed local identity provider. Production identity-provider
+behavior and VPN reachability require separate rollout checks. Browser
+sessions may reset during the upgrade. Existing VPN agent clients should
+reconnect with the same configuration and exchange messages.
 
-The optional OAuth fixture validates discovery, explicit consent, PKCE code exchange,
-code replay rejection, refresh, protected MCP execution, and browser logout revoking
-the delegated MCP token. It uses the same shared production integration.
 
-## Isolated development setup
-
-Build the actual daemon and UI bundle, then point it at a dedicated local Postgres
-17 database whose name contains `dev`. Keep the database separate from both the
-live Marshal database and other applications' development databases.
+For the daemon cutover, run the independent agent verifier with the released
+baseline and candidate binaries. Set `MYKO_POSTGRES_URL` to an empty disposable
+coordination database. The verifier uses the same legacy Myko client, relay
+address, and database throughout the upgrade and rollback.
 
 ```sh
-cargo build --locked -p marshal-daemon --bin marshal-daemon
-(cd crates/ui && NO_COLOR=true trunk build)
+cd scripts/browser
+bun build legacy-client.mjs --target=node --format=esm --outfile=artifacts/legacy-client.mjs
+node verify-agent-upgrade.mjs /path/to/baseline/marshal-daemon /path/to/candidate/marshal-daemon
 ```
 
-For a local manual walkthrough with the signed test issuer:
-
-```sh
-export MYKO_POSTGRES_URL # Set privately to the dedicated local dev database URL.
-node scripts/browser/dev.mjs --fixture
-```
-
-The server listens at `http://127.0.0.1:8878`. Alice and Bob are test accounts.
-This mode runs the real daemon with persisted auth sessions and coordination
-state, but does not validate the real identity provider. Other machines can use
-an SSH forward to the dev host's loopback port. The launcher does not bind public
-or mesh interfaces.
-
-For real provider sign-in, register a dedicated development OAuth application
-with callback and origin `http://localhost:8878/`, set the five required
-`MARSHAL_AUTH_*` variables including `MARSHAL_AUTH_ORIGIN=http://localhost:8878`, and run the launcher without
-`--fixture`. Use `http://localhost:8878/` consistently with that registration.
-A protected JSON file containing environment keys can be supplied through
-`MARSHAL_DEV_CONFIG` instead of exporting individual values. Do not commit it.
-The launcher defaults to the test issuer only when `--fixture` is explicit.
-
-To repeat the automated checks against the actual daemon and database:
-
-```sh
-MARSHAL_VERIFY_RESTART=1 npm --prefix scripts/browser run verify
-```
-
-This requires the dedicated database URL and the built daemon. The check exercises
-browser login, two-user presence, old agent compatibility, graceful daemon stop,
-new-process startup, durable console/message replay, browser session restoration,
-presence reconnect, and logout revocation after restart. It never resets the live
-Marshal daemon. CI runs this check against its own temporary Postgres cluster.
-
-Before production rollout, validate the dedicated dev OAuth application with real
-sign-in, the intended HTTPS origin and ingress, MCP host consent, and the existing
-agent launchers. Session expiry and the final release/package artifact remain
-separate acceptance checks. A local signed-issuer pass does not satisfy those gates.
-
-For a mesh-accessible dev URL, keep the local launcher on loopback behind a
-separate HTTPS proxy. Set `MARSHAL_DEV_ORIGIN` to that HTTPS origin so the test
-issuer and callback use the address opened in the browser. When the dev issuer
-uses a private CA, set `MARSHAL_AUTH_CA_CERT` to its PEM root for the daemon and
-`NODE_EXTRA_CA_CERTS` for the launcher. The daemon uses the shared Pulse
-`AuthState::new_with_http_client` integration with an additional trusted root;
-certificate verification and HTTPS-only issuer requests remain enabled. No auth
-routes or token implementation are added to the proxy.
-
-The dev UI consumes the shared `NotificationToast` / `NotificationToasts`
-primitives from pulse-leptos-ui revision `e19e88c1`. A single toast stack reads
-Marshal's existing `Notifications` store alongside the rightmost footer bell.
-Toast expiry or dismissal preserves bell history. The immutable workspace patch
-keeps multi-user widgets and Marshal on the same shared UI crate; CI authenticates
-that private source alongside the existing private dependencies. Replace this
-source pin with the published shared release during release packaging.
+Set `MARSHAL_AGENT_UPGRADE_RECEIPT` to a file path to save the binary hashes
+and per-phase message and process IDs as JSON.

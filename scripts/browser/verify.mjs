@@ -1,10 +1,10 @@
 import { startDevRuntime } from './dev-runtime.mjs';
 import assert from 'node:assert/strict';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 import { MykoClient, ConnectionStatus, decode } from './artifacts/legacy-client.mjs';
-import { randomUUID, randomBytes, createHash } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 const artifacts = resolve(import.meta.dirname, process.env.MARSHAL_BROWSER_ARTIFACTS ?? 'artifacts');
 await mkdir(artifacts, { recursive: true });
@@ -13,77 +13,31 @@ const errors = [];
 const transportErrors = [];
 const check = async (name, action) => { await action(); checks.push(name); console.log('PASS ' + name); };
 const runtime = await startDevRuntime({errors});
-const {origin, proxy, issuer, binary, agentPort, startDaemon} = runtime;
-const artifact = {binary, sha256:createHash('sha256').update(await readFile(binary)).digest('hex'), postgres:Boolean(process.env.MYKO_POSTGRES_URL), restart:Boolean(process.env.MARSHAL_VERIFY_RESTART), issuer:'signed test issuer'};
-let child = startDaemon();
+const {origin, proxy, issuer, binary, dist, agentPort, authBinary, startAuth, startDaemon} = runtime;
+const frontendFiles = (await readdir(dist)).filter(name => /\.(html|js|wasm)$/.test(name)).sort();
+assert.ok(frontendFiles.includes('index.html') && frontendFiles.some(name => name.endsWith('.wasm')),
+  'browser verification requires a built UI bundle');
+const frontend = Object.fromEntries(await Promise.all(frontendFiles.map(async name => [
+  name, createHash('sha256').update(await readFile(resolve(dist, name))).digest('hex'),
+])));
+const artifact = {binary, sha256:createHash('sha256').update(await readFile(binary)).digest('hex'), postgres:Boolean(process.env.MYKO_POSTGRES_URL), issuer:'signed test issuer', frontend};
+artifact.auth = { binary: authBinary, sha256: createHash('sha256').update(await readFile(authBinary)).digest('hex') };
+const authChild = startAuth();
+const child = startDaemon();
 let browser;
-const sockets = [];
 const legacy = new MykoClient();
 let legacyRows = [];
 let legacySubscription;
 const agentSession = (id) => ({ id, pid: 42, cwd: '/fixture', connectedAt: Date.now(), operator: 'legacy-agent', agentId: 'existing-client', channelsEnabled: false });
 const emit = (item, changeType) => legacy.sendEvent({ item, changeType, itemType: 'Session', createdAt: new Date().toISOString(), tx: randomUUID(), sourceId: 'marshal-browser-verification' });
 const command = (commandId, command) => legacy.sendCommand({ commandId, command }, { timeoutMs: 10000 });
-const mcp = async (port, code, token) => {
-  const response = await fetch(`http://127.0.0.1:${port}/myko/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? {authorization: `Bearer ${token}`} : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {name: 'execute', arguments: {code}} }) });
+const mcp = async (port, code) => {
+  const response = await fetch(`http://127.0.0.1:${port}/myko/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {name: 'execute', arguments: {code}} }) });
   return { status: response.status, body: await response.json() };
 };
 try {
-  await expect.poll(async () => { try { return (await mcp(agentPort, "return await myko.query('GetAllSessions',{});")).status; } catch { return 0; } }, { timeout: 20000 }).toBe(process.env.MARSHAL_VERIFY_OAUTH ? 401 : 200);
+  await expect.poll(async () => { try { return (await mcp(agentPort, "return await myko.query('GetAllSessions',{});")).status; } catch { return 0; } }, { timeout: 20000 }).toBe(200);
   browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-  if (process.env.MARSHAL_VERIFY_OAUTH) {
-    await check('standard MCP OAuth discovery, consent, exchange, refresh and logout use shared Myko', async () => {
-      const resource = origin + '/myko/mcp';
-      const discovery = await fetch(resource, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})});
-      assert.equal(discovery.status,200);
-      const tools = await discovery.json();
-      assert.ok(tools.result.tools.some(tool => tool.name === 'execute'));
-      const challenge = await fetch(resource, {method:'POST',headers:{'content-type':'application/json'},body:'{}'});
-      assert.equal(challenge.status,401);
-      assert.match(challenge.headers.get('www-authenticate'), /resource_metadata/);
-      const metadata = await (await fetch(origin + '/.well-known/oauth-authorization-server/myko/oauth')).json();
-      assert.equal(metadata.issuer, origin + '/myko/oauth');
-      const redirect = origin + '/oauth-callback';
-      const registration = await fetch(metadata.registration_endpoint, {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({client_name:'Marshal MCP fixture', redirect_uris:[redirect], token_endpoint_auth_method:'none', grant_types:['authorization_code','refresh_token']})});
-      assert.equal(registration.status,201);
-      const client = await registration.json();
-      const verifier = randomBytes(48).toString('base64url');
-      const authorize = new URL(metadata.authorization_endpoint);
-      authorize.search = new URLSearchParams({response_type:'code',client_id:client.client_id,redirect_uri:redirect,resource,code_challenge_method:'S256',code_challenge:createHash('sha256').update(verifier).digest('base64url'),state:'marshal-fixture'}).toString();
-      const context = await browser.newContext();
-      await context.route('**/auth/user/**', route => route.abort());
-      await context.route(redirect + '?**', route => route.fulfill({status:200,body:'Authorized'}));
-      const page = await context.newPage();
-      await page.goto(authorize.href);
-      await page.getByTestId('auth-google').click();
-      await page.getByRole('button',{name:'Alice',exact:true}).click();
-      await expect(page.getByTestId('oauth-consent')).toBeVisible({timeout:30000});
-      assert.ok(!page.url().startsWith(redirect));
-      await page.getByTestId('oauth-allow').click();
-      await page.waitForURL(redirect + '?**');
-      const callback = new URL(page.url());
-      assert.equal(callback.searchParams.get('state'),'marshal-fixture');
-      assert.equal(callback.searchParams.get('iss'),metadata.issuer);
-      const exchange = new URLSearchParams({grant_type:'authorization_code',client_id:client.client_id,redirect_uri:redirect,resource,code:callback.searchParams.get('code'),code_verifier:verifier});
-      const reply = await fetch(metadata.token_endpoint,{method:'POST',body:exchange});
-      assert.equal(reply.status,200);
-      const token = await reply.json();
-      const query = "return await myko.query('GetAllSandboxRuns',{});";
-      const result = await mcp(proxy.address().port,query,token.access_token);
-      assert.equal(result.status,200);
-      assert.ok(!result.body.error && !result.body.result?.isError,JSON.stringify(result.body));
-      assert.equal((await fetch(metadata.token_endpoint,{method:'POST',body:exchange})).status,400);
-      const refreshed = await fetch(metadata.token_endpoint,{method:'POST',body:new URLSearchParams({grant_type:'refresh_token',client_id:client.client_id,resource,refresh_token:token.refresh_token})});
-      assert.equal(refreshed.status,200);
-      const next = await refreshed.json();
-      assert.equal((await mcp(proxy.address().port,query,next.access_token)).status,200);
-      await page.goto(origin);
-      await page.getByRole('button',{name:'Account menu',exact:true}).click();
-      await page.getByRole('button',{name:'Sign out',exact:true}).click();
-      await expect(page.getByTestId('auth-google')).toBeVisible();
-      assert.equal((await mcp(proxy.address().port,query,next.access_token)).status,401);
-    });
-  } else {
   const aliceContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const bobContext = await browser.newContext({ viewport: { width: 1000, height: 850 } });
   aliceContext.setDefaultTimeout(15000);
@@ -91,7 +45,6 @@ try {
   const alice = await aliceContext.newPage();
   const bob = await bobContext.newPage();
   let preloginSockets = 0;
-  const authReplies = [];
   for (const context of [aliceContext, bobContext]) await context.route('**/auth/user/**', route => route.abort());
   for (const page of [alice, bob]) {
     page.on('pageerror', (error) => errors.push(error.message));
@@ -100,7 +53,6 @@ try {
       socket.on('framereceived', ({payload}) => {
         try {
           const message = typeof payload === 'string' ? JSON.parse(payload) : decode(payload);
-          if (page === alice && message.data?.response?.body?.credential) authReplies.push(message.data.response.body);
           if (message.event?.includes('error')) transportErrors.push(message);
         } catch {}
       });
@@ -114,7 +66,10 @@ try {
     const response = await fetch(origin + '/myko/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'execute',arguments:{code:"return await myko.query('GetAllSessions',{});"}}}) });
     const rejection = await response.json();
     assert.equal(response.status, 200);
-    assert.ok(!rejection.error && !rejection.result?.isError, JSON.stringify(rejection));
+    assert.ok(rejection.error || rejection.result?.isError, 'Pulse auth endpoint must not serve Marshal roster');
+    const relay = await mcp(agentPort, "return await myko.query('GetAllSessions',{});");
+    assert.equal(relay.status, 200);
+    assert.ok(!relay.body.error && !relay.body.result?.isError, JSON.stringify(relay.body));
     const protectedCall = await mcp(agentPort, "return await myko.command('RegisterOperatorConsole',{session:{id:'console-anonymous:tab'}});");
     assert.ok(protectedCall.status === 401 || protectedCall.body.error || protectedCall.body.result?.isError);
   });
@@ -182,7 +137,6 @@ try {
       await page.getByRole('button', {name:'Alice',exact:true}).click();
       await expect.poll(() => denied).toBe(true);
       await expect(page.getByTestId('auth-google')).toBeVisible();
-      await expect(page.getByTestId('auth-google')).toBeVisible();
       await expect(page.getByTestId('status-footer')).toHaveCount(0);
     } finally { await context.close(); }
   });
@@ -196,118 +150,40 @@ try {
     assert.ok(geometry[0].x < geometry[1].x);
     assert.ok(Math.abs(geometry[0].width / (geometry[0].width + geometry[1].width) - 0.618034) < 0.01);
   });
-  await check('flat activities open the verified Console and its heartbeat stops offline', async () => {
-    await expect(alice.getByRole('button', {name:'Views', exact:true})).toHaveCount(0);
-    await alice.getByRole('button', {name:'Console', exact:true}).first().click();
-    const existing = new Set(legacyRows.map((row) => row.id));
-    await alice.getByRole('button', {name:'go online', exact:true}).click();
-    await expect.poll(() => legacyRows.find((row) => !existing.has(row.id) && row.operator === 'alice@fixture.test')?.id).toBeTruthy();
-    const row = legacyRows.find((row) => !existing.has(row.id) && row.operator === 'alice@fixture.test');
-    const initial = row.lastActivityAt;
-    await expect.poll(() => legacyRows.find((candidate) => candidate.id === row.id)?.lastActivityAt, {timeout:8000}).toBeGreaterThan(initial);
-    await alice.getByRole('button', {name:'go offline', exact:true}).click();
-    await expect.poll(() => legacyRows.some((candidate) => candidate.id === row.id)).toBe(false);
+  await check('dashboard exposes monitoring views without Marshal write controls', async () => {
+    await expect(alice.getByRole('button', {name:'Console', exact:true})).toHaveCount(0);
+    await expect(alice.getByText('legacy-b', {exact:true}).first()).toBeVisible();
+    await expect(alice.getByRole('button', {name:'go online', exact:true})).toHaveCount(0);
+    await alice.getByRole('button', {name:'Zoo', exact:true}).first().click();
+    await expect(alice.getByRole('heading', {name:'Marshal Zoo', exact:true})).toBeVisible();
+    await expect(alice.getByLabel('Import Zoo run')).toHaveCount(0);
     await alice.getByRole('button', {name:'Roster', exact:true}).first().click();
   });
-  await expect.poll(() => authReplies.length).toBeGreaterThan(0);
-  const session = authReplies.at(-1);
-  const ownConsole = `console-${session.user.id}:verification`;
-  await check('browser console identity is derived from verified login', async () => {
-    const proposed = { ...agentSession(ownConsole), operator: 'forged@fixture.test' };
-    const response = await mcp(agentPort, `return await myko.command('RegisterOperatorConsole', {session:${JSON.stringify(proposed)}});`, session.credential);
-    assert.equal(response.status, 200);
-    assert.ok(!response.body.result?.isError, JSON.stringify(response.body));
-    await expect.poll(() => legacyRows.find((row) => row.id === ownConsole)?.operator).toBe('alice@fixture.test');
-  });
-  await check('verified operator identities cannot be impersonated', async () => {
-    for (const operation of ['RegisterSession', 'RegisterOperatorConsole']) {
-      const anonymous = await mcp(agentPort, `return await myko.command('${operation}', {session:${JSON.stringify(agentSession(ownConsole))}});`);
-      assert.ok(anonymous.status === 401 || anonymous.body.error || anonymous.body.result?.isError);
-    }
-    for (const asSession of ['console-another-user:tab']) {
-      const response = await mcp(agentPort, `return await myko.command('SendMessage', ${JSON.stringify({asSession,toSessionId:'legacy-b',body:'forbidden spoof',responseRequired:false})});`, session.credential);
-      assert.ok(response.body.error || response.body.result?.isError, JSON.stringify(response.body));
-    }
-    const response = await mcp(agentPort, `return await myko.command('SendMessage', ${JSON.stringify({asSession:ownConsole,toSessionId:'legacy-b',body:'verified operator message',responseRequired:false})});`, session.credential);
-    assert.ok(!response.body.error && !response.body.result?.isError, JSON.stringify(response.body));
-    const inbox = await command('ReadMessages', {asSession:'legacy-b',inbox:true,sent:false,unread:true});
-    assert.ok(JSON.stringify(inbox).includes('verified operator message'));
-    assert.ok(!JSON.stringify(inbox).includes('forbidden spoof'));
-  });
-  const protectedSocket = new WebSocket(`ws://127.0.0.1:${agentPort}/myko`, ['myko', `myko.bearer.${Buffer.from(session.credential).toString('base64url')}`]);
-  sockets.push(protectedSocket);
-  const socketMessages = [];
-  protectedSocket.addEventListener('message', (event) => { if (typeof event.data === 'string') socketMessages.push(JSON.parse(event.data)); });
-  await expect.poll(() => protectedSocket.readyState).toBe(WebSocket.OPEN);
-  await check('authenticated WebSockets reject raw Session injection', async () => {
-    const injected = `console-${session.user.id}:raw-injection`;
-    protectedSocket.send(JSON.stringify({event:'ws:m:event',data:{item:agentSession(injected),changeType:'SET',itemType:'Session',createdAt:new Date().toISOString(),tx:randomUUID(),sourceId:'browser-verification'}}));
-    const tx = randomUUID();
-    protectedSocket.send(JSON.stringify({event:'ws:m:query',data:{queryId:'GetAllSessions',queryItemType:'Session',query:{tx,createdAt:new Date().toISOString()}}}));
-    await expect.poll(() => socketMessages.some((message) => message.event === 'ws:m:query-response' && message.data.tx === tx)).toBe(true);
-    assert.ok(!JSON.stringify(socketMessages).includes(injected));
-  });
-  await alice.screenshot({ path: resolve(artifacts, 'marshal-footer.png'), fullPage: true });
-  await check('second signed-in browser mounts independently', async () => { await login(bob, 'Bob'); });
-  await check('operator bubbles share presence without changing the agent roster', async () => {
+  await check('Pulse presence and logout operate independently of the Marshal relay', async () => {
+    await login(bob, 'Bob');
     await expect(alice.locator('.pulse-room-participant[aria-label^="Bob"]')).toBeVisible();
-    await expect(bob.locator('.pulse-room-participant[aria-label^="Alice"]')).toBeVisible();
-    assert.ok(!legacyRows.some((row) => row.operator === 'bob@fixture.test'));
-    await bob.screenshot({path:resolve(artifacts,'marshal-presence.png'),fullPage:true});
-  });
-  if (process.env.MARSHAL_VERIFY_RESTART) {
-    await check('real daemon restart preserves sessions, messages, users and authenticated browser access', async () => {
-      assert.ok(process.env.MYKO_POSTGRES_URL, 'restart validation requires isolated Postgres');
-      assert.ok(!binary.endsWith('browser_fixture'), 'restart validation must run the actual daemon');
-      const previousPid = child.pid;
-      const exited = new Promise(done => child.once('exit', done));
-      child.kill('SIGTERM');
-      await exited;
-      child = startDaemon();
-      assert.notEqual(child.pid, previousPid);
-      await expect.poll(async () => { try { return (await mcp(agentPort, "return await myko.query('GetAllSandboxRuns',{});", session.credential)).status; } catch { return 0; } }, {timeout:30000}).toBe(200);
-      const response = await mcp(agentPort, "return await myko.query('GetAllSessions',{});", session.credential);
-      assert.ok(JSON.stringify(response.body).includes(ownConsole), 'verified console survives durable replay');
-      assert.ok(!response.body.error && !response.body.result?.isError, JSON.stringify(response.body));
-      await expect.poll(() => legacy.getConnectionStatus(), {timeout:20000}).toBe(ConnectionStatus.Connected);
-      const inbox = await command('ReadMessages', {asSession:'legacy-b',inbox:true,sent:false,unread:true});
-      assert.ok(JSON.stringify(inbox).includes('verified operator message'), 'messages survive replay');
-      await alice.reload();
-      await expect(alice.getByTestId('status-footer')).toBeVisible({timeout:30000});
-      await bob.reload();
-      await expect(bob.getByTestId('status-footer')).toBeVisible({timeout:30000});
-      await expect(alice.locator('.pulse-room-participant[aria-label^="Bob"]')).toBeVisible();
-      await expect(bob.locator('.pulse-room-participant[aria-label^="Alice"]')).toBeVisible();
-    });
-  }
-  await check('logout removes signed-in chrome, revokes browser access, and preserves agents', async () => {
-    await alice.getByRole('button', { name: 'Account menu', exact: true }).click();
-    await alice.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await alice.getByRole('button', {name:'Account menu', exact:true}).click();
+    await alice.getByRole('button', {name:'Sign out', exact:true}).click();
     await expect(alice.getByTestId('auth-google')).toBeVisible();
-    await expect(alice.getByTestId('status-footer')).toHaveCount(0);
-    await expect(bob.getByTestId('status-footer')).toBeVisible();
     await expect(bob.locator('.pulse-room-participant[aria-label^="Alice"]')).toHaveCount(0);
-    await expect.poll(() => protectedSocket.readyState, {timeout:10000}).toBe(WebSocket.CLOSED);
-    const response = await mcp(agentPort, "return await myko.query('GetAllSessions',{});", session.credential);
-    assert.equal(response.status, 401);
-    const inbox = await command('ReadMessages', {asSession:'legacy-b',inbox:true,sent:false,unread:true});
-    assert.ok(JSON.stringify(inbox).includes('verified operator message'));
+    const response = await mcp(agentPort, "return await myko.query('GetAllSessions',{});");
+    assert.equal(response.status, 200);
+    assert.ok(JSON.stringify(response.body).includes('legacy-b'));
   });
-  }
   assert.deepEqual(errors, []);
-  await writeFile(resolve(artifacts, process.env.MARSHAL_VERIFY_RESTART ? 'persistent-result.json' : process.env.MARSHAL_VERIFY_OAUTH ? 'oauth-result.json' : 'result.json'), JSON.stringify({ status: 'passed', artifact, checks }, null, 2));
+  await writeFile(resolve(artifacts, 'result.json'), JSON.stringify({ status: 'passed', artifact, checks }, null, 2));
 } catch (error) {
   const page = browser?.contexts()[0]?.pages()[0];
   const visibleText = await page?.locator('body').innerText().catch(() => '');
   await page?.screenshot({path:resolve(artifacts,'failure.png'),fullPage:true}).catch(() => {});
-  await writeFile(resolve(artifacts, process.env.MARSHAL_VERIFY_RESTART ? 'persistent-result.json' : process.env.MARSHAL_VERIFY_OAUTH ? 'oauth-result.json' : 'result.json'), JSON.stringify({ status: 'failed', artifact, checks, error: error.stack, browserErrors: errors, transportErrors, visibleText, serverLog: runtime.serverLog }, null, 2));
+  await writeFile(resolve(artifacts, 'result.json'), JSON.stringify({ status: 'failed', artifact, checks, error: error.stack, browserErrors: errors, transportErrors, visibleText, serverLog: runtime.serverLog }, null, 2));
   throw error;
 } finally {
-  for (const socket of sockets) socket.close();
   legacySubscription?.unsubscribe();
   legacy.disconnect();
   await browser?.close();
   child.kill('SIGTERM');
+  authChild.kill('SIGTERM');
   proxy.closeAllConnections();
   await new Promise((done) => proxy.close(done));
   await issuer.close();

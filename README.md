@@ -20,9 +20,7 @@ cargo install marshal-tui
 
 This puts `marshal-shim` on your `PATH`, typically `~/.cargo/bin`. Download
 `marshal-daemon-x86_64-unknown-linux-gnu` from the [same release](https://github.com/ignition-is-go/marshal/releases/latest),
-make it executable, and install it as `marshal-daemon` on the server. The daemon
-is distributed as a release binary because its shared Pulse auth dependencies
-are private Git packages. Building it from source requires repository access.
+make it executable, and install it as `marshal-daemon` on the server. The daemon is also available as a source build.
 
 ### 2. Start the daemon
 
@@ -38,7 +36,10 @@ marshal-daemon &
 # or under your favorite supervisor (systemd user unit, launchd, tmux pane, ...)
 ```
 
-The daemon binds `0.0.0.0:6155` by default (so peers on other hosts can reach it without remembering to flip a flag) and writes its event log to `~/.local/state/marshal/events.jsonl`. Restrict to localhost only with `MARSHAL_BIND=127.0.0.1:6155`.
+The daemon listens on `127.0.0.1:6155` by default. Set `MARSHAL_BIND` to
+a VPN address to allow remote agents to connect. Keep agent coordination and
+the hook listener restricted to trusted networks. Agents on those networks
+can coordinate without signing in. HTTP MCP uses the same trusted-network boundary.
 
 ### 3. Add the plugin in Claude Code
 
@@ -433,7 +434,7 @@ Code, you can instead pin it in a per-project `.mcp.json`:
 }
 ```
 
-The daemon's bind address is set with `MARSHAL_BIND` (default `0.0.0.0:6155` — set `MARSHAL_BIND=127.0.0.1:6155` to restrict to localhost).
+The daemon listens on `127.0.0.1:6155` by default. Set `MARSHAL_BIND` to the trusted network address for remote clients.
 
 ## Workspace layout
 
@@ -443,7 +444,6 @@ The daemon's bind address is set with `MARSHAL_BIND` (default `0.0.0.0:6155` —
 | [`marshal-daemon`](crates/daemon/) | Coordination daemon — roster store, event log, sweeper. |
 | [`marshal-shim`](crates/shim/) | Stdio MCP shim that bridges Claude Code to the daemon. |
 | [`marshal-tui`](crates/tui/) | Live terminal dashboard. |
-| [`marshal-ui`](crates/ui/) | Leptos operator dashboard (build target only — not published). |
 | [`@agent-marshal/marshal-pi`](plugins/marshal-pi/) | Pi native session extension. |
 | [`@agent-marshal/marshal-prime-agent`](plugins/marshal-prime-agent/) | Prime Agent live-conversation extension. |
 | [`marshal-opencode`](plugins/marshal-opencode/) | opencode native plugin. |
@@ -460,4 +460,3 @@ license, at the versions pinned here (6.11.5):
 - myko, used by every crate, and myko-macros, used by `marshal-entities`
 - autosocket, through myko
 - myko-server, used by `marshal-daemon`
-- myko-leptos, used by `marshal-ui`, whose WASM bundle ships in releases

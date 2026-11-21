@@ -69,6 +69,7 @@ fn spawn_server(bind: SocketAddr) -> ServerHandle {
             let blackhole: Arc<dyn Persister> = Arc::new(BlackholePersister);
             let server = Arc::new(
                 MykoServer::builder()
+                    .with_auth_provider(daemon::auth::trusted_relay_provider())
                     .with_bind_addr(bind)
                     .with_default_persister(blackhole)
                     .build(),

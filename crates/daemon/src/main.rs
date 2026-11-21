@@ -10,14 +10,14 @@
 use anyhow::{Context, Result};
 use myko_server::mcp::dispatch::ServerInfo;
 use myko_server::postgres::PostgresConfig;
-use myko_server::{BlackholePersister, MykoServer};
+use myko_server::{BlackholePersister, GatewayAccess, MykoServer};
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
 
-/// Default MCP/WS bind. Loopback by default: marshal carries no auth and
-/// its `asSession` self-identify is trust-on-assert, so it must not be
+/// Default MCP/WS bind. Agent coordination trusts the network and
+/// its `asSession` is self-asserted, so the service must not be
 /// reachable off-box unless deliberately exposed. Production binds the
 /// NetBird mesh hostname via `MARSHAL_BIND` — making exposure an explicit
 /// act, not a default. Port 6155 is distinct from myko's default 5155.
@@ -69,6 +69,21 @@ async fn main() -> Result<()> {
     // mesh IP being reassigned (next start re-resolves).
     let bind_addr = resolve_bind("MARSHAL_BIND", DEFAULT_BIND)?;
     let hook_bind = resolve_bind("MARSHAL_HOOK_BIND", DEFAULT_HOOK_BIND)?;
+    let view_bind = optional_loopback_bind("MARSHAL_VIEW_BIND")?;
+    let authenticated_mcp = optional_loopback_bind("MARSHAL_MCP_AUTH_BIND")?
+        .map(|address| {
+            let required = |key| {
+                std::env::var(key)
+                    .with_context(|| format!("{key} is required with MARSHAL_MCP_AUTH_BIND"))
+            };
+            let provider = daemon::auth::authenticated_mcp_provider(
+                &required("MARSHAL_MCP_AUTH_ISSUER")?,
+                &required("MARSHAL_MCP_AUTH_AUDIENCE")?,
+                &required("MARSHAL_MCP_AUTH_RESOURCE")?,
+            )?;
+            Ok::<_, anyhow::Error>((address, provider))
+        })
+        .transpose()?;
 
     // Force-link entities + sagas so their `inventory` registrations aren't
     // dead-code-eliminated.
@@ -84,18 +99,19 @@ async fn main() -> Result<()> {
     // the event table grows with session lifecycle, not with heartbeats
     // (lv-6731). Late-bound to the Postgres producer after build below.
     let session_filter = Arc::new(daemon::liveness_filter::SessionLivenessFilter::new());
-    let auth = match daemon::auth::AuthSettings::from_env()? {
-        Some(settings) => Some(daemon::auth::PreparedAuth::new(settings).await?),
-        None => None,
-    };
-    let auth_provider = auth.as_ref().map(daemon::auth::PreparedAuth::provider);
-    let auth_lifetime = Arc::new(std::sync::Mutex::new(None));
-    let auth_owner = auth_lifetime.clone();
     let mut builder = MykoServer::builder()
-        .with_auth_provider(auth_provider)
+        .with_auth_provider(daemon::auth::trusted_relay_provider())
         .try_after_init(move |server| {
-            if let Some(auth) = auth {
-                *auth_owner.lock().expect("auth lifetime lock") = Some(auth.install(server)?);
+            if let Some(address) = view_bind {
+                daemon::gateway::start(
+                    address,
+                    server,
+                    GatewayAccess::ReadOnly,
+                    daemon::auth::trusted_relay_provider(),
+                )?;
+            }
+            if let Some((address, provider)) = authenticated_mcp {
+                daemon::gateway::start(address, server, GatewayAccess::Full, provider)?;
             }
             Ok(())
         })
@@ -257,16 +273,13 @@ Options:
   -V, --version  Print the version and exit
 
 Environment:
-  MARSHAL_AUTH_ISSUER      OIDC issuer
-  MARSHAL_AUTH_CLIENT_ID   Browser OIDC client ID
-  MARSHAL_AUTH_CLIENT_SECRET  Browser OIDC client secret
-  MARSHAL_AUTH_ORIGIN      Public browser origin
-  MARSHAL_AUTH_EMAIL_DOMAINS  Comma-separated admitted verified email domains
-  MARSHAL_AUTH_POSTGRES_URL  Shared auth session database (or MYKO_POSTGRES_URL)
-  MARSHAL_AUTH_OAUTH_ISSUER  Optional Myko OAuth issuer URL
-  MARSHAL_AUTH_OAUTH_RESOURCE  Optional canonical MCP resource URL
   MARSHAL_BIND       WebSocket and MCP listen address (default {DEFAULT_BIND})
   MARSHAL_HOOK_BIND  HTTP hook listen address (default {DEFAULT_HOOK_BIND})
+  MARSHAL_VIEW_BIND  Optional loopback address for read-only Myko WebSocket
+  MARSHAL_MCP_AUTH_BIND  Optional loopback address for authenticated MCP
+  MARSHAL_MCP_AUTH_ISSUER  Trusted Auth0 issuer
+  MARSHAL_MCP_AUTH_AUDIENCE  Expected access-token audience
+  MARSHAL_MCP_AUTH_RESOURCE  Canonical HTTPS MCP resource URL
   MYKO_POSTGRES_URL  Postgres URL for durable state; without it the daemon
                      runs ephemeral and keeps nothing across a restart
   RUST_LOG           Log filter (default info)
@@ -277,6 +290,19 @@ Environment:
 
 /// Resolve a bind spec from `env_var` (or `default`) via the system
 /// resolver, so hostnames — not just numeric IPs — are accepted.
+fn optional_loopback_bind(key: &str) -> Result<Option<SocketAddr>> {
+    let address: SocketAddr = match std::env::var(key) {
+        Ok(value) => value.parse().with_context(|| format!("invalid {key}"))?,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        address.ip().is_loopback(),
+        "{key} must be a loopback address"
+    );
+    Ok(Some(address))
+}
+
 fn resolve_bind(env_var: &str, default: &str) -> Result<SocketAddr> {
     let spec = std::env::var(env_var).unwrap_or_else(|_| default.to_string());
     spec.to_socket_addrs()
