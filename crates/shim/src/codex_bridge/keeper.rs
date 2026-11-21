@@ -11,19 +11,24 @@ pub(super) struct ThreadKeepers {
     threads: tokio::sync::Mutex<HashMap<String, ThreadKeeper>>,
 }
 
-fn retryable_rollout_error(error: &anyhow::Error, thread_id: &str) -> bool {
+fn retryable_subscription_error(error: &anyhow::Error, thread_id: &str) -> bool {
     let Some(rpc) = error.downcast_ref::<AppServerRpcError>() else {
         return false;
     };
-    if rpc.error.get("code").and_then(Value::as_i64) != Some(-32600) {
-        return false;
-    }
     let Some(message) = rpc.error.get("message").and_then(Value::as_str) else {
         return false;
     };
-    message == format!("no rollout found for thread id {thread_id}")
-        || message
-            == format!("invalid paginated history lineage for {thread_id}: missing source rollout")
+    match rpc.error.get("code").and_then(Value::as_i64) {
+        Some(-32600) => {
+            message == format!("no rollout found for thread id {thread_id}")
+                || message
+                    == format!(
+                        "invalid paginated history lineage for {thread_id}: missing source rollout"
+                    )
+        }
+        Some(-32601) => message == "list_turns is not supported yet",
+        _ => false,
+    }
 }
 
 impl std::fmt::Debug for ThreadKeepers {
@@ -101,7 +106,7 @@ impl ThreadKeepers {
                     );
                     break;
                 }
-                Err(error) if retryable_rollout_error(&error, thread_id) => {
+                Err(error) if retryable_subscription_error(&error, thread_id) => {
                     log::debug!("[codex-bridge] keeper pending for {thread_id}: {error:#}");
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
@@ -232,17 +237,63 @@ mod tests {
             let error = anyhow::Error::new(AppServerRpcError { error: value })
                 .context("keeper acquisition");
             assert_eq!(
-                retryable_rollout_error(&error, THREAD_ID),
+                retryable_subscription_error(&error, THREAD_ID),
                 expected,
                 "{error:#}"
             );
-            assert!(!retryable_rollout_error(
+            assert!(!retryable_subscription_error(
                 &error,
                 "different-requested-thread"
             ));
         }
-        assert!(!retryable_rollout_error(
+        assert!(!retryable_subscription_error(
             &anyhow::anyhow!("Codex app-server rejected request: {}", lineage_error()),
+            THREAD_ID
+        ));
+    }
+
+    #[test]
+    fn only_exact_unsupported_turn_history_is_retryable() {
+        for (value, expected) in [
+            (unsupported_error(), true),
+            (
+                json!({"code":-32601,"message":"list_items is not supported yet"}),
+                false,
+            ),
+            (
+                json!({"code":-32601,"message":"list_turns is not supported yet suffix"}),
+                false,
+            ),
+            (
+                json!({"code":-32601,"message":"prefix list_turns is not supported yet"}),
+                false,
+            ),
+            (
+                json!({"code":-32600,"message":"list_turns is not supported yet"}),
+                false,
+            ),
+            (
+                json!({"code":"-32601","message":"list_turns is not supported yet"}),
+                false,
+            ),
+            (
+                json!({"code":-32601.0,"message":"list_turns is not supported yet"}),
+                false,
+            ),
+            (json!({"code":-32601,"message":null}), false),
+            (json!({"code":-32601,"message":42}), false),
+            (json!({"message":"list_turns is not supported yet"}), false),
+        ] {
+            let error = anyhow::Error::new(AppServerRpcError { error: value })
+                .context("keeper acquisition");
+            assert_eq!(
+                retryable_subscription_error(&error, THREAD_ID),
+                expected,
+                "{error:#}"
+            );
+        }
+        assert!(!retryable_subscription_error(
+            &anyhow::anyhow!("Codex app-server rejected request: {}", unsupported_error()),
             THREAD_ID
         ));
     }
@@ -335,9 +386,15 @@ mod tests {
             Some(json!({"id":2,"error":{"code":-32600,"message":"permission denied"}})),
             Some(json!({"id":2,"error":{"code":-32603,"message":lineage_error()["message"]}})),
             Some(json!({"id":2,"error":{"code":"-32600","message":lineage_error()["message"]}})),
-            Some(json!({"id":2,"error":{"code":-32601,"message":"list_items is not supported yet"}})),
-            Some(json!({"id":2,"error":{"code":-32600,"message":"list_turns is not supported yet"}})),
-            Some(json!({"id":2,"error":{"code":"-32601","message":"list_turns is not supported yet"}})),
+            Some(
+                json!({"id":2,"error":{"code":-32601,"message":"list_items is not supported yet"}}),
+            ),
+            Some(
+                json!({"id":2,"error":{"code":-32600,"message":"list_turns is not supported yet"}}),
+            ),
+            Some(
+                json!({"id":2,"error":{"code":"-32601","message":"list_turns is not supported yet"}}),
+            ),
             Some(json!({"id":2,"error":null})),
             Some(json!({"id":2,"result":{"thread":{"id":"different-thread"}}})),
             None,
