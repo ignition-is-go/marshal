@@ -4,7 +4,7 @@ name: Release
 # Release, and fans out binary builds and registry publication. The Linux
 # deploy artifacts are uploaded before package publication begins: a registry
 # credential or availability failure must never leave a valid release tag with
-# no binaries for pulse-deploy to install.
+# no deployment binaries.
 
 on:
   push:
@@ -189,12 +189,12 @@ jobs:
           # The Linux deploy artifacts build and upload before the optional
           # Windows cross toolchain. v0.49.6 and v0.49.7 both hit the 40-min
           # backstop inside the mingw apt install — the mirror TRICKLED bytes,
-          # which Acquire's stall timeouts never trip. A Windows/UI failure
+          # which Acquire's stall timeouts never trip. A Windows build failure
           # below is therefore visible with fleet-deployable Linux assets
           # already present.
-          cargo build --release -p marshal-daemon
-          cargo build --release -p marshal-shim
-          cargo build --release -p marshal-launch -p marshal-launch-ssh
+          cargo build --locked --release -p marshal-daemon
+          cargo build --locked --release -p marshal-shim
+          cargo build --locked --release -p marshal-launch -p marshal-launch-ssh
           cp target/release/marshal-launch marshal-launch-x86_64-unknown-linux-gnu
           cp target/release/marshal-launch-ssh marshal-launch-ssh-x86_64-unknown-linux-gnu
           cp target/release/marshal-daemon  marshal-daemon-x86_64-unknown-linux-gnu
@@ -211,7 +211,7 @@ jobs:
           # and the hard `timeout` bounds a mirror that keeps trickling bytes
           # (the 2026-08-19 failure mode — 33 min inside one apt install).
           sudo timeout 8m apt-get install -y -o Acquire::Retries=3 mingw-w64
-          cargo build --release -p marshal-shim --target x86_64-pc-windows-gnu
+          cargo build --locked --release -p marshal-shim --target x86_64-pc-windows-gnu
           cp target/x86_64-pc-windows-gnu/release/marshal-shim.exe marshal-shim-x86_64-pc-windows-gnu.exe
 
           gh release upload "v$VERSION" --clobber marshal-shim-x86_64-pc-windows-gnu.exe
@@ -224,7 +224,7 @@ jobs:
 
   # Registry publication is deliberately downstream of the deploy artifacts.
   # It remains a required job (so missing credentials are visible), but cannot
-  # strand a GitHub Release without the binaries used by pulse-deploy.
+  # strand a GitHub Release without its deployment binaries.
   publish-packages:
     needs: release
     if: needs.release.outputs.skip == 'false' || inputs.publish_version != ''
@@ -329,7 +329,7 @@ jobs:
         run: |
           VERSION="${{ needs.release.outputs.version }}"
           rustup target add aarch64-apple-darwin
-          cargo build --release -p marshal-shim --target aarch64-apple-darwin
+          cargo build --locked --release -p marshal-shim --target aarch64-apple-darwin
           cp target/aarch64-apple-darwin/release/marshal-shim marshal-shim-aarch64-apple-darwin
           gh release upload "v$VERSION" --clobber \
             marshal-shim-aarch64-apple-darwin
