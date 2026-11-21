@@ -52,7 +52,7 @@ impl Authorizer for AuthenticatedRelayPolicy {
         if !identity.scopes.iter().any(|scope| scope == MCP_SCOPE) {
             return Err(AuthError::Forbidden);
         }
-        MarshalPolicy.authorize_anonymous(request)
+        MarshalPolicy.authorize(identity, request)
     }
 
     fn authorize_anonymous(&self, _: AuthorizationRequest<'_>) -> Result<(), AuthError> {
