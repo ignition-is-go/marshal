@@ -6,13 +6,19 @@ import { resolve } from 'node:path';
 import { startOidcFixture } from './oidc-provider.mjs';
 
 // Static hosting and transport forwarding for local dev and verification only.
-// Authentication is always supplied by the daemon's shared Myko integration.
+// The dashboard auth process and Marshal can be run independently.
 export async function startDevRuntime({ fixture = true, binary: configuredBinary, port = 0, errors = [] } = {}) {
+  const authVariables = ['MARSHAL_UI_AUTH_BINARY', 'PULSE_MARSHAL_UI_AUTH_POSTGRES_URL'];
   if (!fixture) {
-    for (const name of ['MARSHAL_AUTH_ISSUER', 'MARSHAL_AUTH_CLIENT_ID', 'MARSHAL_AUTH_CLIENT_SECRET', 'MARSHAL_AUTH_EMAIL_DOMAINS']) {
-      if (!process.env[name]) throw new Error(name + ' is required for configured dev authentication');
-    }
+    authVariables.push(...['ISSUER', 'CLIENT_ID', 'CLIENT_SECRET', 'EMAIL_DOMAINS'].map(name => 'PULSE_MARSHAL_UI_AUTH_' + name));
   }
+  for (const name of authVariables) {
+    if (!process.env[name]) throw new Error(name + ' is required for dashboard authentication');
+  }
+  if (!process.env.MARSHAL_FRONTEND_DIST) {
+    throw new Error('MARSHAL_FRONTEND_DIST must point to a built dashboard bundle');
+  }
+  const dist = resolve(process.env.MARSHAL_FRONTEND_DIST);
   const freePort = async () => {
     const server = createServer();
     await new Promise((done) => server.listen(0, '127.0.0.1', done));
@@ -22,6 +28,9 @@ export async function startDevRuntime({ fixture = true, binary: configuredBinary
   };
   const agentPort = await freePort();
   const hookPort = await freePort();
+  const authBinary = process.env.MARSHAL_UI_AUTH_BINARY;
+  const authPort = await freePort();
+  const viewPort = await freePort();
   let issuer;
   const proxy = createServer((incoming, outgoing) => {
     if (incoming.url.startsWith('/auth/user')) { outgoing.writeHead(404); outgoing.end(); return; }
@@ -36,7 +45,7 @@ export async function startDevRuntime({ fixture = true, binary: configuredBinary
       return;
     }
     if (incoming.url.startsWith('/oidc/') && !issuer) { outgoing.writeHead(404); outgoing.end(); return; }
-    const port = incoming.url.startsWith('/oidc/') ? issuer.port : agentPort;
+    const port = incoming.url.startsWith('/oidc/') ? issuer.port : authPort;
     const upstream = request({ hostname: '127.0.0.1', port, path: incoming.url, method: incoming.method, headers: incoming.headers }, (response) => {
       outgoing.writeHead(response.statusCode, response.headers); response.pipe(outgoing);
     });
@@ -44,8 +53,10 @@ export async function startDevRuntime({ fixture = true, binary: configuredBinary
     incoming.pipe(upstream);
   });
   proxy.on('upgrade', (incoming, socket, head) => {
-    const upstream = connect(agentPort, '127.0.0.1', () => {
-      upstream.write(`${incoming.method} ${incoming.url} HTTP/${incoming.httpVersion}\r\n` + Object.entries(incoming.headers).map(([name, value]) => `${name}: ${value}`).join('\r\n') + '\r\n\r\n');
+    const monitoring = incoming.url === '/marshal-view';
+    const path = monitoring ? '/myko' : incoming.url;
+    const upstream = connect(monitoring ? viewPort : authPort, '127.0.0.1', () => {
+      upstream.write(`${incoming.method} ${path} HTTP/${incoming.httpVersion}\r\n` + Object.entries(incoming.headers).map(([name, value]) => `${name}: ${value}`).join('\r\n') + '\r\n\r\n');
       if (head.length) upstream.write(head);
       socket.pipe(upstream).pipe(socket);
     });
@@ -54,23 +65,39 @@ export async function startDevRuntime({ fixture = true, binary: configuredBinary
     socket.on('close', () => upstream.destroy());
   });
   await new Promise((done) => proxy.listen(port, '127.0.0.1', done));
-  const origin = process.env.MARSHAL_DEV_ORIGIN ?? (!fixture && process.env.MARSHAL_AUTH_ORIGIN ? process.env.MARSHAL_AUTH_ORIGIN : `http://127.0.0.1:${proxy.address().port}`);
+  const origin = process.env.MARSHAL_DEV_ORIGIN ?? `http://127.0.0.1:${proxy.address().port}`;
   if (fixture) issuer = await startOidcFixture({ appOrigin: origin, internalIssuer: !process.env.MARSHAL_DEV_ORIGIN });
   const target = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {cwd: resolve(import.meta.dirname, '../..'), encoding: 'utf8'})).target_directory;
-  const binary = configuredBinary ?? process.env.MARSHAL_BROWSER_FIXTURE ?? resolve(target, process.env.MARSHAL_VERIFY_RESTART ? 'debug/marshal-daemon' : 'debug/examples/browser_fixture');
-  const dist = resolve(import.meta.dirname, process.env.MARSHAL_FRONTEND_DIST ?? '../../crates/ui/dist');
+  const binary = configuredBinary ?? process.env.MARSHAL_BROWSER_FIXTURE ?? resolve(target, 'debug/marshal-daemon');
   let serverLog = '';
-  const startDaemon = () => {
-    const daemon = spawn(binary, [], { env: {
-      ...process.env, ...(process.env.MARSHAL_VERIFY_OAUTH ? {MARSHAL_AUTH_OAUTH_ISSUER: origin + '/myko/oauth', MARSHAL_AUTH_OAUTH_RESOURCE: origin + '/myko/mcp'} : {}), MARSHAL_BIND: `127.0.0.1:${agentPort}`,
-      MARSHAL_HOOK_BIND: `127.0.0.1:${hookPort}`, MARSHAL_AUTH_ORIGIN: origin,
-      ...(fixture ? {MARSHAL_AUTH_ISSUER: issuer.issuer, MARSHAL_AUTH_CLIENT_ID: issuer.clientId, MARSHAL_AUTH_CLIENT_SECRET: issuer.clientSecret, MARSHAL_AUTH_EMAIL_DOMAINS:'fixture.test'} : {}),
+  const logging = (process) => {
+    process.stdout.on('data', (data) => { serverLog += data; });
+    process.stderr.on('data', (data) => { serverLog += data; });
+    process.on('error', (error) => errors.push(error.message));
+    return process;
+  };
+  const startAuth = () => logging(spawn(authBinary, [], {
+    env: {
+      ...process.env,
+      PULSE_MARSHAL_UI_AUTH_BIND: `127.0.0.1:${authPort}`,
+      PULSE_MARSHAL_UI_AUTH_ORIGIN: origin,
+      ...(fixture ? {
+        PULSE_MARSHAL_UI_AUTH_ISSUER: issuer.issuer,
+        PULSE_MARSHAL_UI_AUTH_CLIENT_ID: issuer.clientId,
+        PULSE_MARSHAL_UI_AUTH_CLIENT_SECRET: issuer.clientSecret,
+        PULSE_MARSHAL_UI_AUTH_EMAIL_DOMAINS: 'fixture.test',
+      } : {}),
+    }, stdio: ['ignore', 'pipe', 'pipe'],
+  }));
+  const startDaemon = (daemonBinary = binary) => {
+    const daemon = spawn(daemonBinary, [], { env: {
+      ...process.env,
+      MARSHAL_BIND: `127.0.0.1:${agentPort}`,
+      MARSHAL_VIEW_BIND: `127.0.0.1:${viewPort}`,
+      MARSHAL_HOOK_BIND: `127.0.0.1:${hookPort}`,
     }, stdio: ['ignore', 'pipe', 'pipe'] });
-    daemon.stdout.on('data', (data) => { serverLog += data; });
-    daemon.stderr.on('data', (data) => { serverLog += data; });
-    daemon.on('error', (error) => errors.push(error.message));
-    return daemon;
+    return logging(daemon);
   };
 
-  return { origin, proxy, issuer, binary, agentPort, hookPort, startDaemon, get serverLog() { return serverLog; } };
+  return { origin, proxy, issuer, binary, dist, agentPort, hookPort, authBinary, authPort, startAuth, startDaemon, get serverLog() { return serverLog; } };
 }

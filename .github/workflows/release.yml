@@ -4,7 +4,7 @@ name: Release
 # Release, and fans out binary builds and registry publication. The Linux
 # deploy artifacts are uploaded before package publication begins: a registry
 # credential or availability failure must never leave a valid release tag with
-# no binaries for pulse-deploy to install.
+# no deployment binaries.
 
 on:
   push:
@@ -31,7 +31,7 @@ concurrency:
 jobs:
   release:
     runs-on: ["self-hosted", "Linux", "X64", "ram-ge-16g", "disk-ge-100g"]
-    # Backstop: this job does apt + cross-build + the marshal-ui WASM bundle +
+    # Backstop: this job does apt + cross-build +
     # upload. A flaky apt mirror hung it ~2h on 2026-06-18; fail in minutes.
     timeout-minutes: 40
     permissions:
@@ -51,11 +51,6 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-      - name: Authenticate private Cargo dependencies
-        uses: ./.github/actions/private-cargo
-        with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Report runner resources
         if: always()
         continue-on-error: true
@@ -80,12 +75,6 @@ jobs:
           gh --version
           jq --version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      # Prebuilt trunk (fast) — builds the marshal-ui WASM bundle shipped as a
-      # release asset below.
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2
-        with:
-          tool: trunk
-
       - run: cargo install cargo-flux
 
       # Re-sync before checking the subject. A serialized run may have been
@@ -130,7 +119,6 @@ jobs:
             marshal-daemon-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-unknown-linux-gnu \
             marshal-shim-x86_64-pc-windows-gnu.exe \
-            marshal-ui-dist.tar.gz \
             marshal-shim-aarch64-apple-darwin; do
             if ! grep -Fxq "$asset" <<<"$ASSETS"; then
               COMPLETE=false
@@ -201,12 +189,12 @@ jobs:
           # The Linux deploy artifacts build and upload before the optional
           # Windows cross toolchain. v0.49.6 and v0.49.7 both hit the 40-min
           # backstop inside the mingw apt install — the mirror TRICKLED bytes,
-          # which Acquire's stall timeouts never trip. A Windows/UI failure
+          # which Acquire's stall timeouts never trip. A Windows build failure
           # below is therefore visible with fleet-deployable Linux assets
           # already present.
-          cargo build --release -p marshal-daemon
-          cargo build --release -p marshal-shim
-          cargo build --release -p marshal-launch -p marshal-launch-ssh
+          cargo build --locked --release -p marshal-daemon
+          cargo build --locked --release -p marshal-shim
+          cargo build --locked --release -p marshal-launch -p marshal-launch-ssh
           cp target/release/marshal-launch marshal-launch-x86_64-unknown-linux-gnu
           cp target/release/marshal-launch-ssh marshal-launch-ssh-x86_64-unknown-linux-gnu
           cp target/release/marshal-daemon  marshal-daemon-x86_64-unknown-linux-gnu
@@ -223,20 +211,10 @@ jobs:
           # and the hard `timeout` bounds a mirror that keeps trickling bytes
           # (the 2026-08-19 failure mode — 33 min inside one apt install).
           sudo timeout 8m apt-get install -y -o Acquire::Retries=3 mingw-w64
-          cargo build --release -p marshal-shim --target x86_64-pc-windows-gnu
+          cargo build --locked --release -p marshal-shim --target x86_64-pc-windows-gnu
           cp target/x86_64-pc-windows-gnu/release/marshal-shim.exe marshal-shim-x86_64-pc-windows-gnu.exe
 
-          # marshal-ui: build the Leptos/WASM dashboard to a static bundle and
-          # ship it as a release asset, so the pulse-deploy `marshal_ui` role
-          # downloads + serves it (like the daemon binary) — no compiler on the
-          # marshal LXC. Platform-independent, so no triple suffix.
-          rustup target add wasm32-unknown-unknown
-          ( cd crates/ui && trunk build --release )
-          tar -czf marshal-ui-dist.tar.gz -C crates/ui/dist .
-
-          gh release upload "v$VERSION" --clobber \
-            marshal-shim-x86_64-pc-windows-gnu.exe \
-            marshal-ui-dist.tar.gz
+          gh release upload "v$VERSION" --clobber marshal-shim-x86_64-pc-windows-gnu.exe
 
       - name: Report runner resources
         if: always()
@@ -246,7 +224,7 @@ jobs:
 
   # Registry publication is deliberately downstream of the deploy artifacts.
   # It remains a required job (so missing credentials are visible), but cannot
-  # strand a GitHub Release without the binaries used by pulse-deploy.
+  # strand a GitHub Release without its deployment binaries.
   publish-packages:
     needs: release
     if: needs.release.outputs.skip == 'false' || inputs.publish_version != ''
@@ -279,13 +257,6 @@ jobs:
           git show "$GITHUB_SHA:scripts/publish-cargo-package.sh" > scripts/publish-cargo-package.sh
           git show "$GITHUB_SHA:scripts/publish-npm-package.sh" > scripts/publish-npm-package.sh
           chmod +x scripts/publish-cargo-package.sh scripts/publish-npm-package.sh
-          mkdir -p .github/actions/private-cargo
-          git show "$GITHUB_SHA:.github/actions/private-cargo/action.yml" > .github/actions/private-cargo/action.yml
-      - name: Authenticate private Cargo dependencies
-        uses: ./.github/actions/private-cargo
-        with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Install package build dependencies
         run: |
           sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
@@ -342,11 +313,6 @@ jobs:
         with:
           # Build the exact commit the release job stamped + tagged.
           ref: v${{ needs.release.outputs.version }}
-      - name: Authenticate private Cargo dependencies
-        uses: ./.github/actions/private-cargo
-        with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Report runner resources
         if: always()
         continue-on-error: true
@@ -363,7 +329,7 @@ jobs:
         run: |
           VERSION="${{ needs.release.outputs.version }}"
           rustup target add aarch64-apple-darwin
-          cargo build --release -p marshal-shim --target aarch64-apple-darwin
+          cargo build --locked --release -p marshal-shim --target aarch64-apple-darwin
           cp target/aarch64-apple-darwin/release/marshal-shim marshal-shim-aarch64-apple-darwin
           gh release upload "v$VERSION" --clobber \
             marshal-shim-aarch64-apple-darwin
@@ -373,66 +339,3 @@ jobs:
         continue-on-error: true
         timeout-minutes: 1
         run: python3 scripts/ci/report_resources.py
-
-  notify-pulse-deploy:
-    needs: [release, publish-packages, build-macos]
-    if: >-
-      ${{
-        needs.release.outputs.skip == 'false' &&
-        needs.release.result == 'success' &&
-        needs.publish-packages.result == 'success' &&
-        needs.build-macos.result == 'success'
-      }}
-    runs-on: {group: ci-untrusted, labels: [self-hosted, Linux, X64, ram-ge-16g, disk-ge-100g]}
-    permissions:
-      contents: read
-    steps:
-      - name: Install release notification dependencies
-        run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources
-          sudo timeout 8m apt-get update \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
-          sudo timeout 8m apt-get install -y -o Acquire::Retries=3 gh jq
-          gh --version
-          jq --version
-
-      - name: Mint pulse-deploy dispatch token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ignition-is-go
-          repositories: pulse-deploy
-          permission-contents: write
-
-      - name: Dispatch immutable release metadata
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          SOURCE_GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: v${{ needs.release.outputs.version }}
-          RELEASE_SHA: ${{ needs.release.outputs.release_sha }}
-        run: |
-          set -euo pipefail
-          published_at=$(GH_TOKEN="$SOURCE_GH_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .published_at)
-          payload=$(jq -cn \
-            --arg schema "marshal-release.v1" \
-            --arg delivery_id "${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.${RELEASE_SHA}" \
-            --arg repository "$GITHUB_REPOSITORY" \
-            --arg tag "$RELEASE_TAG" \
-            --arg release_sha "$RELEASE_SHA" \
-            --arg source_run_id "$GITHUB_RUN_ID" \
-            --arg source_run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg published_at "$published_at" \
-            '{event_type: "marshal-release.v1", client_payload: {
-              schema: $schema,
-              delivery_id: $delivery_id,
-              repository: $repository,
-              tag: $tag,
-              release_sha: $release_sha,
-              source_run_id: $source_run_id,
-              source_run_attempt: $source_run_attempt,
-              published_at: $published_at
-            }}')
-          gh api --method POST repos/ignition-is-go/pulse-deploy/dispatches --input - <<<"$payload"

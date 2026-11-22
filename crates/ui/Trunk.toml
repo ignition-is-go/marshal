@@ -1,6 +1,0 @@
-[serve]
-address = "127.0.0.1"
-port = 6160
-
-[build]
-target = "index.html"
