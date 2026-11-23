@@ -221,6 +221,11 @@ idle, the interactive CLI must run through:
 marshal-shim codex-run [CODEX_ARGS...]
 ```
 
+Launch wrappers can provide `AGENT_SESSION_NAME` as the initial name for an
+unnamed Codex conversation. Marshal prepends its nickname, for example
+`[sunny-summit] review`. Existing conversation titles and subsequent `/rename`
+values take priority over this initial name.
+
 Linux native managed tmux launches keep a dedicated Codex runtime and Marshal
 bridge after the frontend exits. The same raw tmux attach command reopens the
 retained live thread without replaying the original prompt. Explicit managed
