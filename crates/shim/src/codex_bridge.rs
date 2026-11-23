@@ -2339,15 +2339,35 @@ async fn try_pending_registration<S>(
             name_hydrated: registration.name.is_some(),
         };
         let mut decoration = decoration;
-        if let Some(name) = try_decorate_thread_name(
-            websocket,
-            pending,
-            &decoration,
-            registration.name.as_deref(),
-            request_id,
-            launcher,
-        )
-        .await
+        // Lifecycle events may omit a stored title. Read it before writing so
+        // startup cannot replace a resumed conversation's name with a nickname.
+        let selected = if let Some(launcher) = launcher {
+            launcher.lock().await.state.thread_id.as_deref() == Some(&decoration.thread_id)
+        } else {
+            false
+        };
+        if selected && !decoration.name_hydrated {
+            match read_thread_name(websocket, &decoration.thread_id, request_id).await {
+                Ok((name, notifications)) => {
+                    apply_lifecycle_notifications(pending, notifications);
+                    decoration.current_name = name;
+                    decoration.name_hydrated = true;
+                }
+                Err(error) => {
+                    log::debug!("[codex-bridge] could not hydrate thread name: {error:#}")
+                }
+            }
+        }
+        if decoration.name_hydrated
+            && let Some(name) = try_decorate_thread_name(
+                websocket,
+                pending,
+                &decoration,
+                decoration.current_name.as_deref(),
+                request_id,
+                launcher,
+            )
+            .await
         {
             decoration.current_name = Some(name);
             decoration.name_hydrated = true;
@@ -2375,7 +2395,9 @@ where
     if launcher.lock().await.state.thread_id.as_deref() != Some(&decoration.thread_id) {
         return None;
     }
-    let desired = marshal_decorated_thread_name(current_name, &decoration.nickname)?;
+    let launch_name = std::env::var("AGENT_SESSION_NAME").ok();
+    let desired =
+        marshal_decorated_thread_name(current_name, &decoration.nickname, launch_name.as_deref())?;
     if current_name == Some(desired.as_str()) {
         return None;
     }
@@ -2473,9 +2495,18 @@ where
     Ok((registration, notifications))
 }
 
-fn marshal_decorated_thread_name(current_name: Option<&str>, nickname: &str) -> Option<String> {
+fn marshal_decorated_thread_name(
+    current_name: Option<&str>,
+    nickname: &str,
+    launch_name: Option<&str>,
+) -> Option<String> {
     let base =
         strip_marshal_thread_name_prefix(current_name.unwrap_or_default().trim(), nickname).trim();
+    let base = if base.is_empty() {
+        launch_name.unwrap_or_default().trim()
+    } else {
+        base
+    };
     let marker = format!("[{nickname}]");
     Some(if base.is_empty() {
         marker
@@ -3447,34 +3478,59 @@ mod tests {
     #[test]
     fn thread_name_decoration_preserves_the_codex_title() {
         assert_eq!(
-            marshal_decorated_thread_name(Some("auth refactor"), "sunny-summit"),
+            marshal_decorated_thread_name(Some("auth refactor"), "sunny-summit", None),
             Some("[sunny-summit] auth refactor".into())
         );
         for name in [None, Some(""), Some("   "), Some("[sunny-summit]")] {
             assert_eq!(
-                marshal_decorated_thread_name(name, "sunny-summit"),
+                marshal_decorated_thread_name(name, "sunny-summit", None),
                 Some("[sunny-summit]".into())
             );
         }
         assert_eq!(
-            marshal_decorated_thread_name(Some("[sunny-summit] auth refactor"), "sunny-summit"),
+            marshal_decorated_thread_name(
+                Some("[sunny-summit] auth refactor"),
+                "sunny-summit",
+                None
+            ),
             Some("[sunny-summit] auth refactor".into())
         );
         assert_eq!(
-            marshal_decorated_thread_name(Some("[marshal:old-nick] auth refactor"), "new-nick"),
+            marshal_decorated_thread_name(
+                Some("[marshal:old-nick] auth refactor"),
+                "new-nick",
+                None
+            ),
             Some("[new-nick] auth refactor".into())
         );
         assert_eq!(
-            marshal_decorated_thread_name(Some("[draft] auth refactor"), "sunny-summit"),
+            marshal_decorated_thread_name(Some("[draft] auth refactor"), "sunny-summit", None),
             Some("[sunny-summit] [draft] auth refactor".into())
         );
         assert_eq!(
             marshal_decorated_thread_name(
                 Some("[marshal:old] [marshal:older] auth refactor"),
-                "new-nick"
+                "new-nick",
+                None
             ),
             Some("[new-nick] auth refactor".into())
         );
+    }
+
+    #[test]
+    fn launch_name_seeds_only_an_unnamed_conversation() {
+        for name in [None, Some(""), Some("[sunny-summit]")] {
+            assert_eq!(
+                marshal_decorated_thread_name(name, "sunny-summit", Some("test")),
+                Some("[sunny-summit] test".into())
+            );
+        }
+        for name in ["renamed work", "[sunny-summit] renamed work"] {
+            assert_eq!(
+                marshal_decorated_thread_name(Some(name), "sunny-summit", Some("test")),
+                Some("[sunny-summit] renamed work".into())
+            );
+        }
     }
 
     #[test]
@@ -3713,13 +3769,29 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+            // Discovery can omit a title; hydration must preserve the actual
+            // stored title rather than immediately replacing it with a nickname.
+            let hydrate = websocket.next().await.unwrap().unwrap();
+            let hydrate: Value = serde_json::from_str(hydrate.to_text().unwrap()).unwrap();
+            assert_eq!(hydrate["method"], "thread/read");
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({ "id": hydrate["id"], "result": { "thread": { "name": "stored title" } } })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
             let name_set = websocket.next().await.unwrap().unwrap();
             let name_set: Value = serde_json::from_str(name_set.to_text().unwrap()).unwrap();
             assert_eq!(name_set["method"], "thread/name/set");
             assert_eq!(name_set["params"]["threadId"], "thread-before-prompt");
             assert_eq!(
                 name_set["params"]["name"],
-                format!("[{}]", marshal_entities::nickname("session-before-prompt"))
+                format!(
+                    "[{}] stored title",
+                    marshal_entities::nickname("session-before-prompt")
+                )
             );
             websocket
                 .send(WebSocketMessage::Text(
