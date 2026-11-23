@@ -620,6 +620,7 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
     let cell = CellHarness::spawn(candidate_addr());
     let mut unrelated = hook_session("unrelated-thread", "/unrelated");
     unrelated.agent_id = Some("unrelated-owner".into());
+    unrelated.session_name = Some("unrelated title".into());
     internal_context(&cell.ctx).emit_set(&unrelated).unwrap();
     let hook_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let hook_address = hook_listener.local_addr().unwrap();
@@ -648,6 +649,8 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
     let name_sets = Arc::new(Mutex::new(Vec::<String>::new()));
     let (disconnect, _) = tokio::sync::broadcast::channel::<()>(1);
     let disconnect_for_server = disconnect.clone();
+    let (rename, _) = tokio::sync::broadcast::channel::<String>(1);
+    let rename_for_server = rename.clone();
     let name_for_server = Arc::clone(&name);
     let sets_for_server = Arc::clone(&name_sets);
     let app_server = FakeAppServer {
@@ -657,6 +660,7 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
             loop {
                 let (stream, _) = app_listener.accept().await.unwrap();
                 let mut disconnect = disconnect_for_server.subscribe();
+                let mut rename = rename_for_server.subscribe();
                 let name = Arc::clone(&name_for_server);
                 let name_sets = Arc::clone(&sets_for_server);
                 tokio::spawn(async move {
@@ -664,6 +668,16 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
                     loop {
                         let frame = tokio::select! {
                             _ = disconnect.recv() => break,
+                            Ok(updated) = rename.recv() => {
+                                let notification = json!({
+                                    "method": "thread/name/updated",
+                                    "params": {"threadId": "initial-thread", "threadName": updated}
+                                });
+                                if websocket.send(WebSocketMessage::Text(notification.to_string().into())).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
                             frame = websocket.next() => frame,
                         };
                         let Some(Ok(WebSocketMessage::Text(text))) = frame else {
@@ -807,6 +821,17 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
             *name.lock().unwrap() == decorated
         })
         .await;
+        wait_until("roster title projection", WAIT, || {
+            internal_context(&cell.ctx)
+                .exec_query(GetAllSessions {})
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.id.0.as_ref() == "initial-thread"
+                        && row.session_name.as_deref() == Some("literal-name")
+                })
+        })
+        .await;
         let sessions = internal_context(&cell.ctx)
             .exec_query(GetAllSessions {})
             .unwrap();
@@ -820,21 +845,30 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
                 .as_deref(),
             Some("bridge/\"agent\nopaque")
         );
-        assert_eq!(
-            sessions
-                .iter()
-                .find(|row| row.id.0.as_ref() == "unrelated-thread")
-                .unwrap()
-                .agent_id
-                .as_deref(),
-            Some("unrelated-owner")
-        );
+        let unrelated = sessions
+            .iter()
+            .find(|row| row.id.0.as_ref() == "unrelated-thread")
+            .unwrap();
+        assert_eq!(unrelated.agent_id.as_deref(), Some("unrelated-owner"));
+        assert_eq!(unrelated.session_name.as_deref(), Some("unrelated title"));
         assert_eq!(
             name_sets.lock().unwrap().as_slice(),
             std::slice::from_ref(&decorated)
         );
         tokio::time::sleep(POLL).await;
     }
+    let renamed = "Renamed in Codex";
+    *name.lock().unwrap() = renamed.into();
+    rename.send(renamed.into()).unwrap();
+    wait_until("Codex rename reaches roster", WAIT, || {
+        let rows = internal_context(&cell.ctx)
+            .exec_query(GetAllSessions {})
+            .unwrap();
+        rows.iter().any(|row| {
+            row.id.0.as_ref() == "initial-thread" && row.session_name.as_deref() == Some(renamed)
+        })
+    })
+    .await;
     bridge.stop();
 }
 
