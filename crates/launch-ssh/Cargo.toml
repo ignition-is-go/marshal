@@ -1,6 +1,6 @@
 [package]
 name = "marshal-launch-ssh"
-version = "0.62.0"
+version = "0.62.1"
 edition.workspace = true
 license.workspace = true
 description = "Reference marshal-launch adapter: start a coding agent in tmux on another machine over ssh."
