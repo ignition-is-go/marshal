@@ -68,6 +68,10 @@ Codex 0.167.0 supplies this tool-call metadata in
 For the launcher-selected thread, the bridge sets `[nickname]` even before
 Codex has generated a title. Later title updates retain the nickname prefix.
 Naming does not depend on a `SessionStart` hook firing before the first prompt.
+The bridge reads the selected Codex thread's title and mirrors it in the Marshal
+roster. It omits the nickname prefix from the roster title because the roster
+already shows the nickname. The hook-only setup registers sessions by thread ID
+and has no title or rename events.
 
 The bridge claims messages only for an idle thread on its app server. It reads
 the matching turn's status and acknowledges the inbox batch after a successful
