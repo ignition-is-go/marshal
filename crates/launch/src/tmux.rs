@@ -123,11 +123,12 @@ impl Tmux {
                 .get_args()
                 .map(|arg| arg.to_str().map(String::from))
                 .collect::<Option<Vec<_>>>()?;
+            let execution_cwd = std::env::current_dir().ok()?;
             Some(crate::BackendAttachment::OwnerLocal {
                 plan: crate::AttachmentPlan::LocalProcess {
                     program: program.into(),
                     args,
-                    cwd: None,
+                    cwd: Some(execution_cwd.to_str()?.into()),
                 },
             })
         });
