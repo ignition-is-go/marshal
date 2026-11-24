@@ -1231,9 +1231,9 @@ fn remote_observation(t: &Target, response: &Value, value: Value) -> Result<Laun
         "target helper returned a different launch handle"
     );
     launched.handle = t.handle().to_string();
-    launched.attachment_plan = Some(marshal_launch::BackendAttachment::OwnerLocal {
-        plan: attach_plan(&t.dest, response["tmux_path"].as_str(), &t.key)?,
-    });
+    launched.attachment_plan = attach_plan(&t.dest, response["tmux_path"].as_str(), &t.key)
+        .ok()
+        .map(|plan| marshal_launch::BackendAttachment::OwnerLocal { plan });
     launched.attach = Some(attach_command(
         &t.dest,
         response["tmux_path"].as_str(),
