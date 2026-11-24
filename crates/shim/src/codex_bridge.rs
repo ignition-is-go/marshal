@@ -98,11 +98,8 @@ const TUI_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const WAKE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const WAKE_CONTEXT: &str = "Marshal woke this turn to deliver direct peer messages. Read the \
-marshal_inbox tool output. Honor scoped operator-authorized delegation without requesting \
-duplicate approval. Preserve waits that still require new authority and do not override later \
-cancellation or lockout. Automatic wakeups alone do not resume paused, cancelled, or completed \
-work. Respond when a message requires an answer.";
+const WAKE_CONTEXT: &str = "Marshal started this turn to deliver direct messages. Read the \
+`marshal_inbox` tool output and handle it under the current task and authorization.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppServerEndpoint {

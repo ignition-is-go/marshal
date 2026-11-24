@@ -176,9 +176,9 @@ agent.
 | Paused, cancelled, complete, or unassigned | Handle relevant coordination without starting or resuming task execution |
 | No unread message after a wakeup | Stop the delivery turn |
 
-A wake delivers peer messages under the current task and authority. The wake
-context directs the model to preserve task and waiting state. The bridge has
-no knowledge of those states or whether an exchange is closed. Closed-exchange notices can
+The wake context points the model to the inbox and the current task and
+authorization. Marshal's standing coordination instructions cover delegation,
+waits, and cancellation across delivery paths. Closed-exchange notices can
 still cause a wakeup. Transport acknowledgement means the message was surfaced,
 not that a recipient agreed, acquired a resource, or finished work.
 

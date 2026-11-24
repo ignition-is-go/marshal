@@ -421,6 +421,14 @@ async fn serve_app_server_connection(
             .unwrap_or("");
         let response = if owned_threads.contains(thread) {
             assert_eq!(request["params"]["input"], json!([]));
+            assert_eq!(
+                request["params"]["additionalContext"]["marshal-wakeup"],
+                json!({
+                    "kind": "application",
+                    "value": "Marshal started this turn to deliver direct messages. Read the \
+                              `marshal_inbox` tool output and handle it under the current task and authorization."
+                })
+            );
             let inbox = &request["params"]["additionalContext"]["marshal-inbox"];
             assert_eq!(inbox["kind"], "untrusted");
             let content = inbox["value"].as_str().unwrap();
