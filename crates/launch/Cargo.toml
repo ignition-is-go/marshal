@@ -1,6 +1,6 @@
 [package]
 name = "marshal-launch"
-version = "0.62.1"
+version = "0.62.2"
 edition.workspace = true
 license.workspace = true
 description = "Start a coding agent anywhere through a pluggable adapter, and wait for it to join the marshal roster."

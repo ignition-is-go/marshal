@@ -21,9 +21,9 @@
 //! when explicitly set. Unmanaged homes use an isolated server for the TUI.
 //!
 //! The bridge watches marshal's durable message/read views. When a direct
-//! unread message targets a hook-owned session on this host, it asks the local
-//! app-server to start that thread. The existing `UserPromptSubmit` hook then
-//! injects and acknowledges the `<marshal_inbox>` block before the model runs.
+//! unread message targets an idle thread on the local app-server, the bridge
+//! claims its inbox and starts a turn with untrusted context. The bridge
+//! acknowledges the batch after the matching turn completes successfully.
 //! Room broadcasts remain ambient, and a failed wake leaves the message unread.
 //! On Unix, per-TUI bridges attached to the shared app-server elect one
 //! host-local wake leader; every bridge still observes lifecycle events.
@@ -67,8 +67,9 @@ use futures_util::{SinkExt, StreamExt};
 use hyphae::Gettable;
 use marshal_entities::{
     GetAllMessageReads, GetAllMessages, GetAllSessions, Message, MessageRead, Session, SessionId,
+    SetSessionSessionName,
 };
-use myko::client::MykoClient;
+use myko::client::{ConnectionStatus, MykoClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -97,12 +98,9 @@ const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
 const TUI_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
-const WAKE_PROMPT: &str = "Marshal delivery wakeup, not a new user assignment. Read the injected \
-<marshal_inbox>; if absent, check unread direct Marshal messages once. If none remain, stop. \
-Honor scoped operator-authorized delegation without requesting duplicate approval. Preserve waits that \
-still require new authority and do not override later cancellation or lockout. Automatic wakeups alone \
-do not resume paused, cancelled, or completed work. Respond when this message requires an answer; \
-answers and confirmations normally require no further response.";
+const WAKE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const WAKE_CONTEXT: &str = "Marshal started this turn to deliver direct messages. Read the \
+`marshal_inbox` tool output and handle it under the current task and authorization.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppServerEndpoint {
@@ -1458,7 +1456,10 @@ pub async fn run(args: &[String]) -> Result<()> {
         Vec::new()
     };
     if let Some(session_id) = &args.wake_thread {
-        let turn_id = start_thread(&args.app_server, session_id).await?;
+        let wake = start_thread(&args.app_server, session_id, None)
+            .await?
+            .context("Codex thread is unavailable")?;
+        let turn_id = wake.turn_id;
         println!("{turn_id}");
         return Ok(());
     }
@@ -1490,11 +1491,13 @@ pub async fn run(args: &[String]) -> Result<()> {
         launcher.clone(),
     )
     .await?;
+    let (titles, observed_title) = tokio::sync::watch::channel(None);
     let mut registration_task = tokio::spawn(watch_app_server_registrations(
         args.app_server.clone(),
-        hook_base,
+        hook_base.clone(),
         args.ready_file.clone(),
         launcher.clone(),
+        titles,
     ));
     let client = Arc::new(MykoClient::new());
     let sessions = client.watch_query::<GetAllSessions>(GetAllSessions {});
@@ -1510,6 +1513,9 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     let mut wake_leadership = WakeLeadership::new(&args.app_server, &args.daemon);
     let mut cooldowns: HashMap<SessionId, Instant> = HashMap::new();
+    let mut title_retry_at = Instant::now();
+    let mut in_flight = HashSet::new();
+    let mut deliveries = tokio::task::JoinSet::<(SessionId, Result<()>)>::new();
     let mut interval = tokio::time::interval(args.poll);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let launcher_exit = wait_for_launcher_exit(args.launcher_stdin);
@@ -1518,6 +1524,14 @@ pub async fn run(args: &[String]) -> Result<()> {
     loop {
         tokio::select! {
             _ = interval.tick() => {}
+            Some(delivery) = deliveries.join_next(), if !deliveries.is_empty() => {
+                let (session_id, result) = delivery.context("Codex delivery worker stopped")?;
+                in_flight.remove(&session_id);
+                if let Err(error) = result {
+                    log::debug!("[codex-bridge] thread={} mail remains unread: {error:#}", session_id.0);
+                }
+                continue;
+            }
             signal = tokio::signal::ctrl_c() => {
                 signal.context("waiting for Ctrl-C")?;
                 break;
@@ -1536,7 +1550,33 @@ pub async fn run(args: &[String]) -> Result<()> {
         if let Some(keepers) = &keepers {
             keepers.check().await?;
         }
+        let session_snapshot = sessions.get();
         let now = Instant::now();
+        if let Some(observed) = observed_title.borrow().as_ref()
+            && observed.active
+            && now >= title_retry_at
+            && matches!(
+                client.connection_status_sync(),
+                ConnectionStatus::Connected(_)
+            )
+            && session_snapshot.iter().any(|session| {
+                session.id == observed.id
+                    && session.session_name.as_deref() != observed.title.as_deref()
+            })
+        {
+            let response =
+                client.send_command::<SetSessionSessionName, ()>(&SetSessionSessionName {
+                    id: observed.id.clone(),
+                    session_name: observed.title.clone(),
+                });
+            title_retry_at = now + REGISTRATION_RETRY;
+            if let Some(Err(error)) = response.get() {
+                log::debug!(
+                    "[codex-bridge] could not project thread title for {}: {error}",
+                    observed.id.0
+                );
+            }
+        }
         match wake_leadership.ready(now) {
             Ok(true) => {}
             Ok(false) => continue,
@@ -1546,7 +1586,6 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
         }
 
-        let session_snapshot = sessions.get();
         let message_snapshot = messages.get();
         let read_snapshot = reads.get();
         let candidates = unread_local_codex_sessions(
@@ -1558,12 +1597,18 @@ pub async fn run(args: &[String]) -> Result<()> {
         retain_active_cooldowns(&mut cooldowns, now);
 
         for session_id in candidates {
-            if cooldowns.get(&session_id).is_some_and(|until| *until > now) {
+            if in_flight.contains(&session_id)
+                || cooldowns.get(&session_id).is_some_and(|until| *until > now)
+            {
                 continue;
             }
 
-            match start_thread(&args.app_server, &session_id).await {
-                Ok(turn_id) => {
+            match start_thread(&args.app_server, &session_id, Some(&hook_base)).await {
+                Ok(Some(Wake {
+                    turn_id,
+                    completion,
+                    message_ids,
+                })) => {
                     if let Some(keepers) = &keepers {
                         keepers.retain(session_id.0.as_ref()).await?;
                         if let Some(launcher) = &launcher {
@@ -1572,7 +1617,25 @@ pub async fn run(args: &[String]) -> Result<()> {
                         }
                     }
                     log::info!("[codex-bridge] woke thread={} turn={turn_id}", session_id.0);
-                    cooldowns.insert(session_id, now + WAKE_COALESCE_WINDOW);
+                    cooldowns.insert(session_id.clone(), now + WAKE_COALESCE_WINDOW);
+                    in_flight.insert(session_id.clone());
+                    let base = hook_base.clone();
+                    deliveries.spawn(async move {
+                        let result = async {
+                            completion.await?;
+                            crate::codex_hook::acknowledge_inbox(
+                                base,
+                                session_id.clone(),
+                                message_ids,
+                            )
+                            .await
+                        }
+                        .await;
+                        (session_id, result)
+                    });
+                }
+                Ok(None) => {
+                    cooldowns.insert(session_id, now + RETRY_COOLDOWN);
                 }
                 Err(error) => {
                     // Busy threads are retried: their normal Pre/PostToolUse
@@ -1831,10 +1894,11 @@ struct ThreadRegistration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ThreadNameDecoration {
-    thread_id: String,
+    session_id: SessionId,
     nickname: String,
     current_name: Option<String>,
     name_hydrated: bool,
+    seed_launch_name: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1842,6 +1906,27 @@ struct ThreadNameUpdate {
     thread_id: String,
     name: Option<String>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ObservedTitle {
+    id: SessionId,
+    title: Option<Arc<str>>,
+    active: bool,
+}
+
+fn invalidate_title_observation(titles: &TitleObservations) {
+    titles.send_if_modified(|observed| {
+        if let Some(observed) = observed.as_mut()
+            && observed.active
+        {
+            observed.active = false;
+            return true;
+        }
+        false
+    });
+}
+
+type TitleObservations = tokio::sync::watch::Sender<Option<ObservedTitle>>;
 
 /// Maintain a subscribed app-server connection for lifecycle discovery.
 ///
@@ -1855,6 +1940,7 @@ async fn watch_app_server_registrations(
     hook_base: String,
     mut ready_file: Option<PathBuf>,
     launcher: Option<SharedLauncherState>,
+    titles: TitleObservations,
 ) -> Result<()> {
     let mut pending = HashMap::new();
     let mut decorations = HashMap::new();
@@ -1879,6 +1965,7 @@ async fn watch_app_server_registrations(
                             &mut pending,
                             &mut decorations,
                             &launcher,
+                            &titles,
                         )
                         .await
                     }
@@ -1896,10 +1983,12 @@ async fn watch_app_server_registrations(
                     &mut pending,
                     &mut decorations,
                     &launcher,
+                    &titles,
                 )
                 .await
             }
         };
+        invalidate_title_observation(&titles);
         if let Err(error) = result {
             log::debug!("[codex-bridge] app-server lifecycle connection unavailable: {error:#}");
         }
@@ -1920,6 +2009,7 @@ async fn monitor_registrations_over_unix(
     pending: &mut HashMap<String, ThreadRegistration>,
     decorations: &mut HashMap<String, ThreadNameDecoration>,
     launcher: &Option<SharedLauncherState>,
+    titles: &TitleObservations,
 ) -> Result<()> {
     use tokio::net::UnixStream;
 
@@ -1944,6 +2034,7 @@ async fn monitor_registrations_over_unix(
         pending,
         decorations,
         launcher,
+        titles,
     )
     .await
 }
@@ -1956,6 +2047,7 @@ async fn monitor_registrations_over_unix(
     _pending: &mut HashMap<String, ThreadRegistration>,
     _decorations: &mut HashMap<String, ThreadNameDecoration>,
     _launcher: &Option<SharedLauncherState>,
+    _titles: &TitleObservations,
 ) -> Result<()> {
     anyhow::bail!("Unix-domain-socket app-server endpoints are unavailable on this platform")
 }
@@ -1967,6 +2059,7 @@ async fn monitor_registration_connection<S>(
     pending: &mut HashMap<String, ThreadRegistration>,
     decorations: &mut HashMap<String, ThreadNameDecoration>,
     launcher: &Option<SharedLauncherState>,
+    titles: &TitleObservations,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1988,7 +2081,9 @@ where
             .with_context(|| format!("writing bridge readiness file {}", path.display()))?;
         ready_file.take();
     } else {
-        if let Err(error) = snapshot_loaded_threads(websocket, pending, &mut request_id).await {
+        if let Err(error) =
+            snapshot_loaded_threads(websocket, pending, decorations, &mut request_id).await
+        {
             // Thread discovery is an optimization over the authoritative lifecycle
             // notifications. Keep the subscription alive against older app-server
             // versions that do not implement thread/list or thread/read.
@@ -1997,13 +2092,12 @@ where
         let session_ids: Vec<String> = pending.keys().cloned().collect();
         for session_id in session_ids {
             try_pending_registration(
-                websocket,
                 hook_base,
                 pending,
                 decorations,
                 &session_id,
-                &mut request_id,
                 launcher,
+                titles,
             )
             .await;
         }
@@ -2041,37 +2135,21 @@ where
                     let session_id = registration.session_id.clone();
                     pending.insert(session_id.clone(), registration);
                     try_pending_registration(
-                        websocket,
                         hook_base,
                         pending,
                         decorations,
                         &session_id,
-                        &mut request_id,
                         launcher,
+                        titles,
                     )
                     .await;
                 } else if let Some(thread_id) = closed_thread_id(&message) {
                     pending.retain(|_, registration| registration.thread_id != thread_id);
                     decorations.remove(thread_id);
                 } else if let Some(update) = thread_name_update(&message) {
-                    update_pending_thread_name(pending, &update);
-                    if let Some(mut decoration) = decorations.get(&update.thread_id).cloned() {
-                        decoration.current_name.clone_from(&update.name);
-                        decoration.name_hydrated = true;
-                        if let Some(name) = try_decorate_thread_name(
-                            websocket,
-                            pending,
-                            &decoration,
-                            update.name.as_deref(),
-                            &mut request_id,
-                            launcher,
-                        )
-                        .await
-                        {
-                            decoration.current_name = Some(name);
-                        }
-                        decorations.insert(update.thread_id, decoration);
-                    }
+                    apply_thread_name_update(pending, decorations, &update);
+                } else {
+                    continue;
                 }
             }
             _ = retry.tick() => {
@@ -2085,12 +2163,11 @@ where
                     && !pending.values().any(|registration| registration.thread_id == thread_id)
                 {
                     match read_thread_registration(websocket, thread_id, &mut request_id).await {
-                        Ok((Some(registration), notifications)) => {
-                            apply_lifecycle_notifications(pending, notifications);
-                            pending.insert(registration.session_id.clone(), registration);
-                        }
-                        Ok((None, notifications)) => {
-                            apply_lifecycle_notifications(pending, notifications);
+                        Ok((registration, notifications)) => {
+                            if let Some(registration) = registration {
+                                pending.insert(registration.session_id.clone(), registration);
+                            }
+                            apply_lifecycle_notifications(pending, decorations, notifications);
                         }
                         Err(error) => log::debug!(
                             "[codex-bridge] could not discover selected thread={thread_id}: {error:#}"
@@ -2100,46 +2177,36 @@ where
                 let session_ids: Vec<String> = pending.keys().cloned().collect();
                 for session_id in session_ids {
                     try_pending_registration(
-                        websocket,
                         hook_base,
                         pending,
                         decorations,
                         &session_id,
-                        &mut request_id,
                         launcher,
+                        titles,
                     )
                     .await;
                 }
-                if let Some(thread_id) = selected
-                    && let Some(mut decoration) = decorations.get(&thread_id).cloned()
-                {
-                    if !decoration.name_hydrated {
-                        match read_thread_name(websocket, &thread_id, &mut request_id).await {
-                            Ok((name, notifications)) => {
-                                apply_lifecycle_notifications(pending, notifications);
-                                decoration.current_name = name;
-                                decoration.name_hydrated = true;
-                            }
-                            Err(error) => log::debug!(
-                                "[codex-bridge] could not read thread={thread_id} name: {error:#}"
-                            ),
-                        }
-                    }
-                    if decoration.name_hydrated
-                        && let Some(name) = try_decorate_thread_name(
-                            websocket,
-                            pending,
-                            &decoration,
-                            decoration.current_name.as_deref(),
-                            &mut request_id,
-                            launcher,
-                        ).await
-                    {
-                        decoration.current_name = Some(name);
-                    }
-                    decorations.insert(thread_id, decoration);
-                }
             }
+        }
+        let selected = if let Some(launcher) = launcher {
+            launcher.lock().await.state.thread_id.clone()
+        } else {
+            None
+        };
+        if let Some(thread_id) = selected
+            && decorations.contains_key(&thread_id)
+        {
+            project_selected_thread_name(
+                websocket,
+                pending,
+                decorations,
+                &thread_id,
+                &mut request_id,
+                titles,
+            )
+            .await;
+        } else {
+            invalidate_title_observation(titles);
         }
     }
 }
@@ -2151,6 +2218,7 @@ where
 async fn snapshot_loaded_threads<S>(
     websocket: &mut WebSocketStream<S>,
     pending: &mut HashMap<String, ThreadRegistration>,
+    decorations: &mut HashMap<String, ThreadNameDecoration>,
     request_id: &mut i64,
 ) -> Result<()>
 where
@@ -2175,7 +2243,7 @@ where
         )
         .await?;
         let (page, notifications) = read_response_collecting(websocket, id).await?;
-        apply_lifecycle_notifications(pending, notifications);
+        apply_lifecycle_notifications(pending, decorations, notifications);
 
         let loaded_ids: Vec<String> = page
             .get("data")
@@ -2201,10 +2269,12 @@ where
             )
             .await?;
             let (result, notifications) = read_response_collecting(websocket, id).await?;
-            apply_lifecycle_notifications(pending, notifications);
-            if let Some(registration) = result.get("thread").and_then(thread_value_registration) {
+            if let Some(registration) = result.get("thread").and_then(thread_value_registration)
+                && registration.thread_id == thread_id
+            {
                 pending.insert(registration.session_id.clone(), registration);
             }
+            apply_lifecycle_notifications(pending, decorations, notifications);
         }
 
         cursor = page
@@ -2219,6 +2289,7 @@ where
 
 fn apply_lifecycle_notifications(
     pending: &mut HashMap<String, ThreadRegistration>,
+    decorations: &mut HashMap<String, ThreadNameDecoration>,
     notifications: Vec<Value>,
 ) {
     for message in notifications {
@@ -2226,8 +2297,9 @@ fn apply_lifecycle_notifications(
             pending.insert(registration.session_id.clone(), registration);
         } else if let Some(thread_id) = closed_thread_id(&message) {
             pending.retain(|_, registration| registration.thread_id != thread_id);
+            decorations.remove(thread_id);
         } else if let Some(update) = thread_name_update(&message) {
-            update_pending_thread_name(pending, &update);
+            apply_thread_name_update(pending, decorations, &update);
         }
     }
 }
@@ -2270,36 +2342,43 @@ fn thread_name_update(message: &Value) -> Option<ThreadNameUpdate> {
     }
     let params = message.get("params")?;
     let thread_id = params.get("threadId")?.as_str()?.to_string();
-    let name = params
-        .get("threadName")
-        .or_else(|| params.get("name"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let name = observed_name(params.get("threadName").or_else(|| params.get("name")))?;
     Some(ThreadNameUpdate { thread_id, name })
 }
 
-fn update_pending_thread_name(
+fn observed_name(value: Option<&Value>) -> Option<Option<String>> {
+    match value? {
+        Value::Null => Some(None),
+        Value::String(name) => Some(Some(name.clone())),
+        _ => None,
+    }
+}
+
+fn apply_thread_name_update(
     pending: &mut HashMap<String, ThreadRegistration>,
+    decorations: &mut HashMap<String, ThreadNameDecoration>,
     update: &ThreadNameUpdate,
 ) {
     for registration in pending.values_mut() {
         if registration.thread_id == update.thread_id {
-            registration.name.clone_from(&update.name);
+            registration.name = Some(update.name.clone().unwrap_or_default());
         }
+    }
+    if let Some(decoration) = decorations.get_mut(&update.thread_id) {
+        decoration.current_name.clone_from(&update.name);
+        decoration.name_hydrated = true;
+        decoration.seed_launch_name = false;
     }
 }
 
-async fn try_pending_registration<S>(
-    websocket: &mut WebSocketStream<S>,
+async fn try_pending_registration(
     hook_base: &str,
     pending: &mut HashMap<String, ThreadRegistration>,
     decorations: &mut HashMap<String, ThreadNameDecoration>,
     session_id: &str,
-    request_id: &mut i64,
     launcher: &Option<SharedLauncherState>,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
+    titles: &TitleObservations,
+) {
     let Some(registration) = pending.get(session_id).cloned() else {
         return;
     };
@@ -2311,9 +2390,9 @@ async fn try_pending_registration<S>(
     } else {
         RegistrationBinding::Unscoped
     };
-    let agent_id = match binding {
+    let agent_id = match &binding {
         RegistrationBinding::Unscoped => crate::codex_hook::agent_id_from_env(),
-        RegistrationBinding::Selected(id) => Some(id),
+        RegistrationBinding::Selected(id) => Some(id.clone()),
         RegistrationBinding::Pending => return,
         RegistrationBinding::OtherThread => {
             pending.remove(session_id);
@@ -2332,47 +2411,19 @@ async fn try_pending_registration<S>(
     .await
     .unwrap_or(None);
     if let Some(nickname) = nickname {
-        let decoration = ThreadNameDecoration {
-            thread_id: registration.thread_id.clone(),
-            nickname,
-            current_name: registration.name.clone(),
-            name_hydrated: registration.name.is_some(),
-        };
-        let mut decoration = decoration;
-        // Lifecycle events may omit a stored title. Read it before writing so
-        // startup cannot replace a resumed conversation's name with a nickname.
-        let selected = if let Some(launcher) = launcher {
-            launcher.lock().await.state.thread_id.as_deref() == Some(&decoration.thread_id)
-        } else {
-            false
-        };
-        if selected && !decoration.name_hydrated {
-            match read_thread_name(websocket, &decoration.thread_id, request_id).await {
-                Ok((name, notifications)) => {
-                    apply_lifecycle_notifications(pending, notifications);
-                    decoration.current_name = name;
-                    decoration.name_hydrated = true;
-                }
-                Err(error) => {
-                    log::debug!("[codex-bridge] could not hydrate thread name: {error:#}")
-                }
-            }
+        if matches!(binding, RegistrationBinding::Selected(_)) {
+            decorations.insert(
+                registration.thread_id.clone(),
+                ThreadNameDecoration {
+                    session_id: SessionId(Arc::from(session_id)),
+                    nickname,
+                    current_name: registration.name.clone(),
+                    name_hydrated: registration.name.is_some(),
+                    seed_launch_name: titles.borrow().is_none()
+                        && registration.name.as_deref() != Some(""),
+                },
+            );
         }
-        if decoration.name_hydrated
-            && let Some(name) = try_decorate_thread_name(
-                websocket,
-                pending,
-                &decoration,
-                decoration.current_name.as_deref(),
-                request_id,
-                launcher,
-            )
-            .await
-        {
-            decoration.current_name = Some(name);
-            decoration.name_hydrated = true;
-        }
-        decorations.insert(registration.thread_id.clone(), decoration);
         log::info!("[codex-bridge] registered thread={session_id} before first prompt");
         pending.remove(session_id);
     } else {
@@ -2380,39 +2431,77 @@ async fn try_pending_registration<S>(
     }
 }
 
-async fn try_decorate_thread_name<S>(
+async fn project_selected_thread_name<S>(
     websocket: &mut WebSocketStream<S>,
     pending: &mut HashMap<String, ThreadRegistration>,
-    decoration: &ThreadNameDecoration,
-    current_name: Option<&str>,
+    decorations: &mut HashMap<String, ThreadNameDecoration>,
+    thread_id: &str,
     request_id: &mut i64,
-    launcher: &Option<SharedLauncherState>,
-) -> Option<String>
-where
+    titles: &TitleObservations,
+) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let launcher = launcher.as_ref()?;
-    if launcher.lock().await.state.thread_id.as_deref() != Some(&decoration.thread_id) {
-        return None;
-    }
-    let launch_name = std::env::var("AGENT_SESSION_NAME").ok();
-    let desired =
-        marshal_decorated_thread_name(current_name, &decoration.nickname, launch_name.as_deref())?;
-    if current_name == Some(desired.as_str()) {
-        return None;
-    }
-    match set_thread_name(websocket, &decoration.thread_id, &desired, request_id).await {
-        Ok(notifications) => {
-            apply_lifecycle_notifications(pending, notifications);
-            Some(desired)
+    if !decorations[thread_id].name_hydrated {
+        match read_thread_name(websocket, thread_id, request_id).await {
+            Ok((name, notifications)) => {
+                if let Some(name) = name {
+                    let decoration = decorations.get_mut(thread_id).unwrap();
+                    decoration.current_name = name;
+                    decoration.name_hydrated = true;
+                }
+                apply_lifecycle_notifications(pending, decorations, notifications);
+            }
+            Err(error) => {
+                log::debug!("[codex-bridge] could not read thread={thread_id} name: {error:#}")
+            }
         }
-        Err(error) => {
-            log::debug!(
-                "[codex-bridge] could not decorate thread={} name: {error:#}",
-                decoration.thread_id
-            );
-            None
+    }
+    let Some(decoration) = decorations
+        .get_mut(thread_id)
+        .filter(|decoration| decoration.name_hydrated)
+    else {
+        return;
+    };
+    let current = decoration.current_name.as_deref();
+    let launch_name = (decoration.seed_launch_name && current.is_none())
+        .then(|| std::env::var("AGENT_SESSION_NAME").ok())
+        .flatten();
+    if let Some(desired) =
+        marshal_decorated_thread_name(current, &decoration.nickname, launch_name.as_deref())
+        && current != Some(desired.as_str())
+    {
+        match set_thread_name(websocket, thread_id, &desired, request_id).await {
+            Ok(notifications) => {
+                decoration.current_name = Some(desired);
+                decoration.seed_launch_name = false;
+                apply_lifecycle_notifications(pending, decorations, notifications);
+            }
+            Err(error) => {
+                log::debug!("[codex-bridge] could not decorate thread={thread_id} name: {error:#}")
+            }
         }
+    }
+    if let Some(decoration) = decorations.get(thread_id) {
+        let title = decoration
+            .current_name
+            .as_deref()
+            .map(|name| strip_marshal_thread_name_prefix(name.trim(), &decoration.nickname).trim())
+            .filter(|name| !name.is_empty())
+            .map(Arc::<str>::from);
+        titles.send_if_modified(|observed| {
+            let next = Some(ObservedTitle {
+                id: decoration.session_id.clone(),
+                title,
+                active: true,
+            });
+            if *observed == next {
+                return false;
+            }
+            *observed = next;
+            true
+        });
+    } else {
+        invalidate_title_observation(titles);
     }
 }
 
@@ -2448,7 +2537,7 @@ async fn read_thread_name<S>(
     websocket: &mut WebSocketStream<S>,
     thread_id: &str,
     request_id: &mut i64,
-) -> Result<(Option<String>, Vec<Value>)>
+) -> Result<(Option<Option<String>>, Vec<Value>)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -2464,10 +2553,7 @@ where
     )
     .await?;
     let (result, notifications) = read_response_collecting(websocket, id).await?;
-    let name = result
-        .pointer("/thread/name")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let name = observed_name(result.pointer("/thread/name"));
     Ok((name, notifications))
 }
 
@@ -2491,7 +2577,10 @@ where
     )
     .await?;
     let (result, notifications) = read_response_collecting(websocket, id).await?;
-    let registration = result.get("thread").and_then(thread_value_registration);
+    let registration = result
+        .get("thread")
+        .and_then(thread_value_registration)
+        .filter(|registration| registration.thread_id == thread_id);
     Ok((registration, notifications))
 }
 
@@ -2583,10 +2672,20 @@ fn unread_local_codex_sessions(
         .collect()
 }
 
-async fn start_thread(app_server: &AppServerEndpoint, session_id: &SessionId) -> Result<String> {
+struct Wake {
+    turn_id: String,
+    completion: futures_util::future::BoxFuture<'static, Result<()>>,
+    message_ids: Vec<String>,
+}
+
+async fn start_thread(
+    app_server: &AppServerEndpoint,
+    session_id: &SessionId,
+    hook_base: Option<&str>,
+) -> Result<Option<Wake>> {
     match app_server {
         AppServerEndpoint::WebSocket(endpoint) => {
-            let (mut websocket, _) = tokio::time::timeout(
+            let (websocket, _) = tokio::time::timeout(
                 RPC_TIMEOUT,
                 connect_async_with_config(
                     app_server_request(endpoint)?,
@@ -2597,14 +2696,20 @@ async fn start_thread(app_server: &AppServerEndpoint, session_id: &SessionId) ->
             .await
             .context("timed out connecting to Codex app-server")?
             .with_context(|| format!("connecting to {endpoint}"))?;
-            initialize_and_start(&mut websocket, session_id).await
+            initialize_and_start(websocket, session_id, hook_base).await
         }
-        AppServerEndpoint::Unix(socket) => start_thread_over_unix(socket, session_id).await,
+        AppServerEndpoint::Unix(socket) => {
+            start_thread_over_unix(socket, session_id, hook_base).await
+        }
     }
 }
 
 #[cfg(unix)]
-async fn start_thread_over_unix(socket: &Path, session_id: &SessionId) -> Result<String> {
+async fn start_thread_over_unix(
+    socket: &Path,
+    session_id: &SessionId,
+    hook_base: Option<&str>,
+) -> Result<Option<Wake>> {
     use tokio::net::UnixStream;
 
     let stream = tokio::time::timeout(RPC_TIMEOUT, UnixStream::connect(socket))
@@ -2617,7 +2722,7 @@ async fn start_thread_over_unix(socket: &Path, session_id: &SessionId) -> Result
     let request = "ws://localhost/"
         .into_client_request()
         .context("building app-server WebSocket request")?;
-    let (mut websocket, _) = tokio::time::timeout(
+    let (websocket, _) = tokio::time::timeout(
         RPC_TIMEOUT,
         client_async_with_config(request, stream, Some(app_server_websocket_config())),
     )
@@ -2625,41 +2730,134 @@ async fn start_thread_over_unix(socket: &Path, session_id: &SessionId) -> Result
     .context("timed out upgrading Codex app-server connection")?
     .context("upgrading Codex app-server Unix socket to WebSocket")?;
 
-    initialize_and_start(&mut websocket, session_id).await
+    initialize_and_start(websocket, session_id, hook_base).await
 }
 
 #[cfg(not(unix))]
-async fn start_thread_over_unix(_socket: &Path, _session_id: &SessionId) -> Result<String> {
+async fn start_thread_over_unix(
+    _socket: &Path,
+    _session_id: &SessionId,
+    _hook_base: Option<&str>,
+) -> Result<Option<Wake>> {
     anyhow::bail!("Unix-domain-socket app-server endpoints are unavailable on this platform")
 }
 
 async fn initialize_and_start<S>(
-    websocket: &mut WebSocketStream<S>,
+    mut websocket: WebSocketStream<S>,
     session_id: &SessionId,
-) -> Result<String>
+    hook_base: Option<&str>,
+) -> Result<Option<Wake>>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    initialize_app_server(websocket).await?;
+    initialize_app_server(&mut websocket).await?;
+    let (context, message_ids) = if let Some(base) = hook_base {
+        write_rpc(
+            &mut websocket,
+            &json!({
+                "id": 2,
+                "method": "thread/read",
+                "params": {"threadId": session_id.0.as_ref(), "includeTurns": false},
+            }),
+        )
+        .await?;
+        let result = read_response(&mut websocket, 2).await?;
+        if result["thread"]["id"] != session_id.0.as_ref()
+            || result["thread"]["status"]["type"] != "idle"
+        {
+            return Ok(None);
+        }
 
+        let (inbox, ids) =
+            crate::codex_hook::take_inbox(base.to_owned(), session_id.clone()).await?;
+        if inbox.trim().is_empty() || ids.is_empty() {
+            return Ok(None);
+        }
+        (
+            json!({
+                "marshal-wakeup": {"kind": "application", "value": WAKE_CONTEXT},
+                "marshal-inbox": {"kind": "untrusted", "name": "marshal_inbox", "value": inbox},
+            }),
+            ids,
+        )
+    } else {
+        (
+            json!({"marshal-wakeup": {"kind": "application", "value": "Marshal connectivity check. End the turn."}}),
+            Vec::new(),
+        )
+    };
     write_rpc(
-        websocket,
+        &mut websocket,
         &json!({
-            "id": 2,
+            "id": 3,
             "method": "turn/start",
             "params": {
                 "threadId": session_id.0.as_ref(),
-                "input": [{ "type": "text", "text": WAKE_PROMPT }],
+                "turnTrigger": "marshal_wakeup",
+                "input": [],
+                "additionalContext": context,
             },
         }),
     )
     .await?;
-    let result = read_response(websocket, 2).await?;
-    result
+    let result = read_response(&mut websocket, 3).await?;
+    let turn_id = result
         .pointer("/turn/id")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .context("turn/start response omitted turn.id")
+        .context("turn/start response omitted turn.id")?
+        .to_owned();
+    let thread = session_id.clone();
+    let expected = turn_id.clone();
+    let completion = Box::pin(async move {
+        tokio::time::timeout(
+            WAKE_COMPLETION_TIMEOUT,
+            wait_for_wake_completion(&mut websocket, &thread, &expected),
+        )
+        .await
+        .context("timed out waiting for Marshal wake to complete")?
+    });
+    Ok(Some(Wake {
+        turn_id,
+        completion,
+        message_ids,
+    }))
+}
+
+async fn wait_for_wake_completion<S>(
+    websocket: &mut WebSocketStream<S>,
+    session_id: &SessionId,
+    turn_id: &str,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // A connection that starts a turn on another client's thread may receive
+    // no completion notification. Read a bounded page without resuming it.
+    for request_id in 4_i64.. {
+        tokio::time::sleep(RETRY_COOLDOWN).await;
+        write_rpc(
+            websocket,
+            &json!({
+                "id": request_id,
+                "method": "thread/turns/list",
+                "params": {"threadId": session_id.0.as_ref(), "limit": 4, "itemsView": "notLoaded"},
+            }),
+        )
+        .await?;
+        let result = read_response(websocket, request_id).await?;
+        let status = result["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|turn| turn["id"] == turn_id)
+            .and_then(|turn| turn["status"].as_str());
+        match status {
+            Some("completed") => return Ok(()),
+            Some("inProgress") | None => {}
+            Some(status) => anyhow::bail!("Codex wake turn {turn_id} ended with status {status}"),
+        }
+    }
+    unreachable!("turn polling is bounded by the caller's deadline")
 }
 
 async fn initialize_app_server<S>(websocket: &mut WebSocketStream<S>) -> Result<()>
@@ -3582,10 +3780,14 @@ mod tests {
         let start: Value = serde_json::from_str(start.to_text().unwrap()).unwrap();
         assert_eq!(start["method"], "turn/start");
         assert_eq!(start["params"]["threadId"], "thread-123");
-        assert_eq!(start["params"]["input"][0]["text"], WAKE_PROMPT);
+        assert_eq!(start["params"]["input"], json!([]));
+        assert_eq!(
+            start["params"]["additionalContext"]["marshal-wakeup"]["kind"],
+            "application"
+        );
         websocket
             .send(WebSocketMessage::Text(
-                "{\"id\":2,\"result\":{\"turn\":{\"id\":\"turn-456\"}}}".into(),
+                "{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-456\"}}}".into(),
             ))
             .await
             .unwrap();
@@ -3605,10 +3807,11 @@ mod tests {
         });
         let endpoint = AppServerEndpoint::WebSocket(format!("ws://{address}"));
 
-        let turn = start_thread(&endpoint, &SessionId(Arc::from("thread-123")))
+        let wake = start_thread(&endpoint, &SessionId(Arc::from("thread-123")), None)
             .await
-            .expect("wake thread");
-        assert_eq!(turn, "turn-456");
+            .expect("wake thread")
+            .expect("accepted wake");
+        assert_eq!(wake.turn_id, "turn-456");
         server.await.unwrap();
     }
 
@@ -3626,10 +3829,11 @@ mod tests {
         });
 
         let endpoint = AppServerEndpoint::Unix(temp.clone());
-        let turn = start_thread(&endpoint, &SessionId(Arc::from("thread-123")))
+        let wake = start_thread(&endpoint, &SessionId(Arc::from("thread-123")), None)
             .await
-            .expect("wake thread");
-        assert_eq!(turn, "turn-456");
+            .expect("wake thread")
+            .expect("accepted wake");
+        assert_eq!(wake.turn_id, "turn-456");
         server.await.unwrap();
         let _ = std::fs::remove_file(temp);
     }
@@ -3712,7 +3916,10 @@ mod tests {
             Some("launch-before-prompt".into()),
         )));
 
+        let (titles, mut observed_title) =
+            tokio::sync::watch::channel::<Option<ObservedTitle>>(None);
         let app_server = tokio::spawn(async move {
+            let nickname = marshal_entities::nickname("session-before-prompt");
             let (stream, _) = app_listener.accept().await.expect("accept bridge");
             let mut websocket = accept_async(stream).await.expect("WebSocket upgrade");
             let initialize = websocket.next().await.unwrap().unwrap();
@@ -3801,13 +4008,23 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+            observed_title
+                .wait_for(|value| {
+                    value.as_ref().is_some_and(|value| {
+                        value.active
+                            && value.id.0.as_ref() == "session-before-prompt"
+                            && value.title.as_deref() == Some("stored title")
+                    })
+                })
+                .await
+                .unwrap();
             websocket
                 .send(WebSocketMessage::Text(
                     json!({
                         "method": "thread/name/updated",
                         "params": {
                             "threadId": "thread-before-prompt",
-                            "threadName": "generated follow-up"
+                            "threadName": "[draft] generated follow-up"
                         }
                     })
                     .to_string()
@@ -3822,7 +4039,7 @@ mod tests {
             assert_eq!(
                 renamed["params"]["name"],
                 format!(
-                    "[{}] generated follow-up",
+                    "[{}] [draft] generated follow-up",
                     marshal_entities::nickname("session-before-prompt")
                 )
             );
@@ -3832,6 +4049,56 @@ mod tests {
                         .to_string()
                         .into(),
                 ))
+                .await
+                .unwrap();
+            observed_title
+                .wait_for(|value| {
+                    value.as_ref().is_some_and(|value| {
+                        value.active
+                            && value.id.0.as_ref() == "session-before-prompt"
+                            && value.title.as_deref() == Some("[draft] generated follow-up")
+                    })
+                })
+                .await
+                .unwrap();
+
+            // An unrelated rename and omitted name must not replace this title.
+            for params in [
+                json!({ "threadId": "other-thread", "threadName": "unrelated" }),
+                json!({ "threadId": "thread-before-prompt" }),
+                json!({ "threadId": "thread-before-prompt", "threadName": null }),
+            ] {
+                websocket
+                    .send(WebSocketMessage::Text(
+                        json!({ "method": "thread/name/updated", "params": params })
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            let cleared: Value =
+                serde_json::from_str(websocket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(cleared["method"], "thread/name/set");
+            assert_eq!(cleared["params"]["threadId"], "thread-before-prompt");
+            assert_eq!(cleared["params"]["name"], format!("[{nickname}]"));
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({ "id": cleared["id"], "result": {} })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            observed_title
+                .wait_for(|value| {
+                    value.as_ref().is_some_and(|value| {
+                        value.active
+                            && value.id.0.as_ref() == "session-before-prompt"
+                            && value.title.is_none()
+                    })
+                })
                 .await
                 .unwrap();
         });
@@ -3844,6 +4111,7 @@ mod tests {
             format!("http://{hook_address}"),
             Some(ready_file.clone()),
             Some(launcher),
+            titles,
         ));
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -3958,6 +4226,7 @@ mod tests {
             format!("http://{hook_address}"),
             None,
             None,
+            tokio::sync::watch::channel(None).0,
         ));
 
         let request = tokio::time::timeout(Duration::from_secs(2), hook_server)
