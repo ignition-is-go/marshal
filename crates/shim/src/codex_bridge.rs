@@ -21,9 +21,9 @@
 //! when explicitly set. Unmanaged homes use an isolated server for the TUI.
 //!
 //! The bridge watches marshal's durable message/read views. When a direct
-//! unread message targets a hook-owned session on this host, it asks the local
-//! app-server to start that thread. The existing `UserPromptSubmit` hook then
-//! injects and acknowledges the `<marshal_inbox>` block before the model runs.
+//! unread message targets an idle thread on the local app-server, the bridge
+//! claims its inbox and starts a turn with untrusted context. The bridge
+//! acknowledges the batch after the matching turn completes successfully.
 //! Room broadcasts remain ambient, and a failed wake leaves the message unread.
 //! On Unix, per-TUI bridges attached to the shared app-server elect one
 //! host-local wake leader; every bridge still observes lifecycle events.
@@ -97,12 +97,12 @@ const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
 const TUI_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY: Duration = Duration::from_secs(2);
 const APP_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
-const WAKE_PROMPT: &str = "Marshal delivery wakeup, not a new user assignment. Read the injected \
-<marshal_inbox>; if absent, check unread direct Marshal messages once. If none remain, stop. \
-Honor scoped operator-authorized delegation without requesting duplicate approval. Preserve waits that \
-still require new authority and do not override later cancellation or lockout. Automatic wakeups alone \
-do not resume paused, cancelled, or completed work. Respond when this message requires an answer; \
-answers and confirmations normally require no further response.";
+const WAKE_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const WAKE_CONTEXT: &str = "Marshal woke this turn to deliver direct peer messages. Read the \
+marshal_inbox tool output. Honor scoped operator-authorized delegation without requesting \
+duplicate approval. Preserve waits that still require new authority and do not override later \
+cancellation or lockout. Automatic wakeups alone do not resume paused, cancelled, or completed \
+work. Respond when a message requires an answer.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AppServerEndpoint {
@@ -1458,7 +1458,10 @@ pub async fn run(args: &[String]) -> Result<()> {
         Vec::new()
     };
     if let Some(session_id) = &args.wake_thread {
-        let turn_id = start_thread(&args.app_server, session_id).await?;
+        let wake = start_thread(&args.app_server, session_id, None)
+            .await?
+            .context("Codex thread is unavailable")?;
+        let turn_id = wake.turn_id;
         println!("{turn_id}");
         return Ok(());
     }
@@ -1492,7 +1495,7 @@ pub async fn run(args: &[String]) -> Result<()> {
     .await?;
     let mut registration_task = tokio::spawn(watch_app_server_registrations(
         args.app_server.clone(),
-        hook_base,
+        hook_base.clone(),
         args.ready_file.clone(),
         launcher.clone(),
     ));
@@ -1510,6 +1513,8 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     let mut wake_leadership = WakeLeadership::new(&args.app_server, &args.daemon);
     let mut cooldowns: HashMap<SessionId, Instant> = HashMap::new();
+    let mut in_flight = HashSet::new();
+    let mut deliveries = tokio::task::JoinSet::<(SessionId, Result<()>)>::new();
     let mut interval = tokio::time::interval(args.poll);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let launcher_exit = wait_for_launcher_exit(args.launcher_stdin);
@@ -1518,6 +1523,14 @@ pub async fn run(args: &[String]) -> Result<()> {
     loop {
         tokio::select! {
             _ = interval.tick() => {}
+            Some(delivery) = deliveries.join_next(), if !deliveries.is_empty() => {
+                let (session_id, result) = delivery.context("Codex delivery worker stopped")?;
+                in_flight.remove(&session_id);
+                if let Err(error) = result {
+                    log::debug!("[codex-bridge] thread={} mail remains unread: {error:#}", session_id.0);
+                }
+                continue;
+            }
             signal = tokio::signal::ctrl_c() => {
                 signal.context("waiting for Ctrl-C")?;
                 break;
@@ -1558,12 +1571,18 @@ pub async fn run(args: &[String]) -> Result<()> {
         retain_active_cooldowns(&mut cooldowns, now);
 
         for session_id in candidates {
-            if cooldowns.get(&session_id).is_some_and(|until| *until > now) {
+            if in_flight.contains(&session_id)
+                || cooldowns.get(&session_id).is_some_and(|until| *until > now)
+            {
                 continue;
             }
 
-            match start_thread(&args.app_server, &session_id).await {
-                Ok(turn_id) => {
+            match start_thread(&args.app_server, &session_id, Some(&hook_base)).await {
+                Ok(Some(Wake {
+                    turn_id,
+                    completion,
+                    message_ids,
+                })) => {
                     if let Some(keepers) = &keepers {
                         keepers.retain(session_id.0.as_ref()).await?;
                         if let Some(launcher) = &launcher {
@@ -1572,7 +1591,25 @@ pub async fn run(args: &[String]) -> Result<()> {
                         }
                     }
                     log::info!("[codex-bridge] woke thread={} turn={turn_id}", session_id.0);
-                    cooldowns.insert(session_id, now + WAKE_COALESCE_WINDOW);
+                    cooldowns.insert(session_id.clone(), now + WAKE_COALESCE_WINDOW);
+                    in_flight.insert(session_id.clone());
+                    let base = hook_base.clone();
+                    deliveries.spawn(async move {
+                        let result = async {
+                            completion.await?;
+                            crate::codex_hook::acknowledge_inbox(
+                                base,
+                                session_id.clone(),
+                                message_ids,
+                            )
+                            .await
+                        }
+                        .await;
+                        (session_id, result)
+                    });
+                }
+                Ok(None) => {
+                    cooldowns.insert(session_id, now + RETRY_COOLDOWN);
                 }
                 Err(error) => {
                     // Busy threads are retried: their normal Pre/PostToolUse
@@ -2583,10 +2620,20 @@ fn unread_local_codex_sessions(
         .collect()
 }
 
-async fn start_thread(app_server: &AppServerEndpoint, session_id: &SessionId) -> Result<String> {
+struct Wake {
+    turn_id: String,
+    completion: futures_util::future::BoxFuture<'static, Result<()>>,
+    message_ids: Vec<String>,
+}
+
+async fn start_thread(
+    app_server: &AppServerEndpoint,
+    session_id: &SessionId,
+    hook_base: Option<&str>,
+) -> Result<Option<Wake>> {
     match app_server {
         AppServerEndpoint::WebSocket(endpoint) => {
-            let (mut websocket, _) = tokio::time::timeout(
+            let (websocket, _) = tokio::time::timeout(
                 RPC_TIMEOUT,
                 connect_async_with_config(
                     app_server_request(endpoint)?,
@@ -2597,14 +2644,20 @@ async fn start_thread(app_server: &AppServerEndpoint, session_id: &SessionId) ->
             .await
             .context("timed out connecting to Codex app-server")?
             .with_context(|| format!("connecting to {endpoint}"))?;
-            initialize_and_start(&mut websocket, session_id).await
+            initialize_and_start(websocket, session_id, hook_base).await
         }
-        AppServerEndpoint::Unix(socket) => start_thread_over_unix(socket, session_id).await,
+        AppServerEndpoint::Unix(socket) => {
+            start_thread_over_unix(socket, session_id, hook_base).await
+        }
     }
 }
 
 #[cfg(unix)]
-async fn start_thread_over_unix(socket: &Path, session_id: &SessionId) -> Result<String> {
+async fn start_thread_over_unix(
+    socket: &Path,
+    session_id: &SessionId,
+    hook_base: Option<&str>,
+) -> Result<Option<Wake>> {
     use tokio::net::UnixStream;
 
     let stream = tokio::time::timeout(RPC_TIMEOUT, UnixStream::connect(socket))
@@ -2617,7 +2670,7 @@ async fn start_thread_over_unix(socket: &Path, session_id: &SessionId) -> Result
     let request = "ws://localhost/"
         .into_client_request()
         .context("building app-server WebSocket request")?;
-    let (mut websocket, _) = tokio::time::timeout(
+    let (websocket, _) = tokio::time::timeout(
         RPC_TIMEOUT,
         client_async_with_config(request, stream, Some(app_server_websocket_config())),
     )
@@ -2625,41 +2678,134 @@ async fn start_thread_over_unix(socket: &Path, session_id: &SessionId) -> Result
     .context("timed out upgrading Codex app-server connection")?
     .context("upgrading Codex app-server Unix socket to WebSocket")?;
 
-    initialize_and_start(&mut websocket, session_id).await
+    initialize_and_start(websocket, session_id, hook_base).await
 }
 
 #[cfg(not(unix))]
-async fn start_thread_over_unix(_socket: &Path, _session_id: &SessionId) -> Result<String> {
+async fn start_thread_over_unix(
+    _socket: &Path,
+    _session_id: &SessionId,
+    _hook_base: Option<&str>,
+) -> Result<Option<Wake>> {
     anyhow::bail!("Unix-domain-socket app-server endpoints are unavailable on this platform")
 }
 
 async fn initialize_and_start<S>(
-    websocket: &mut WebSocketStream<S>,
+    mut websocket: WebSocketStream<S>,
     session_id: &SessionId,
-) -> Result<String>
+    hook_base: Option<&str>,
+) -> Result<Option<Wake>>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    initialize_app_server(websocket).await?;
+    initialize_app_server(&mut websocket).await?;
+    let (context, message_ids) = if let Some(base) = hook_base {
+        write_rpc(
+            &mut websocket,
+            &json!({
+                "id": 2,
+                "method": "thread/read",
+                "params": {"threadId": session_id.0.as_ref(), "includeTurns": false},
+            }),
+        )
+        .await?;
+        let result = read_response(&mut websocket, 2).await?;
+        if result["thread"]["id"] != session_id.0.as_ref()
+            || result["thread"]["status"]["type"] != "idle"
+        {
+            return Ok(None);
+        }
 
+        let (inbox, ids) =
+            crate::codex_hook::take_inbox(base.to_owned(), session_id.clone()).await?;
+        if inbox.trim().is_empty() || ids.is_empty() {
+            return Ok(None);
+        }
+        (
+            json!({
+                "marshal-wakeup": {"kind": "application", "value": WAKE_CONTEXT},
+                "marshal-inbox": {"kind": "untrusted", "name": "marshal_inbox", "value": inbox},
+            }),
+            ids,
+        )
+    } else {
+        (
+            json!({"marshal-wakeup": {"kind": "application", "value": "Marshal connectivity check. End the turn."}}),
+            Vec::new(),
+        )
+    };
     write_rpc(
-        websocket,
+        &mut websocket,
         &json!({
-            "id": 2,
+            "id": 3,
             "method": "turn/start",
             "params": {
                 "threadId": session_id.0.as_ref(),
-                "input": [{ "type": "text", "text": WAKE_PROMPT }],
+                "turnTrigger": "marshal_wakeup",
+                "input": [],
+                "additionalContext": context,
             },
         }),
     )
     .await?;
-    let result = read_response(websocket, 2).await?;
-    result
+    let result = read_response(&mut websocket, 3).await?;
+    let turn_id = result
         .pointer("/turn/id")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .context("turn/start response omitted turn.id")
+        .context("turn/start response omitted turn.id")?
+        .to_owned();
+    let thread = session_id.clone();
+    let expected = turn_id.clone();
+    let completion = Box::pin(async move {
+        tokio::time::timeout(
+            WAKE_COMPLETION_TIMEOUT,
+            wait_for_wake_completion(&mut websocket, &thread, &expected),
+        )
+        .await
+        .context("timed out waiting for Marshal wake to complete")?
+    });
+    Ok(Some(Wake {
+        turn_id,
+        completion,
+        message_ids,
+    }))
+}
+
+async fn wait_for_wake_completion<S>(
+    websocket: &mut WebSocketStream<S>,
+    session_id: &SessionId,
+    turn_id: &str,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // A connection that starts a turn on another client's thread may receive
+    // no completion notification. Read a bounded page without resuming it.
+    for request_id in 4_i64.. {
+        tokio::time::sleep(RETRY_COOLDOWN).await;
+        write_rpc(
+            websocket,
+            &json!({
+                "id": request_id,
+                "method": "thread/turns/list",
+                "params": {"threadId": session_id.0.as_ref(), "limit": 4, "itemsView": "notLoaded"},
+            }),
+        )
+        .await?;
+        let result = read_response(websocket, request_id).await?;
+        let status = result["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|turn| turn["id"] == turn_id)
+            .and_then(|turn| turn["status"].as_str());
+        match status {
+            Some("completed") => return Ok(()),
+            Some("inProgress") | None => {}
+            Some(status) => anyhow::bail!("Codex wake turn {turn_id} ended with status {status}"),
+        }
+    }
+    unreachable!("turn polling is bounded by the caller's deadline")
 }
 
 async fn initialize_app_server<S>(websocket: &mut WebSocketStream<S>) -> Result<()>
@@ -3582,10 +3728,14 @@ mod tests {
         let start: Value = serde_json::from_str(start.to_text().unwrap()).unwrap();
         assert_eq!(start["method"], "turn/start");
         assert_eq!(start["params"]["threadId"], "thread-123");
-        assert_eq!(start["params"]["input"][0]["text"], WAKE_PROMPT);
+        assert_eq!(start["params"]["input"], json!([]));
+        assert_eq!(
+            start["params"]["additionalContext"]["marshal-wakeup"]["kind"],
+            "application"
+        );
         websocket
             .send(WebSocketMessage::Text(
-                "{\"id\":2,\"result\":{\"turn\":{\"id\":\"turn-456\"}}}".into(),
+                "{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-456\"}}}".into(),
             ))
             .await
             .unwrap();
@@ -3605,10 +3755,11 @@ mod tests {
         });
         let endpoint = AppServerEndpoint::WebSocket(format!("ws://{address}"));
 
-        let turn = start_thread(&endpoint, &SessionId(Arc::from("thread-123")))
+        let wake = start_thread(&endpoint, &SessionId(Arc::from("thread-123")), None)
             .await
-            .expect("wake thread");
-        assert_eq!(turn, "turn-456");
+            .expect("wake thread")
+            .expect("accepted wake");
+        assert_eq!(wake.turn_id, "turn-456");
         server.await.unwrap();
     }
 
@@ -3626,10 +3777,11 @@ mod tests {
         });
 
         let endpoint = AppServerEndpoint::Unix(temp.clone());
-        let turn = start_thread(&endpoint, &SessionId(Arc::from("thread-123")))
+        let wake = start_thread(&endpoint, &SessionId(Arc::from("thread-123")), None)
             .await
-            .expect("wake thread");
-        assert_eq!(turn, "turn-456");
+            .expect("wake thread")
+            .expect("accepted wake");
+        assert_eq!(wake.turn_id, "turn-456");
         server.await.unwrap();
         let _ = std::fs::remove_file(temp);
     }

@@ -233,8 +233,9 @@ stop ends that runtime; Ctrl+C still interrupts an active turn.
 
 Ordinary Linux and macOS invocations attach the TUI to Codex's managed app-server. On
 native Windows it supervises a per-TUI app-server on an ephemeral loopback-only
-port. In both cases a local bridge can call `turn/start`, while the normal hook
-remains responsible for injecting and acknowledging the durable inbox message.
+port. The bridge starts an idle turn with the inbox as untrusted context. It
+acknowledges the batch after that turn completes successfully. Hooks still
+deliver messages at prompt and tool boundaries.
 The launcher waits for the bridge's lifecycle subscription before attaching
 the TUI, so `thread/started` registers new and resumed sessions on the Marshal
 roster before their first prompt. This registration-only path never consumes
