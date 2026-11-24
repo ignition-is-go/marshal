@@ -139,6 +139,178 @@ fn have_tmux() -> bool {
 }
 
 #[test]
+fn attachment_preserves_relative_ssh_execution_context() {
+    let e = Env::new();
+    e.bin(
+        "ssh-wrapper",
+        r#"[ "$1" = -F ] && [ "$3" = -i ] || exit 41
+config=$(cat "$2") || exit 42
+key=$(cat "$4") || exit 43
+shift 4
+if [ "$1" = -t ]; then
+    printf '%s|%s\n' "$config" "$key"
+else
+    cat >/dev/null
+    printf '@@marshal-target '
+    cat response.json
+fi"#,
+    );
+    std::fs::write(e.path("config"), "owner config").unwrap();
+    std::fs::write(e.path("key"), "owner key").unwrap();
+    std::fs::write(
+        e.path("response.json"),
+        json!({
+            "version": PROTOCOL_VERSION,
+            "helper_version": marshal_launch_ssh::VERSION,
+            "launched": {
+                "handle": "marshal-launch-test-1", "host": "target-1", "cwd": "/work",
+                "where": "target-1 tmux:launch-test"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_marshal-launch-ssh"))
+        .arg("inspect")
+        .current_dir(e.dir.path())
+        .env("MARSHAL_LAUNCH_SSH", "./bin/ssh-wrapper -F config -i key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(e.request(&["claude"]).to_string().as_bytes())
+        .unwrap();
+    let observation = stdout_json(&child.wait_with_output().unwrap());
+    let launched: marshal_launch::Launched =
+        serde_json::from_value(observation["launched"].clone()).unwrap();
+    let attachment = launched.attachment_plan.unwrap();
+    let spec = attachment.plan().command();
+    let output = Command::new(spec.program)
+        .args(spec.args)
+        .current_dir(
+            spec.cwd
+                .map(PathBuf::from)
+                .unwrap_or_else(|| e.path("home")),
+        )
+        .output()
+        .expect("execute attachment from another caller directory");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "owner config|owner key\n"
+    );
+}
+
+#[test]
+fn non_utf8_owner_directory_preserves_observation_without_attachment_plan() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let e = Env::new();
+    let owner = e
+        .path("home")
+        .join(std::ffi::OsString::from_vec(vec![0xff]));
+    std::fs::create_dir(&owner).unwrap();
+    e.bin(
+        "ssh-wrapper",
+        r#"[ "$1" = -F ] && [ "$3" = -i ] || exit 41
+[ "$(cat "$2")" = 'owner config' ] || exit 42
+[ "$(cat "$4")" = 'owner key' ] || exit 43
+cat >/dev/null
+printf '@@marshal-target '
+cat "$ATTACHMENT_REPLY""#,
+    );
+    std::fs::write(e.path("config"), "owner config").unwrap();
+    std::fs::write(e.path("key"), "owner key").unwrap();
+    std::fs::write(
+        e.path("response.json"),
+        json!({
+            "version": PROTOCOL_VERSION,
+            "helper_version": marshal_launch_ssh::VERSION,
+            "running": true,
+            "launched": {
+                "handle": "marshal-launch-test-1", "host": "target-1",
+                "cwd": e.path("work"), "where": "target-1 tmux:launch-test"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let configured_ssh = format!(
+        "{} -F {} -i {}",
+        e.path("bin/ssh-wrapper").display(),
+        e.path("config").display(),
+        e.path("key").display()
+    );
+    let mut launched = None;
+    for verb in ["status", "inspect"] {
+        let request = if verb == "status" {
+            json!({"version": PROTOCOL_VERSION, "handle": "target-1 marshal-launch-test-1"})
+        } else {
+            e.request(&["claude"])
+        };
+        let mut child = Command::new(env!("CARGO_BIN_EXE_marshal-launch-ssh"))
+            .arg(verb)
+            .current_dir(&owner)
+            .env("MARSHAL_LAUNCH_SSH", &configured_ssh)
+            .env("ATTACHMENT_REPLY", e.path("response.json"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(request.to_string().as_bytes())
+            .unwrap();
+        let response = stdout_json(&child.wait_with_output().unwrap());
+        if verb == "status" {
+            assert_eq!(response["running"], true);
+        } else {
+            launched = Some(
+                serde_json::from_value::<marshal_launch::Launched>(response["launched"].clone())
+                    .unwrap(),
+            );
+        }
+    }
+    let launched = launched.unwrap();
+    assert_eq!(launched.handle, "target-1 marshal-launch-test-1");
+    assert_eq!(launched.cwd, e.path("work").display().to_string());
+    assert!(launched.attachment_plan.is_none());
+    let view = marshal_launch::api::LaunchView {
+        launch_id: "launch-test-1".into(),
+        backend: "ssh".into(),
+        name: "launch-test".into(),
+        process: marshal_launch::api::ProcessState::Running,
+        launched: Some(launched),
+        session_id: None,
+        task: marshal_launch::api::TaskState::NotRequested,
+        error: None,
+    };
+    let resolution = marshal_launch::attachment::resolution(
+        "http://owner:6156",
+        &view.launch_id,
+        &view,
+        &marshal_launch::attachment::Route::OwnerLocal,
+    )
+    .unwrap();
+    let resolution = serde_json::to_value(resolution).unwrap();
+    assert_eq!(resolution["observation"]["state"], "unsupported");
+    assert!(
+        resolution["observation"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("structured attachment is unsupported")
+    );
+}
+
+#[test]
 fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
     if !have_tmux() {
         eprintln!("skipping: no tmux");
@@ -153,7 +325,11 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
         "sh",
         "it's one arg",
     ]);
-    let l = stdout_json(&e.run("launch", &req, &[]));
+    let configured_ssh = format!(
+        "{} -F fixture-config -i fixture-key -J fixture-jump",
+        fixture("fake-ssh").display()
+    );
+    let l = stdout_json(&e.run("launch", &req, &[("MARSHAL_LAUNCH_SSH", &configured_ssh)]));
     let work = std::fs::canonicalize(e.path("work")).unwrap();
     let host = String::from_utf8(Command::new("uname").arg("-n").output().unwrap().stdout).unwrap();
     assert_eq!(l["version"], PROTOCOL_VERSION);
@@ -161,6 +337,23 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
     assert_eq!(l["host"], host.trim());
     assert_eq!(l["cwd"], work.display().to_string());
     assert_eq!(l["where"], format!("{} tmux:launch-test", host.trim()));
+    assert_eq!(l["attachment_plan"]["execution"], "owner_local");
+    assert_eq!(
+        l["attachment_plan"]["plan"]["program"],
+        fixture("fake-ssh").display().to_string()
+    );
+    assert_eq!(
+        &l["attachment_plan"]["plan"]["args"].as_array().unwrap()[..7],
+        &[
+            json!("-F"),
+            json!("fixture-config"),
+            json!("-i"),
+            json!("fixture-key"),
+            json!("-J"),
+            json!("fixture-jump"),
+            json!("-t")
+        ]
+    );
     let attach = l["attach"].as_str().unwrap();
     assert!(attach.contains(&which("tmux")));
     assert!(attach.contains("=marshal-launch-test-1"));
@@ -190,7 +383,10 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
         stdout_json(&e.run("inspect", &req, &[]))["launched"]["handle"],
         l["handle"]
     );
-    assert_eq!(stdout_json(&e.run("launch", &req, &[])), l);
+    assert_eq!(
+        stdout_json(&e.run("launch", &req, &[("MARSHAL_LAUNCH_SSH", &configured_ssh)])),
+        l
+    );
 
     let h = json!({"version": PROTOCOL_VERSION, "handle": l["handle"]});
     assert_eq!(stdout_json(&e.run("status", &h, &[]))["running"], true);

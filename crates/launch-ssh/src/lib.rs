@@ -1122,13 +1122,21 @@ pub fn parse_handle(h: &str) -> Result<Handle> {
 }
 
 fn ssh_command(dest: &str, remote_command: &str) -> Result<Command> {
+    ssh_command_with_tty(dest, remote_command, false)
+}
+
+fn ssh_command_with_tty(dest: &str, remote_command: &str, tty: bool) -> Result<Command> {
     let ssh = std::env::var("MARSHAL_LAUNCH_SSH").unwrap_or_else(|_| "ssh".to_string());
     let mut words = ssh.split_whitespace();
     let prog = words
         .next()
         .ok_or_else(|| anyhow!("MARSHAL_LAUNCH_SSH is empty"))?;
     let mut command = Command::new(prog);
-    command.args(words).args([
+    command.args(words);
+    if tty {
+        command.arg("-t");
+    }
+    command.args([
         "-o",
         "BatchMode=yes",
         "-o",
@@ -1223,6 +1231,9 @@ fn remote_observation(t: &Target, response: &Value, value: Value) -> Result<Laun
         "target helper returned a different launch handle"
     );
     launched.handle = t.handle().to_string();
+    launched.attachment_plan = attach_plan(&t.dest, response["tmux_path"].as_str(), &t.key)
+        .ok()
+        .map(|plan| marshal_launch::BackendAttachment::OwnerLocal { plan });
     launched.attach = Some(attach_command(
         &t.dest,
         response["tmux_path"].as_str(),
@@ -1235,13 +1246,49 @@ fn remote_observation(t: &Target, response: &Value, value: Value) -> Result<Laun
 /// non-login shell, whose PATH may not hold tmux (Homebrew's on macOS is set
 /// only in the login profile), so it names the tmux `launch` used by its full
 /// path. The target is quoted: zsh expands an unquoted `=word` (EQUALS).
-pub fn attach_command(dest: &str, tmux_path: Option<&str>, name: &str) -> String {
+fn remote_attach_command(tmux_path: Option<&str>, name: &str) -> String {
     let tmux = match tmux_path {
         Some(p) if p.starts_with('/') => sq(p),
-        _ => "tmux".to_string(),
+        _ => "tmux".into(),
     };
-    let remote = format!("{tmux} attach -t {}", sq(&format!("={name}")));
-    format!("ssh -t -- {} {}", sq(dest), sq(&remote))
+    format!("{tmux} attach -t {}", sq(&format!("={name}")))
+}
+
+pub fn attach_plan(
+    dest: &str,
+    tmux_path: Option<&str>,
+    name: &str,
+) -> Result<marshal_launch::AttachmentPlan> {
+    let command = ssh_command_with_tty(dest, &remote_attach_command(tmux_path, name), true)?;
+    Ok(marshal_launch::AttachmentPlan::LocalProcess {
+        program: command
+            .get_program()
+            .to_str()
+            .context("SSH executable is not UTF-8")?
+            .into(),
+        args: command
+            .get_args()
+            .map(|arg| {
+                arg.to_str()
+                    .map(String::from)
+                    .context("SSH argument is not UTF-8")
+            })
+            .collect::<Result<_>>()?,
+        cwd: Some(
+            std::env::current_dir()?
+                .to_str()
+                .context("SSH execution directory is not UTF-8")?
+                .into(),
+        ),
+    })
+}
+
+pub fn attach_command(dest: &str, tmux_path: Option<&str>, name: &str) -> String {
+    format!(
+        "ssh -t -- {} {}",
+        sq(dest),
+        sq(&remote_attach_command(tmux_path, name))
+    )
 }
 
 pub fn stop(h: &Handle) -> Result<&'static str> {
@@ -1272,6 +1319,33 @@ pub fn status(h: &Handle) -> Result<bool> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn structured_attach_uses_exact_destination_and_quotes_remote_arguments() {
+        let plan = attach_plan("user@host", Some("/opt/my tools/tmux's"), "launch-key").unwrap();
+        assert_eq!(
+            plan,
+            marshal_launch::AttachmentPlan::LocalProcess {
+                program: "ssh".into(),
+                args: vec![
+                    "-t".into(),
+                    "-o".into(),
+                    "BatchMode=yes".into(),
+                    "-o".into(),
+                    "ConnectTimeout=7".into(),
+                    "-o".into(),
+                    "ServerAliveInterval=4".into(),
+                    "-o".into(),
+                    "ServerAliveCountMax=2".into(),
+                    "--".into(),
+                    "user@host".into(),
+                    "'/opt/my tools/tmux'\"'\"'s' attach -t '=launch-key'".into()
+                ],
+                cwd: Some(std::env::current_dir().unwrap().to_str().unwrap().into()),
+            }
+        );
+        plan.command().validate().unwrap();
+    }
 
     #[test]
     fn target_version_is_checked_before_any_launch_fields_or_processes() {

@@ -234,6 +234,7 @@ mod tests {
             cwd: "/w/app".into(),
             r#where: "build-03 tmux:h".into(),
             attach: None,
+            attachment_plan: None,
         }
     }
 

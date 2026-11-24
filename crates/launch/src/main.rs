@@ -11,7 +11,8 @@ const USAGE: &str =
     "usage: marshal-launch <backend> <claude|codex> [--cwd <dir>] [--name <label>] \
 [--task <text>] [--daemon <url>] [--timeout <secs>] [--no-check] [--id <launch-id>] [-- <backend options>]
        marshal-launch list [--daemon <url>]
-       marshal-launch get|stop <launch-id>";
+       marshal-launch get|stop <launch-id> [--daemon <url>]
+       marshal-launch attachment-plan|attach <launch-id> [--daemon <url>] [--owner-local | --on <ssh-host> [--owner-daemon <url>] [--owner-program </path>]]";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -157,19 +158,37 @@ fn dispatch(args: &[String]) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&launches)?);
             Ok(())
         }
-        Some(operation @ ("get" | "stop")) => {
-            let (key, daemon) = match &args[1..] {
-                [key] => (key, None),
-                [key, flag, url] if flag == "--daemon" => (key, Some(url.clone())),
-                _ => bail!("{operation} takes a launch ID and optional --daemon <url>\n{USAGE}"),
-            };
+        Some(operation @ ("get" | "stop" | "attachment-plan" | "attach")) => {
+            let key = args.get(1).context(USAGE)?;
+            let attachment = matches!(operation, "attachment-plan" | "attach");
+            let (daemon, route) = marshal_launch::attachment::options(&args[2..])?;
+            if !attachment {
+                ensure!(
+                    matches!(route, marshal_launch::attachment::Route::Unspecified),
+                    "attachment route options require attach or attachment-plan"
+                );
+            }
+            let base = service_base(daemon)?;
+            if attachment {
+                let view = runtime()?.block_on(marshal_launch::attachment::observe(&base, key))?;
+                return if operation == "attachment-plan" {
+                    let resolution =
+                        marshal_launch::attachment::resolution(&base, key, &view, &route)?;
+                    println!("{}", serde_json::to_string_pretty(&resolution)?);
+                    Ok(())
+                } else {
+                    marshal_launch::attachment::execute(&marshal_launch::attachment::routed(
+                        &base, key, &view, &route,
+                    )?)
+                };
+            }
             let path = if operation == "get" {
                 api::GET_LAUNCH_PATH
             } else {
                 api::STOP_LAUNCH_PATH
             };
             let view: api::LaunchView = runtime()?.block_on(api::call(
-                &service_base(daemon)?,
+                &base,
                 path,
                 &api::LaunchKey {
                     launch_id: key.clone(),
