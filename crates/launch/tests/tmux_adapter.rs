@@ -56,6 +56,20 @@ fn launch_status_and_stop_on_a_private_tmux_server() {
             .unwrap()
             .contains(&server.socket.display().to_string())
     );
+    let command = l.attachment_plan.as_ref().unwrap().command();
+    command.validate().unwrap();
+    assert_eq!(command.program, "tmux");
+    assert_eq!(
+        command.args,
+        vec![
+            "-u".to_string(),
+            "-S".into(),
+            server.socket.display().to_string(),
+            "attach-session".into(),
+            "-t".into(),
+            format!("={}", l.handle)
+        ]
+    );
     assert_eq!(t.status(&l.handle).unwrap(), Some(true));
     assert_eq!(t.recover(&req).unwrap(), Some(l.clone()));
     assert_eq!(t.launch(&req).unwrap(), l);

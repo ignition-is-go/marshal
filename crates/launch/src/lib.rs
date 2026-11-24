@@ -4,6 +4,8 @@
 //! `marshal-launch-<name>` adapters agree on them.
 
 pub mod address;
+pub mod attachment;
+pub use agent_attachment_protocol::AttachmentPlan;
 pub mod api;
 pub mod external;
 pub mod first_task;
@@ -64,9 +66,11 @@ pub struct Launched {
     pub cwd: String,
     /// Human-readable location, e.g. `build-03 tmux:claude-app`.
     pub r#where: String,
-    /// A command that attaches a terminal to the agent, if there is one.
+    /// Display text for attachment. Never parsed or executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_plan: Option<AttachmentPlan>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -118,6 +118,17 @@ impl Tmux {
             .filter(|h| !h.trim().is_empty())
             .cloned()
             .unwrap_or_else(this_host);
+        let attachment_plan = attach.get_program().to_str().and_then(|program| {
+            let args = attach
+                .get_args()
+                .map(|arg| arg.to_str().map(String::from))
+                .collect::<Option<Vec<_>>>()?;
+            Some(crate::AttachmentPlan::LocalProcess {
+                program: program.into(),
+                args,
+                cwd: None,
+            })
+        });
         let attach = std::iter::once(attach.get_program())
             .chain(attach.get_args())
             .map(|part| format!("'{}'", part.to_string_lossy().replace('\'', r#"'"'"'"#)))
@@ -129,6 +140,7 @@ impl Tmux {
             host,
             cwd,
             attach: Some(attach),
+            attachment_plan,
         }
     }
 }
@@ -466,6 +478,36 @@ mod tests {
 
     fn v(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_attachment_arguments_are_not_rewritten_into_another_command() {
+        use std::os::unix::ffi::OsStringExt;
+        let request = ProcessRequest {
+            harness: "claude".into(),
+            argv: vec!["claude".into()],
+            cwd: "/work".into(),
+            name: "worker".into(),
+            agent_id: "launch-x".into(),
+            marshal_version: crate::MARSHAL_VERSION.into(),
+            env: Default::default(),
+            options: vec![],
+        };
+        for invalid_program in [false, true] {
+            let invalid = OsString::from_vec(vec![0xff]);
+            let mut command = Command::new(if invalid_program {
+                invalid.clone()
+            } else {
+                "tmux".into()
+            });
+            if !invalid_program {
+                command.arg(invalid);
+            }
+            let observation =
+                Tmux::new("tmux").observation(&request, "handle".into(), "/work".into(), command);
+            assert!(observation.attachment_plan.is_none());
+        }
     }
 
     #[test]

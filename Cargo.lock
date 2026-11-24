@@ -9,6 +9,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-attachment-protocol"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c362aadefaa7494391fa14577a551b52f6fb9bf074436b13bbd0913f2fb35472"
+dependencies = [
+ "anyhow",
+ "serde",
+ "url",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2468,6 +2479,7 @@ dependencies = [
 name = "marshal-launch"
 version = "0.62.1"
 dependencies = [
+ "agent-attachment-protocol",
  "anyhow",
  "gethostname",
  "hyphae",

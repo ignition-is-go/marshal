@@ -11,7 +11,7 @@ const USAGE: &str =
     "usage: marshal-launch <backend> <claude|codex> [--cwd <dir>] [--name <label>] \
 [--task <text>] [--daemon <url>] [--timeout <secs>] [--no-check] [--id <launch-id>] [-- <backend options>]
        marshal-launch list [--daemon <url>]
-       marshal-launch get|stop <launch-id>";
+       marshal-launch get|stop|attachment-plan|attach <launch-id> [--daemon <url>]";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -157,19 +157,32 @@ fn dispatch(args: &[String]) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&launches)?);
             Ok(())
         }
-        Some(operation @ ("get" | "stop")) => {
+        Some(operation @ ("get" | "stop" | "attachment-plan" | "attach")) => {
             let (key, daemon) = match &args[1..] {
                 [key] => (key, None),
                 [key, flag, url] if flag == "--daemon" => (key, Some(url.clone())),
                 _ => bail!("{operation} takes a launch ID and optional --daemon <url>\n{USAGE}"),
             };
+            let base = service_base(daemon)?;
+            if matches!(operation, "attachment-plan" | "attach") {
+                let view = runtime()?.block_on(marshal_launch::attachment::observe(&base, key))?;
+                return if operation == "attachment-plan" {
+                    let resolution = marshal_launch::attachment::resolution(&base, key, &view)?;
+                    println!("{}", serde_json::to_string_pretty(&resolution)?);
+                    Ok(())
+                } else {
+                    marshal_launch::attachment::execute(marshal_launch::attachment::backend_plan(
+                        &view,
+                    )?)
+                };
+            }
             let path = if operation == "get" {
                 api::GET_LAUNCH_PATH
             } else {
                 api::STOP_LAUNCH_PATH
             };
             let view: api::LaunchView = runtime()?.block_on(api::call(
-                &service_base(daemon)?,
+                &base,
                 path,
                 &api::LaunchKey {
                     launch_id: key.clone(),

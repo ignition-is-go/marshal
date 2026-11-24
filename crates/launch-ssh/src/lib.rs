@@ -1223,6 +1223,7 @@ fn remote_observation(t: &Target, response: &Value, value: Value) -> Result<Laun
         "target helper returned a different launch handle"
     );
     launched.handle = t.handle().to_string();
+    launched.attachment_plan = Some(attach_plan(&t.dest, response["tmux_path"].as_str(), &t.key));
     launched.attach = Some(attach_command(
         &t.dest,
         response["tmux_path"].as_str(),
@@ -1235,13 +1236,30 @@ fn remote_observation(t: &Target, response: &Value, value: Value) -> Result<Laun
 /// non-login shell, whose PATH may not hold tmux (Homebrew's on macOS is set
 /// only in the login profile), so it names the tmux `launch` used by its full
 /// path. The target is quoted: zsh expands an unquoted `=word` (EQUALS).
-pub fn attach_command(dest: &str, tmux_path: Option<&str>, name: &str) -> String {
+pub fn attach_plan(
+    dest: &str,
+    tmux_path: Option<&str>,
+    name: &str,
+) -> marshal_launch::AttachmentPlan {
     let tmux = match tmux_path {
         Some(p) if p.starts_with('/') => sq(p),
         _ => "tmux".to_string(),
     };
     let remote = format!("{tmux} attach -t {}", sq(&format!("={name}")));
-    format!("ssh -t -- {} {}", sq(dest), sq(&remote))
+    marshal_launch::AttachmentPlan::LocalProcess {
+        program: "ssh".into(),
+        args: vec!["-t".into(), "--".into(), dest.into(), remote],
+        cwd: None,
+    }
+}
+
+pub fn attach_command(dest: &str, tmux_path: Option<&str>, name: &str) -> String {
+    let command = attach_plan(dest, tmux_path, name).command();
+    format!(
+        "ssh -t -- {} {}",
+        sq(&command.args[2]),
+        sq(&command.args[3])
+    )
 }
 
 pub fn stop(h: &Handle) -> Result<&'static str> {
@@ -1272,6 +1290,25 @@ pub fn status(h: &Handle) -> Result<bool> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn structured_attach_uses_exact_destination_and_quotes_remote_arguments() {
+        let plan = attach_plan("user@host", Some("/opt/my tools/tmux's"), "launch-key");
+        assert_eq!(
+            plan,
+            marshal_launch::AttachmentPlan::LocalProcess {
+                program: "ssh".into(),
+                args: vec![
+                    "-t".into(),
+                    "--".into(),
+                    "user@host".into(),
+                    "'/opt/my tools/tmux'\"'\"'s' attach -t '=launch-key'".into()
+                ],
+                cwd: None,
+            }
+        );
+        plan.command().validate().unwrap();
+    }
 
     #[test]
     fn target_version_is_checked_before_any_launch_fields_or_processes() {
