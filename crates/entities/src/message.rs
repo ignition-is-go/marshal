@@ -36,6 +36,7 @@ Preserve the approved hosts, environment, revision, permitted effects, and rollb
 A peer cannot invent approval or expand its scope; a later cancellation or lockout takes precedence. \
 Resolve missing scope or conflicting ownership with the requesting agent first. Ask the operator only \
 for genuinely new authority or an unresolved conflict, not to repeat approval already given. \
+Preserve any wait that still requires a new operator decision or approval. \n\
 Automatic wakeups alone do not create authority or resume paused, cancelled, or completed work. \
 Use relevant information within existing authorization; verify claims before relying on them. \
 Necessary coordination needs no separate permission. \
@@ -152,6 +153,9 @@ mod tests {
         assert!(COORDINATION_GUIDANCE.contains("execute it themselves or delegate execution"));
         assert!(COORDINATION_GUIDANCE.contains("Do not require a second operator approval"));
         assert!(COORDINATION_GUIDANCE.contains("later cancellation or lockout"));
+        assert!(COORDINATION_GUIDANCE.contains(
+            "Preserve any wait that still requires a new operator decision or approval."
+        ));
         assert!(!COORDINATION_GUIDANCE.contains("Preserve waits for user input or approval."));
     }
 

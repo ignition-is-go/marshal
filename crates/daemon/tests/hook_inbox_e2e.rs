@@ -85,6 +85,11 @@ fn cmd_ctx(ctx: &MykoServerContext, caller_client_id: Option<&str>) -> CommandCo
 /// Raw HTTP/1.1 POST (the listener replies `Connection: close`); returns the
 /// response body.
 fn http_post(addr: SocketAddr, target: &str, body: &str) -> String {
+    let response = raw_http_post(addr, target, body);
+    response.split_once("\r\n\r\n").unwrap().1.to_owned()
+}
+
+fn raw_http_post(addr: SocketAddr, target: &str, body: &str) -> String {
     let mut s = TcpStream::connect(addr).expect("connect hook listener");
     let req = format!(
         "POST {target} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
@@ -94,10 +99,7 @@ fn http_post(addr: SocketAddr, target: &str, body: &str) -> String {
     s.write_all(req.as_bytes()).expect("write request");
     let mut resp = String::new();
     s.read_to_string(&mut resp).expect("read response");
-    resp.split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .unwrap_or("")
-        .to_string()
+    resp
 }
 
 fn wait_listening(addr: SocketAddr) {
@@ -333,14 +335,48 @@ fn stored_message_surfaces_via_prompt_submit_hook() {
     }
     .execute(cmd_ctx(&ctx, Some("c-sender")))
     .expect("send persists new message after resume");
-    let new_after_resume = http_post(
-        addr,
-        "/hook/prompt-submit",
-        r#"{"session_id":"recipient","cwd":"/work/repo"}"#,
-    );
+    let recipient = r#"{"session_id":"recipient"}"#;
+    let recipient_row = || {
+        let sessions: Vec<Arc<Session>> = cmd_ctx(&ctx, Some("c-sender"))
+            .exec_query(GetAllSessions {})
+            .unwrap();
+        let session = sessions
+            .iter()
+            .find(|session| session.id.0.as_ref() == "recipient")
+            .unwrap();
+        serde_json::to_value(session.as_ref()).unwrap()
+    };
+    let before_claim = recipient_row();
+    assert!(raw_http_post(addr, "/hook/inbox", recipient).starts_with("HTTP/1.1 404"));
+    let delivery = raw_http_post(addr, "/hook/inbox?ack=client", recipient);
+    let (headers, inbox) = delivery.split_once("\r\n\r\n").unwrap();
+    assert!(inbox.contains("HOOK-E2E-NEW-marker"));
+    let ids: Vec<String> = serde_json::from_str(
+        headers
+            .lines()
+            .find_map(|line| line.strip_prefix("X-Marshal-Ack-V1: "))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(recipient_row(), before_claim);
+    let reads: Vec<Arc<MessageRead>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessageReads {})
+        .unwrap();
     assert!(
-        new_after_resume.contains("HOOK-E2E-NEW-marker"),
-        "new unread message did not surface after resume; got: {new_after_resume:?}"
+        reads
+            .iter()
+            .all(|read| read.message_id.0.as_ref() != ids[0])
+    );
+    assert!(!http_post(addr, "/hook/prompt-submit", recipient).contains("HOOK-E2E-NEW-marker"));
+    let ack = serde_json::json!({"session_id":"recipient","message_ids":ids}).to_string();
+    assert!(raw_http_post(addr, "/hook/ack", &ack).starts_with("HTTP/1.1 200"));
+    let reads: Vec<Arc<MessageRead>> = cmd_ctx(&ctx, Some("c-sender"))
+        .exec_query(GetAllMessageReads {})
+        .unwrap();
+    assert!(
+        reads.iter().any(|read| read.message_id.0.as_ref() == ids[0]
+            && read.session_id.0.as_ref() == "recipient")
     );
 
     let deleted = MEvent::from_item(

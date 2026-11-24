@@ -30,13 +30,14 @@ sender ──send_message──> marshal daemon ──durable unread Message
                                       │
                                       ▼
                               local Codex bridge
-                                      │ turn/start(thread_id)
+                                      │ claims inbox from daemon
+                                      │ turn/start with untrusted inbox context
                                       ▼
                                shared app-server ──> attached TUI
                                       │
                                       ▼
-                         UserPromptSubmit hook fetches,
-                         injects, then acknowledges inbox
+                         bridge verifies the matching turn succeeded
+                         and acknowledges the claimed messages
 ```
 
 The Marshal session id supplied to hooks is the Codex app-server thread id.
@@ -72,11 +73,16 @@ roster. It omits the nickname prefix from the roster title because the roster
 already shows the nickname. The hook-only setup registers sessions by thread ID
 and has no title or rename events.
 
-The bridge deliberately does not mark the message read. The existing hook
-acknowledges it only after the daemon successfully writes the
-`<marshal_inbox>` response back to Codex. If the app-server is unavailable, the
-thread is busy, or `turn/start` fails, the durable message stays unread and the
-ordinary prompt/tool-boundary path remains intact.
+The bridge claims messages only for an idle thread on its app server. It reads
+the matching turn's status and acknowledges the inbox batch after a successful
+completion. Rejected, failed, interrupted, or unconfirmed turns leave the
+messages unread. A batch with no acknowledgement becomes eligible for delivery
+when its lease expires. Prompt and tool hooks still deliver mail during
+ordinary turns.
+
+Quiet wake requires the daemon's `/hook/inbox` endpoint and an app server that
+supports `turn/start` with `additionalContext` and `thread/turns/list`.
+The bridge sends empty user input so the wake text stays out of chat.
 
 Only unread direct messages are wake candidates. Room broadcasts are ambient,
 and the hook continues to frame peer content as untrusted coordination input:
@@ -174,10 +180,9 @@ agent.
 | Paused, cancelled, complete, or unassigned | Handle relevant coordination without starting or resuming task execution |
 | No unread message after a wakeup | Stop the delivery turn |
 
-Automatic wakeups are delivery events, not new user assignments. The wake prompt
-preserves task and waiting state and checks unread messages only once if no inbox
-was injected. These instructions guide model behavior; the bridge does not yet
-know these task states or enforce exchange closure. Closed-exchange notices can
+The wake context points the model to the inbox and the current task and
+authorization. Marshal's standing coordination instructions cover delegation,
+waits, and cancellation across delivery paths. Closed-exchange notices can
 still cause a wakeup. Transport acknowledgement means the message was surfaced,
 not that a recipient agreed, acquired a resource, or finished work.
 
