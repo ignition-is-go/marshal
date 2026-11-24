@@ -13,6 +13,68 @@ use marshal_launch::tmux::{Tmux, this_host};
 use marshal_launch::{LaunchBackend, LaunchRequest, MARSHAL_VERSION, StopReceipt};
 
 #[test]
+fn attachment_preserves_relative_tmux_execution_context() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::Command;
+
+    let Some(server) = common::PrivateTmux::new("attachment-context") else {
+        return;
+    };
+    let owner = std::env::current_dir().unwrap();
+    let directory = tempfile::tempdir_in(&owner).unwrap();
+    let relative = directory.path().strip_prefix(&owner).unwrap();
+    let socket = relative.join("socket");
+    symlink(&server.socket, &socket).unwrap();
+    let wrapper = directory.path().join("tmux-wrapper");
+    std::fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+if [ "$4" = attach-session ]; then
+    exec tmux "$1" "$2" "$3" display-message -p "$5" "$6" '#{session_name}'
+fi
+exec tmux "$@"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let caller = tempfile::tempdir().unwrap();
+    for program in [wrapper, relative.join("tmux-wrapper")] {
+        let backend = Tmux::new(program.to_str().unwrap()).with_socket(&socket);
+        let request = LaunchRequest::from(marshal_launch::ProcessRequest {
+            harness: "claude".into(),
+            argv: ["sleep", "30"].map(String::from).to_vec(),
+            cwd: directory.path().display().to_string(),
+            name: "attachment-context".into(),
+            agent_id: "launch-attachment-context".into(),
+            marshal_version: MARSHAL_VERSION.into(),
+            env: Default::default(),
+            options: vec![],
+        });
+        let launched = backend.launch(&request).unwrap();
+        let attachment = launched.attachment_plan.unwrap();
+        let spec = attachment.plan().command();
+        let output = Command::new(spec.program)
+            .args(spec.args)
+            .current_dir(
+                spec.cwd
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| caller.path().to_owned()),
+            )
+            .output()
+            .expect("execute tmux attachment from another caller directory");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "marshal-launch-attachment-context\n"
+        );
+    }
+}
+
+#[test]
 fn launch_status_and_stop_on_a_private_tmux_server() {
     let Some(server) = common::PrivateTmux::new("adapter") else {
         return;
