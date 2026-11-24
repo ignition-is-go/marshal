@@ -30,7 +30,7 @@ fn attachment_preserves_relative_tmux_execution_context() {
         &wrapper,
         r#"#!/bin/sh
 if [ "$4" = attach-session ]; then
-    exec tmux "$1" "$2" "$3" display-message -p "$5" "$6" '#{session_name}'
+    exec tmux "$1" "$2" "$3" list-sessions -F '#{session_name}'
 fi
 exec tmux "$@"
 "#,
