@@ -56,7 +56,7 @@ fn launch_status_and_stop_on_a_private_tmux_server() {
             .unwrap()
             .contains(&server.socket.display().to_string())
     );
-    let command = l.attachment_plan.as_ref().unwrap().command();
+    let command = l.attachment_plan.as_ref().unwrap().plan().command();
     command.validate().unwrap();
     assert_eq!(command.program, "tmux");
     assert_eq!(

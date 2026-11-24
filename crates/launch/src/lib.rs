@@ -70,7 +70,22 @@ pub struct Launched {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attachment_plan: Option<AttachmentPlan>,
+    pub attachment_plan: Option<BackendAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "execution", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BackendAttachment {
+    ClientLocal { plan: AttachmentPlan },
+    OwnerLocal { plan: AttachmentPlan },
+}
+
+impl BackendAttachment {
+    pub fn plan(&self) -> &AttachmentPlan {
+        match self {
+            Self::ClientLocal { plan } | Self::OwnerLocal { plan } => plan,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

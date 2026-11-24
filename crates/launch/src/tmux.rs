@@ -123,10 +123,12 @@ impl Tmux {
                 .get_args()
                 .map(|arg| arg.to_str().map(String::from))
                 .collect::<Option<Vec<_>>>()?;
-            Some(crate::AttachmentPlan::LocalProcess {
-                program: program.into(),
-                args,
-                cwd: None,
+            Some(crate::BackendAttachment::OwnerLocal {
+                plan: crate::AttachmentPlan::LocalProcess {
+                    program: program.into(),
+                    args,
+                    cwd: None,
+                },
             })
         });
         let attach = std::iter::once(attach.get_program())

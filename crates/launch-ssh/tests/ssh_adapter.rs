@@ -153,7 +153,11 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
         "sh",
         "it's one arg",
     ]);
-    let l = stdout_json(&e.run("launch", &req, &[]));
+    let configured_ssh = format!(
+        "{} -F fixture-config -i fixture-key -J fixture-jump",
+        fixture("fake-ssh").display()
+    );
+    let l = stdout_json(&e.run("launch", &req, &[("MARSHAL_LAUNCH_SSH", &configured_ssh)]));
     let work = std::fs::canonicalize(e.path("work")).unwrap();
     let host = String::from_utf8(Command::new("uname").arg("-n").output().unwrap().stdout).unwrap();
     assert_eq!(l["version"], PROTOCOL_VERSION);
@@ -161,6 +165,23 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
     assert_eq!(l["host"], host.trim());
     assert_eq!(l["cwd"], work.display().to_string());
     assert_eq!(l["where"], format!("{} tmux:launch-test", host.trim()));
+    assert_eq!(l["attachment_plan"]["execution"], "owner_local");
+    assert_eq!(
+        l["attachment_plan"]["plan"]["program"],
+        fixture("fake-ssh").display().to_string()
+    );
+    assert_eq!(
+        &l["attachment_plan"]["plan"]["args"].as_array().unwrap()[..7],
+        &[
+            json!("-F"),
+            json!("fixture-config"),
+            json!("-i"),
+            json!("fixture-key"),
+            json!("-J"),
+            json!("fixture-jump"),
+            json!("-t")
+        ]
+    );
     let attach = l["attach"].as_str().unwrap();
     assert!(attach.contains(&which("tmux")));
     assert!(attach.contains("=marshal-launch-test-1"));
@@ -190,7 +211,10 @@ fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
         stdout_json(&e.run("inspect", &req, &[]))["launched"]["handle"],
         l["handle"]
     );
-    assert_eq!(stdout_json(&e.run("launch", &req, &[])), l);
+    assert_eq!(
+        stdout_json(&e.run("launch", &req, &[("MARSHAL_LAUNCH_SSH", &configured_ssh)])),
+        l
+    );
 
     let h = json!({"version": PROTOCOL_VERSION, "handle": l["handle"]});
     assert_eq!(stdout_json(&e.run("status", &h, &[]))["running"], true);
