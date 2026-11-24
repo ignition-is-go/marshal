@@ -1274,7 +1274,12 @@ pub fn attach_plan(
                     .context("SSH argument is not UTF-8")
             })
             .collect::<Result<_>>()?,
-        cwd: None,
+        cwd: Some(
+            std::env::current_dir()?
+                .to_str()
+                .context("SSH execution directory is not UTF-8")?
+                .into(),
+        ),
     })
 }
 
@@ -1336,7 +1341,7 @@ mod tests {
                     "user@host".into(),
                     "'/opt/my tools/tmux'\"'\"'s' attach -t '=launch-key'".into()
                 ],
-                cwd: None,
+                cwd: Some(std::env::current_dir().unwrap().to_str().unwrap().into()),
             }
         );
         plan.command().validate().unwrap();
