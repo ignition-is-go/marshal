@@ -163,6 +163,13 @@ pub fn dispatch(
         "/hook/prompt-submit" => Some(handle_prompt_submit(query, body, ctx)),
         "/hook/session-end" => Some(handle_session_end(body, ctx)),
         "/hook/ack" => Some(handle_ack(body, ctx)),
+        "/hook/inbox" if query.split('&').any(|kv| kv == "ack=client") => {
+            let inbox = parse_body(body)
+                .as_ref()
+                .and_then(|body| body.get("session_id")?.as_str())
+                .and_then(|sid| poll_wait(&internal_cmd_ctx(ctx), sid));
+            Some(inbox.unwrap_or_else(|| HookOutcome::text(String::new())))
+        }
         _ => None,
     }
 }

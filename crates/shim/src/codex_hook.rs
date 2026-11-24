@@ -560,6 +560,40 @@ fn http_post(base: &str, path: &str, body: &str, timeout: Duration) -> Option<St
         .map(|reply| reply.body)
 }
 
+pub(crate) async fn take_inbox(
+    base: String,
+    session_id: marshal_entities::SessionId,
+) -> anyhow::Result<(String, Vec<String>)> {
+    tokio::task::spawn_blocking(move || {
+        let body = serde_json::json!({"session_id": session_id.0.as_ref()}).to_string();
+        let reply = http_post_why(
+            &base,
+            "/hook/inbox?ack=client",
+            &body,
+            Instant::now() + TIMEOUT,
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        anyhow::Ok((reply.body, reply.ack_ids))
+    })
+    .await?
+}
+
+pub(crate) async fn acknowledge_inbox(
+    base: String,
+    session_id: marshal_entities::SessionId,
+    message_ids: Vec<String>,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let body =
+            serde_json::json!({"session_id": session_id.0.as_ref(), "message_ids": message_ids})
+                .to_string();
+        http_post_why(&base, "/hook/ack", &body, Instant::now() + TIMEOUT)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        anyhow::Ok(())
+    })
+    .await?
+}
+
 /// [`http_post`], saying why it failed.
 fn http_post_why(
     base: &str,

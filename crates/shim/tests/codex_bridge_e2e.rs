@@ -22,7 +22,8 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use marshal_entities::{
-    GetAllSessions, HostInfo, Message, MessageId, MessageRead, MessageReadId, Session, SessionId,
+    GetAllMessageReads, GetAllMessages, GetAllSessions, HostInfo, Message, MessageId, MessageRead,
+    MessageReadId, Session, SessionId,
 };
 use myko::prelude::EventPublishing as _;
 use myko::{command::CommandContext, request::RequestContext, server::MykoServerContext};
@@ -159,6 +160,41 @@ impl Drop for HookHarness {
 
 async fn handle_hook_request(mut stream: TcpStream, ctx: Arc<MykoServerContext>) -> io::Result<()> {
     let (target, body) = read_http_request(&mut stream).await?;
+    if target == "/hook/inbox?ack=client" || target == "/hook/ack" {
+        let body: Value = serde_json::from_slice(&body)?;
+        let session = body["session_id"].as_str().unwrap();
+        if target == "/hook/ack" {
+            for id in body["message_ids"].as_array().unwrap() {
+                mark_read(&ctx, id.as_str().unwrap(), session);
+            }
+        } else {
+            let messages = internal_context(&ctx)
+                .exec_query(GetAllMessages {})
+                .unwrap();
+            let pending: Vec<_> = messages
+                .iter()
+                .filter(|message| {
+                    message
+                        .to_session_id
+                        .as_ref()
+                        .is_some_and(|id| id.0.as_ref() == session)
+                        && !is_read(&ctx, message.id.0.as_ref(), session)
+                })
+                .collect();
+            let ids: Vec<_> = pending
+                .iter()
+                .map(|message| message.id.0.as_ref())
+                .collect();
+            let inbox = pending
+                .iter()
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let header = format!("X-Marshal-Ack-V1: {}\r\n", json!(ids));
+            stream.write_all(format!("HTTP/1.1 200 OK\r\n{header}Content-Length: {}\r\nConnection: close\r\n\r\n{inbox}", inbox.len()).as_bytes()).await?;
+            return stream.flush().await;
+        }
+    }
     if target.starts_with("/hook/session-register")
         && let Ok(body) = serde_json::from_slice::<Value>(&body)
         && let Some(session_id) = body.get("session_id").and_then(Value::as_str)
@@ -343,13 +379,39 @@ async fn serve_app_server_connection(
             .await?;
     }
 
+    let mut wake = None;
     while let Some(frame) = websocket.next().await {
         let frame = frame?;
         let WebSocketMessage::Text(text) = frame else {
             continue;
         };
         let request: Value = serde_json::from_str(text.as_ref())?;
-        if request.get("method").and_then(Value::as_str) != Some("turn/start") {
+        if request["method"] == "thread/read" {
+            let thread = request["params"]["threadId"].as_str().unwrap();
+            let status = if owned_threads.contains(thread) {
+                "idle"
+            } else {
+                "notLoaded"
+            };
+            let result = json!({
+                "id":request["id"],
+                "result":{"thread":{"id":thread,"status":{"type":status}}}
+            });
+            websocket
+                .send(WebSocketMessage::Text(result.to_string().into()))
+                .await?;
+            continue;
+        }
+        if request["method"] == "thread/turns/list" {
+            let (turn, failed) = wake.as_ref().expect("completion follows a wake");
+            let status = if *failed { "failed" } else { "completed" };
+            let result = json!({"id":request["id"],"result":{"data":[{"id":"unrelated","status":"completed"},{"id":turn,"status":status}]}});
+            websocket
+                .send(WebSocketMessage::Text(result.to_string().into()))
+                .await?;
+            continue;
+        }
+        if request["method"] != "turn/start" {
             continue;
         }
         let id = request.get("id").cloned().unwrap_or(json!(2));
@@ -358,6 +420,20 @@ async fn serve_app_server_connection(
             .and_then(Value::as_str)
             .unwrap_or("");
         let response = if owned_threads.contains(thread) {
+            assert_eq!(request["params"]["input"], json!([]));
+            assert_eq!(
+                request["params"]["additionalContext"]["marshal-wakeup"],
+                json!({
+                    "kind": "application",
+                    "value": "Marshal started this turn to deliver direct messages. Read the \
+                              `marshal_inbox` tool output and handle it under the current task and authorization."
+                })
+            );
+            let inbox = &request["params"]["additionalContext"]["marshal-inbox"];
+            assert_eq!(inbox["kind"], "untrusted");
+            let content = inbox["value"].as_str().unwrap();
+            assert!(content.contains("wake canary"));
+            wake = Some((format!("turn-{thread}"), content.contains("failed-message")));
             accepted
                 .lock()
                 .expect("accepted wake mutex")
@@ -557,6 +633,14 @@ fn mark_read(ctx: &Arc<MykoServerContext>, message_id: &str, session_id: &str) {
         .expect("mark canary message read");
 }
 
+fn is_read(ctx: &Arc<MykoServerContext>, message: &str, session: &str) -> bool {
+    internal_context(ctx)
+        .exec_query(GetAllMessageReads {})
+        .unwrap()
+        .iter()
+        .any(|read| read.message_id.0.as_ref() == message && read.session_id.0.as_ref() == session)
+}
+
 async fn wait_until(label: &str, timeout: Duration, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
     loop {
@@ -597,7 +681,10 @@ async fn unix_multi_process_bridge_elects_one_wake_leader_and_fails_over() {
         "overlapping bridge processes must create exactly one wake turn"
     );
 
-    mark_read(&cell.ctx, "unix-message-1", "unix-thread");
+    wait_until("successful wake acknowledged", WAIT, || {
+        is_read(&cell.ctx, "unix-message-1", "unix-thread")
+    })
+    .await;
     leader.stop();
     tokio::time::sleep(Duration::from_millis(250)).await;
 
@@ -609,8 +696,21 @@ async fn unix_multi_process_bridge_elects_one_wake_leader_and_fails_over() {
         vec!["unix-thread", "unix-thread"],
         "the follower must acquire leadership and wake after the leader exits"
     );
-    mark_read(&cell.ctx, "unix-message-2", "unix-thread");
+    wait_until("successful wake acknowledged", WAIT, || {
+        is_read(&cell.ctx, "unix-message-2", "unix-thread")
+    })
+    .await;
     follower.stop();
+
+    let failed_server = FakeAppServer::spawn(&["failed-thread"]).await;
+    let mut failed_bridge = BridgeProcess::spawn(&failed_server, &cell, &hooks, &temp, "failed");
+    failed_bridge.wait_ready().await;
+    wait_for_sessions(&cell.ctx, &["failed-thread"]).await;
+    emit_message(&cell.ctx, "failed-message", "failed-thread");
+    failed_server.wait_for_count(1).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(!is_read(&cell.ctx, "failed-message", "failed-thread"));
+    failed_bridge.stop();
 }
 
 #[cfg(unix)]
@@ -861,8 +961,14 @@ async fn windows_isolated_interactive_bridges_wake_only_their_own_threads() {
 
     assert_eq!(first_app_server.accepted(), vec!["windows-thread-a"]);
     assert_eq!(second_app_server.accepted(), vec!["windows-thread-b"]);
-    mark_read(&cell.ctx, "windows-message-a", "windows-thread-a");
-    mark_read(&cell.ctx, "windows-message-b", "windows-thread-b");
+    wait_until("successful wake acknowledged", WAIT, || {
+        is_read(&cell.ctx, "windows-message-a", "windows-thread-a")
+    })
+    .await;
+    wait_until("successful wake acknowledged", WAIT, || {
+        is_read(&cell.ctx, "windows-message-b", "windows-thread-b")
+    })
+    .await;
     first.stop();
     second.stop();
 }
