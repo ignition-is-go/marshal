@@ -139,6 +139,74 @@ fn have_tmux() -> bool {
 }
 
 #[test]
+fn attachment_preserves_relative_ssh_execution_context() {
+    let e = Env::new();
+    e.bin(
+        "ssh-wrapper",
+        r#"[ "$1" = -F ] && [ "$3" = -i ] || exit 41
+config=$(cat "$2") || exit 42
+key=$(cat "$4") || exit 43
+shift 4
+if [ "$1" = -t ]; then
+    printf '%s|%s\n' "$config" "$key"
+else
+    cat >/dev/null
+    printf '@@marshal-target '
+    cat response.json
+fi"#,
+    );
+    std::fs::write(e.path("config"), "owner config").unwrap();
+    std::fs::write(e.path("key"), "owner key").unwrap();
+    std::fs::write(
+        e.path("response.json"),
+        json!({
+            "version": PROTOCOL_VERSION,
+            "helper_version": marshal_launch_ssh::VERSION,
+            "launched": {
+                "handle": "marshal-launch-test-1", "host": "target-1", "cwd": "/work",
+                "where": "target-1 tmux:launch-test"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_marshal-launch-ssh"))
+        .arg("inspect")
+        .current_dir(e.dir.path())
+        .env("MARSHAL_LAUNCH_SSH", "./bin/ssh-wrapper -F config -i key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(e.request(&["claude"]).to_string().as_bytes())
+        .unwrap();
+    let observation = stdout_json(&child.wait_with_output().unwrap());
+    let launched: marshal_launch::Launched =
+        serde_json::from_value(observation["launched"].clone()).unwrap();
+    let attachment = launched.attachment_plan.unwrap();
+    let spec = attachment.plan().command();
+    let output = Command::new(spec.program)
+        .args(spec.args)
+        .current_dir(
+            spec.cwd
+                .map(PathBuf::from)
+                .unwrap_or_else(|| e.path("home")),
+        )
+        .output()
+        .expect("execute attachment from another caller directory");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "owner config|owner key\n"
+    );
+}
+
+#[test]
 fn launch_runs_argv_in_cwd_with_env_then_status_and_stop() {
     if !have_tmux() {
         eprintln!("skipping: no tmux");
