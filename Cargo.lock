@@ -198,9 +198,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "autosocket"
-version = "6.18.0"
+version = "6.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a5e4b74ca9e76154e765fc2e38dc76f0881ca9389cc33197a9b7bf4204c3cd4"
+checksum = "6dac3aa1972873e9dfe9c4af33cc445a0a8b810c530dfbff65db11a37ba8e2b9"
 dependencies = [
  "base64",
  "flume",
@@ -2601,9 +2601,9 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "myko"
-version = "6.18.0"
+version = "6.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f81e9c652e27f354546f4757763dec0a61211ed1868fcd08962a8eafe7ac6828"
+checksum = "dc4117909acc2748cb2cf28be1b8f18c9433daba82743840f6479b0eee9a0923"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2649,9 +2649,9 @@ dependencies = [
 
 [[package]]
 name = "myko-auth"
-version = "6.18.0"
+version = "6.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91b37f3f91b3f391ded572df671ecaf694ed499f6d701e0bc3d542f1f8224c03"
+checksum = "a521780d87afa872a69d30ed1c44818384133bcd3ed69ccf886e5e34cd79780e"
 dependencies = [
  "base64",
  "futures",
@@ -2666,9 +2666,9 @@ dependencies = [
 
 [[package]]
 name = "myko-auth0"
-version = "6.18.0"
+version = "6.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d03ba78de4f5c427cf9589b510c5ae0630758685dbe49b8a7e5f72ea362d824e"
+checksum = "34f193eac112a9a38382d59a051e880030318b9b6bd145569baac309aed1f10a"
 dependencies = [
  "futures",
  "jsonwebtoken",
@@ -2681,9 +2681,9 @@ dependencies = [
 
 [[package]]
 name = "myko-macros"
-version = "6.18.0"
+version = "6.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5ba3b21ef070d46a9e110f409a74decbe9ad9fad5ba2224834fc45a54afad98"
+checksum = "bd91f086951d558e00759ab800b14e03922ceae2b8e15a86da26c04c973ca2e2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2693,9 +2693,9 @@ dependencies = [
 
 [[package]]
 name = "myko-server"
-version = "6.18.0"
+version = "6.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0434187f8f13e01751fc9fd3dadfe8cd227a377f8b7d0606d1c16c39b17ea2fa"
+checksum = "18e7a9943f70b95ded58eb947d4724af8df11b3eb0f8f00dfda5f6664515e7b4"
 dependencies = [
  "base64",
  "chrono",
@@ -2728,9 +2728,9 @@ dependencies = [
 
 [[package]]
 name = "myko-telemetry"
-version = "6.18.0"
+version = "6.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9681b005deaf4ee9d0b5081a7b5f9857a1e8b179ed15b91456bd6133f9808e36"
+checksum = "f41503dd76725703c58daddc4e8675501c82c1fdfdd283abc8f85384277069d3"
 dependencies = [
  "async-trait",
  "bytes",

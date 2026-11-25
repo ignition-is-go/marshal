@@ -24,10 +24,10 @@ tokio-tungstenite = "0.29"
 # HTTP MCP router (POST /myko/mcp request/response + SSE) and the
 # `mcp::filter` tool-visibility allowlist the pull model relies on.
 # Keep the core and code-generating macros on the same release.
-myko = "=6.18.0"
-myko-macros = "=6.18.0"
-myko-server = "=6.18.0"
-myko-auth = "=6.18.0"
+myko = "=6.19.2"
+myko-macros = "=6.19.2"
+myko-server = "=6.19.2"
+myko-auth = "=6.19.2"
 hyphae = "3.1.2"
 
 # Local crates. `version` is required so `cargo publish` accepts the

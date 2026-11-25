@@ -35,7 +35,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { workspace = true }
 
 myko-auth = { workspace = true }
-myko-auth0 = "=6.18.0"
+myko-auth0 = "=6.19.2"
 
 [dev-dependencies]
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
