@@ -1290,7 +1290,7 @@ fn shared_connection_path() -> Option<PathBuf> {
             .or_else(|| {
                 std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join(".codex"))
             })?;
-        return managed_connection_path(&home);
+        managed_connection_path(&home)
     }
     #[cfg(not(windows))]
     None
