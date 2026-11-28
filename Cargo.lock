@@ -2428,7 +2428,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "marshal-daemon"
-version = "0.62.2"
+version = "0.62.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-entities"
-version = "0.62.2"
+version = "0.62.3"
 dependencies = [
  "chrono",
  "log",
@@ -2466,7 +2466,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-launch"
-version = "0.62.2"
+version = "0.62.3"
 dependencies = [
  "anyhow",
  "gethostname",
@@ -2485,7 +2485,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-launch-ssh"
-version = "0.62.2"
+version = "0.62.3"
 dependencies = [
  "anyhow",
  "marshal-launch",
@@ -2497,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-shim"
-version = "0.62.2"
+version = "0.62.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "marshal-tui"
-version = "0.62.2"
+version = "0.62.3"
 dependencies = [
  "anyhow",
  "chrono",
