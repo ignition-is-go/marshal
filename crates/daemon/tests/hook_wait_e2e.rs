@@ -35,6 +35,7 @@ fn pick_free_port() -> u16 {
 fn sender() -> Session {
     Session {
         id: SessionId(Arc::from("sender")),
+        managed_presence: false,
         client_id: Some(ClientId(Arc::from("c-sender"))),
         agent_id: None,
         pid: 0,

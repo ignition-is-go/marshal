@@ -45,6 +45,7 @@ fn setup() -> MykoServerContext {
 fn session(id: &str, client_id: &str) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
+        managed_presence: false,
         client_id: Some(ClientId(Arc::from(client_id))),
         pid: 0,
         cwd: "/repo".into(),

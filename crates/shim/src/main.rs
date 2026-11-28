@@ -170,6 +170,14 @@ fn main() -> Result<()> {
                 .context("building tokio runtime")?
                 .block_on(codex_bridge::run(&rest));
         }
+        Some("codex-presence-observer") => {
+            let rest: Vec<String> = argv.collect();
+            return tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building observer runtime")?
+                .block_on(codex_bridge::observe_presence(&rest));
+        }
         Some(other) => {
             anyhow::bail!("unknown argument: {other} (try 'marshal-shim --help')");
         }
@@ -207,6 +215,7 @@ Commands:
   codex-setup   Wire Marshal into a Codex install (codex-setup --help for options)
   codex-run     Start Codex with Marshal live delivery
   codex-bridge  Run the Codex live-delivery bridge on its own (codex-run starts it)
+  codex-presence-observer  Observe one existing Linux runtime without waking it
 
 Options:
   --check        Print \"ok\" and exit (install smoke test)
@@ -345,6 +354,7 @@ async fn serve() -> Result<()> {
 
     let session = Session {
         id: session_id.clone(),
+        managed_presence: false,
         client_id: None,
         agent_id: codex_hook::agent_id_from_env(),
         pid,
@@ -1535,6 +1545,7 @@ mod tests {
         let row = |id: &str, client: Option<&str>| {
             Arc::new(Session {
                 id: SessionId(Arc::from(id)),
+                managed_presence: false,
                 client_id: client.map(|c| myko::entities::client::ClientId(Arc::from(c))),
                 agent_id: None,
                 pid: 0,

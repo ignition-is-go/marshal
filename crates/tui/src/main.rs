@@ -15,7 +15,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use hyphae::{Signal, Watchable};
+use hyphae::{Gettable, Signal, Watchable};
 use marshal_entities::{
     GetAllMessages, GetAllRoomMembers, GetAllRooms, GetAllSessionNicknames, GetAllSessions,
     Message, Room, RoomKind, RoomMember, Session, SessionNickname,
@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     io,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const FRAME_POLL: Duration = Duration::from_millis(150);
@@ -81,6 +81,7 @@ struct StateInner {
     /// Live WebSocket clients. Hook-only sessions have no persistent client;
     /// their recent activity is a separate presence signal.
     live_clients: HashSet<String>,
+    managed_live: Option<(Instant, HashSet<marshal_entities::SessionId>)>,
     connected: bool,
     last_event: Option<String>,
 }
@@ -263,12 +264,42 @@ async fn main() -> Result<()> {
             let connected = matches!(&**status, ConnectionStatus::Connected(_));
             conn_state.update(|s| {
                 s.connected = connected;
+                if !connected {
+                    s.managed_live = None;
+                }
                 s.last_event = Some(format!("[{}] {}", time_str(), describe(status)));
             });
         }
     });
     client.connection_status().own(conn_guard);
     client.set_address(Some(address));
+    let presence_client = client.clone();
+    let presence_state = state.clone();
+    let presence_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let response = presence_client.send_command::<marshal_entities::ReadManagedPresence, marshal_entities::ManagedPresenceSnapshot>(&marshal_entities::ReadManagedPresence {});
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Some(result) = response.get() {
+                        break result;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await;
+            presence_state.update(|state| {
+                state.managed_live = match result {
+                    Ok(Ok(snapshot)) if state.connected => {
+                        Some((Instant::now(), snapshot.sessions.into_iter().collect()))
+                    }
+                    _ => None,
+                }
+            });
+        }
+    });
 
     let sessions_cell = client.watch_query::<GetAllSessions>(GetAllSessions {});
     let sessions_state = state.clone();
@@ -350,9 +381,11 @@ async fn main() -> Result<()> {
         .name("tui-render".into())
         .spawn(move || render_loop(render_state, key_activity_for_render))
         .context("spawning render thread")?;
-    handle
+    let result = handle
         .join()
-        .map_err(|_| anyhow::anyhow!("render thread panicked"))?
+        .map_err(|_| anyhow::anyhow!("render thread panicked"))?;
+    presence_task.abort();
+    result
 }
 
 fn describe(status: &ConnectionStatus) -> &'static str {
@@ -522,9 +555,24 @@ enum Presence {
     Live,
     Active,
     Idle,
+    Unknown,
 }
 
 fn session_presence(snap: &StateInner, s: &Session, now: i64) -> Presence {
+    let managed = snap
+        .managed_live
+        .as_ref()
+        .filter(|(received, _)| received.elapsed() <= Duration::from_secs(6));
+    if managed.is_some_and(|(_, sessions)| sessions.contains(&s.id)) {
+        return Presence::Live;
+    }
+    if s.managed_presence {
+        return if managed.is_some() {
+            Presence::Idle
+        } else {
+            Presence::Unknown
+        };
+    }
     if s.client_id
         .as_ref()
         .is_some_and(|cid| snap.live_clients.contains(cid.0.as_ref()))
@@ -540,9 +588,11 @@ fn session_presence(snap: &StateInner, s: &Session, now: i64) -> Presence {
     }
 }
 
-/// The live filter includes connected clients and recently observed hook activity.
 fn session_is_present(snap: &StateInner, s: &Session, now: i64) -> bool {
-    session_presence(snap, s, now) != Presence::Idle
+    matches!(
+        session_presence(snap, s, now),
+        Presence::Live | Presence::Active
+    )
 }
 
 fn session_row(snap: &StateInner, s: &Session, now: i64) -> Row<'static> {
@@ -550,6 +600,7 @@ fn session_row(snap: &StateInner, s: &Session, now: i64) -> Row<'static> {
         Presence::Live => RowCell::from("● live").style(Style::default().fg(Color::Green)),
         Presence::Active => RowCell::from("● active").style(Style::default().fg(Color::Cyan)),
         Presence::Idle => RowCell::from("○ idle").style(Style::default().fg(Color::DarkGray)),
+        Presence::Unknown => RowCell::from("○ unknown").style(Style::default().fg(Color::Yellow)),
     };
     let activity_cell = build_activity_cell(s, now);
     let identity = format_identity(s);
@@ -1061,6 +1112,7 @@ mod tests {
             snap.nicknames.insert(id.clone(), format!("agent-{i}"));
             snap.sessions.push(Arc::new(Session {
                 id: SessionId(id.clone().into()),
+                managed_presence: false,
                 client_id: None,
                 pid: 1,
                 cwd: format!("/repo/{i}"),
@@ -1125,6 +1177,36 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn managed_idle_live_filter_uses_fresh_server_evidence_and_expires_unknown() {
+        let mut snap = fixture();
+        let row = Arc::make_mut(&mut snap.sessions[0]);
+        row.managed_presence = true;
+        row.last_activity_at = Some(1);
+        let id = row.id.clone();
+        snap.managed_live = Some((Instant::now(), HashSet::from([id])));
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], 100_000),
+            Presence::Live
+        );
+        assert!(session_is_present(&snap, &snap.sessions[0], 100_000));
+        assert_eq!(snap.sessions[0].last_activity_at, Some(1));
+        snap.managed_live = Some((Instant::now(), HashSet::new()));
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], 100_000),
+            Presence::Idle
+        );
+        snap.managed_live = Some((
+            Instant::now() - Duration::from_secs(7),
+            HashSet::from([snap.sessions[0].id.clone()]),
+        ));
+        assert_eq!(
+            session_presence(&snap, &snap.sessions[0], 100_000),
+            Presence::Unknown
+        );
+        assert!(!session_is_present(&snap, &snap.sessions[0], 100_000));
     }
 
     #[test]

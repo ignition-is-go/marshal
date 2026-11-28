@@ -57,6 +57,7 @@ mod tests {
     fn session_with_liveness_round_trips() {
         let s = Session {
             id: SessionId(Arc::from("sess-002")),
+            managed_presence: false,
             client_id: None,
             agent_id: None,
             pid: 4321,
@@ -90,6 +91,7 @@ mod tests {
     fn session_with_identity_round_trips() {
         let s = Session {
             id: SessionId(Arc::from("sess-003")),
+            managed_presence: false,
             client_id: None,
             agent_id: Some("agent/\"x\nopaque".into()),
             pid: 1,
@@ -137,6 +139,9 @@ mod tests {
 #[myko::myko_external(SET, DEL)]
 #[myko_public_events(set, delete)]
 pub struct Session {
+    /// Durable cleanup policy, never proof of current runtime presence.
+    #[serde(default)]
+    pub managed_presence: bool,
     /// WebSocket client this session is currently bound to. Auto-populated
     /// by the server from the WS connection — clients send the SET command
     /// without providing it. There is intentionally no `belongs_to(Client)`
@@ -378,7 +383,38 @@ impl myko::command::CommandHandler for RegisterSession {
     }
 }
 
-/// Serialize hook and shim registration because both replace the same Session row.
+pub fn session_project(cwd: &str) -> Option<String> {
+    cwd.rsplit(['/', '\\'])
+        .next()
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+}
+
+pub fn new_hook_session(id: SessionId, cwd: String, connected_at: i64) -> Session {
+    Session {
+        id,
+        managed_presence: false,
+        client_id: None,
+        agent_id: None,
+        pid: 0,
+        project: session_project(&cwd),
+        cwd,
+        connected_at,
+        git_branch: None,
+        current_task: None,
+        session_name: None,
+        activity: None,
+        kind: None,
+        last_activity_at: None,
+        last_tool: None,
+        last_tool_at: None,
+        operator: None,
+        host: None,
+        channels_enabled: None,
+        acks_pushes: None,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn update_registered_session(
     ctx: &CommandContext,
@@ -386,13 +422,11 @@ pub fn update_registered_session(
     update: impl FnOnce(Option<&Session>) -> Session,
 ) -> Result<(), CommandError> {
     require_console_owner(ctx, id)?;
-    static REGISTRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = REGISTRATION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = crate::session_lifecycle_guard();
     let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
     let prior = sessions.iter().find(|s| &s.id == id).map(Arc::as_ref);
     let mut session = update(prior);
+    session.managed_presence |= prior.is_some_and(|s| s.managed_presence);
     session.agent_id = session
         .agent_id
         .as_deref()
@@ -532,7 +566,10 @@ myko::submit! { myko::auth::public_access::PublicOperationRegistration {
     operation: "GetAllClients",
 } }
 
-fn require_console_owner(ctx: &CommandContext, id: &SessionId) -> Result<(), CommandError> {
+pub(crate) fn require_console_owner(
+    ctx: &CommandContext,
+    id: &SessionId,
+) -> Result<(), CommandError> {
     if !is_operator_console(id.0.as_ref()) {
         return Ok(());
     }

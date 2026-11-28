@@ -18,6 +18,7 @@
 
 mod ack_messages;
 mod broadcast_message;
+mod managed_presence;
 mod message;
 mod message_read;
 mod nickname;
@@ -34,6 +35,7 @@ mod wake_watcher;
 
 pub use ack_messages::*;
 pub use broadcast_message::*;
+pub use managed_presence::*;
 pub use message::*;
 pub use message_read::*;
 pub use nickname::*;
@@ -79,4 +81,6 @@ myko::register_typegen_type!(
     AutoSource,
     LivePushStatus,
     WakeStatus,
+    ManagedThreadRegistration,
+    ManagedPresenceSnapshot,
 );

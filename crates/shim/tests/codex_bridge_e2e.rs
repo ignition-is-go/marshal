@@ -21,6 +21,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
+use hyphae::Gettable;
 use marshal_entities::{
     GetAllMessageReads, GetAllMessages, GetAllSessions, HostInfo, Message, MessageId, MessageRead,
     MessageReadId, Session, SessionId,
@@ -404,6 +405,10 @@ async fn serve_app_server_connection(
             continue;
         };
         let request: Value = serde_json::from_str(text.as_ref())?;
+        if request["method"] == "thread/loaded/list" {
+            websocket.send(WebSocketMessage::Text(json!({"id":request["id"],"result":{"data":owned_threads.iter().collect::<Vec<_>>(),"nextCursor":null}}).to_string().into())).await?;
+            continue;
+        }
         if request["method"] == "thread/read" {
             let thread = request["params"]["threadId"].as_str().unwrap();
             let status = if owned_threads.contains(thread) {
@@ -413,7 +418,7 @@ async fn serve_app_server_connection(
             };
             let result = json!({
                 "id":request["id"],
-                "result":{"thread":{"id":thread,"status":{"type":status}}}
+                "result":{"thread":{"id":thread,"sessionId":thread,"cwd":format!("/wake-canary/{thread}"),"status":{"type":status}}}
             });
             websocket
                 .send(WebSocketMessage::Text(result.to_string().into()))
@@ -609,6 +614,7 @@ fn internal_context(ctx: &Arc<MykoServerContext>) -> CommandContext {
 fn hook_session(id: &str, cwd: &str) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
+        managed_presence: false,
         client_id: None,
         agent_id: None,
         pid: 0,
@@ -832,13 +838,16 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
                             "initialize" => {
                                 json!({"userAgent":"recovery-test","platformFamily":"test","platformOs":"linux","codexHome":"/tmp"})
                             }
+                            "thread/loaded/list" => {
+                                json!({"data":["initial-thread"],"nextCursor":null})
+                            }
                             "thread/list" => json!({"data":[
                                 {"id":"initial-thread","status":{"type":"notLoaded"}},
                                 {"id":"unrelated-thread","status":{"type":"loaded"}}
                             ],"nextCursor":null}),
                             "thread/read" | "thread/resume" => {
                                 let thread = request["params"]["threadId"].as_str().unwrap();
-                                json!({"thread":{"id":thread,"sessionId":thread,"cwd":"/initial","name":name.lock().unwrap().clone()}})
+                                json!({"thread":{"id":thread,"sessionId":thread,"cwd":"/initial","name":name.lock().unwrap().clone(),"status":{"type":"idle"}}})
                             }
                             "thread/name/set" => {
                                 assert_eq!(request["params"]["threadId"], "initial-thread");
@@ -1114,6 +1123,103 @@ async fn connected_bridge_repairs_manually_deleted_roster_row_without_reconnect(
         bridge.child.as_mut().unwrap().try_wait().unwrap().is_none(),
         "bridge must remain alive during repair"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measures the real 90-second lease plus 60-second grace"]
+async fn suspended_publisher_expires_with_its_websocket_still_connected() {
+    use marshal_entities::{
+        GetAllManagedPresenceOwners, ManagedThreadRegistration, ReconcileManagedPresence,
+    };
+    use myko::client::{ConnectionStatus, MykoClient};
+    let cell = CellHarness::spawn(candidate_addr());
+    let client = MykoClient::new();
+    client.set_address(Some(cell.address.clone()));
+    wait_until("publisher socket connected", WAIT, || {
+        matches!(
+            client.connection_status_sync(),
+            ConnectionStatus::Connected(_)
+        )
+    })
+    .await;
+    let threads = vec![ManagedThreadRegistration {
+        session_id: SessionId("suspended".into()),
+        thread_id: "suspended".into(),
+        cwd: "/owned".into(),
+        title: None,
+        agent_id: None,
+        operator: None,
+        host: None,
+    }];
+    let first = client.send_command::<ReconcileManagedPresence, ()>(&ReconcileManagedPresence {
+        sequence: 1,
+        threads: threads.clone(),
+        retire: false,
+    });
+    wait_until("first claim accepted", WAIT, || first.get().is_some()).await;
+    first.get().unwrap().unwrap();
+    let started = Instant::now();
+    let sweeper = tokio::spawn(daemon::cleanup::run_sweeper((*cell.ctx).clone()));
+    tokio::time::sleep(Duration::from_secs(94)).await;
+    assert!(matches!(
+        client.connection_status_sync(),
+        ConnectionStatus::Connected(_)
+    ));
+    let late = client.send_command::<ReconcileManagedPresence, ()>(&ReconcileManagedPresence {
+        sequence: 2,
+        threads,
+        retire: false,
+    });
+    wait_until("expired incarnation rejected", WAIT, || {
+        late.get().is_some()
+    })
+    .await;
+    assert!(
+        late.get()
+            .unwrap()
+            .unwrap_err()
+            .contains("expired or retired")
+    );
+    let projection = client.send_command::<marshal_entities::ReadManagedPresence, marshal_entities::ManagedPresenceSnapshot>(&marshal_entities::ReadManagedPresence {});
+    wait_until("expired presence projection answered", WAIT, || {
+        projection.get().is_some()
+    })
+    .await;
+    assert!(
+        projection.get().unwrap().unwrap().sessions.is_empty(),
+        "an expired claim is not live even before Session grace ends"
+    );
+    wait_until(
+        "suspended publisher session reaped",
+        Duration::from_secs(65),
+        || {
+            !internal_context(&cell.ctx)
+                .exec_query(GetAllSessions {})
+                .unwrap()
+                .iter()
+                .any(|row| row.id.0.as_ref() == "suspended")
+        },
+    )
+    .await;
+    assert!(matches!(
+        client.connection_status_sync(),
+        ConnectionStatus::Connected(_)
+    ));
+    assert!(
+        started.elapsed() <= Duration::from_secs(154),
+        "expiry exceeded 90+60+3-second detection bound"
+    );
+    let owners = internal_context(&cell.ctx)
+        .exec_query(GetAllManagedPresenceOwners {})
+        .unwrap();
+    assert_eq!(owners.len(), 1);
+    assert!(owners[0].retired);
+    eprintln!(
+        "publisher stopped renewing, socket stayed connected, Session removed after {:?}",
+        started.elapsed()
+    );
+    sweeper.abort();
+    client.set_address(None);
 }
 
 #[cfg(windows)]

@@ -1,21 +1,5 @@
 //! Periodic sweep that DELs abandoned sessions.
 //!
-//! Two session kinds, two liveness rules:
-//!
-//! - **WS shim sessions** (`client_id: Some`): live while that client id
-//!   is in the live `Client` store. When the client drops, a `STALE_AFTER`
-//!   grace covers reconnect blips, then the session is DEL'd. Tracking is
-//!   in-memory (`disconnected_since`); daemon restart resets it, giving
-//!   every reloaded session a fresh grace window.
-//!
-//! - **Pull/hook sessions** (`client_id: None`): an HTTP-MCP agent that
-//!   registered via `/hook/session-register` or `/hook/session-start` has no
-//!   WS client at all, so short-horizon elapsed time cannot distinguish a
-//!   live, idle Codex TUI from a crashed one. The explicit
-//!   `/hook/session-end` lifecycle hook owns clean removal, and the
-//!   `PULL_STALE_AFTER` activity backstop reaps rows whose every hook signal
-//!   has been silent for a day — without it, uncleanly-dead agents accrete
-//!   durable sessions without bound (lv-6731).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -257,25 +241,64 @@ fn sweep_rooms(ctx: &MykoServerContext) {
 }
 
 fn sweep_once(ctx: &MykoServerContext, disconnected_since: &mut HashMap<Arc<str>, Instant>) {
+    sweep_at(
+        ctx,
+        disconnected_since,
+        Instant::now(),
+        marshal_entities::managed_presence_tick_ms(),
+    );
+}
+
+fn sweep_at(
+    ctx: &MykoServerContext,
+    disconnected_since: &mut HashMap<Arc<str>, Instant>,
+    now: Instant,
+    tick: u64,
+) {
+    let _guard = marshal_entities::session_lifecycle_guard();
     let Some(session_store) = ctx.registry.get(Session::ENTITY_NAME_STATIC) else {
         return;
     };
-    let Some(client_store) = ctx.registry.get("Client") else {
-        // No Client store yet (server still warming up). Treat all sessions
-        // as "live" this tick — wait until we have the snapshot before
-        // making delete decisions.
-        return;
-    };
+    let client_store = ctx.registry.get("Client");
 
     let live_client_ids: HashSet<Arc<str>> = client_store
-        .entries()
-        .materialize()
-        .get()
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
+        .as_ref()
+        .map(|client_store| {
+            client_store
+                .entries()
+                .materialize()
+                .get()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let now = Instant::now();
+    let mut owned = HashSet::new();
+    let mut owner_upserts: Vec<Arc<dyn myko::item::AnyItem>> = Vec::new();
+    let mut owner_deletes: Vec<Arc<dyn myko::item::AnyItem>> = Vec::new();
+    if let Some(store) = ctx.registry.get("ManagedPresenceOwner") {
+        for (_, item) in store.entries().materialize().get() {
+            let Some(mut owner) = downcast_item::<marshal_entities::ManagedPresenceOwner>(&item)
+            else {
+                continue;
+            };
+            if !live_client_ids.contains(&owner.client_id.0) {
+                owner_deletes.push(item);
+            } else if owner.is_live_for(tick, &live_client_ids) {
+                owned.extend(
+                    owner
+                        .threads
+                        .iter()
+                        .map(|thread| thread.session_id.0.clone()),
+                );
+            } else if !owner.retired {
+                owner.retired = true;
+                owner.threads.clear();
+                owner_upserts.push(Arc::new(owner));
+            }
+        }
+    }
     let mut to_delete: Vec<Arc<str>> = Vec::new();
     let mut still_disconnected: HashSet<Arc<str>> = HashSet::new();
 
@@ -283,6 +306,21 @@ fn sweep_once(ctx: &MykoServerContext, disconnected_since: &mut HashMap<Arc<str>
         let Some(session) = downcast_item::<Session>(&item) else {
             continue;
         };
+        if session.managed_presence || owned.contains(&id) {
+            if owned.contains(&id) {
+                disconnected_since.remove(&id);
+            } else {
+                still_disconnected.insert(id.clone());
+                let lost = *disconnected_since.entry(id.clone()).or_insert(now);
+                if now.duration_since(lost) >= STALE_AFTER {
+                    to_delete.push(id);
+                }
+            }
+            continue;
+        }
+        if client_store.is_none() {
+            continue;
+        }
 
         match session.client_id.as_ref() {
             // Pull/hook session: no WS client by design, so short-horizon
@@ -328,6 +366,10 @@ fn sweep_once(ctx: &MykoServerContext, disconnected_since: &mut HashMap<Arc<str>
     // someone DEL'd them out from under us).
     disconnected_since.retain(|id, _| still_disconnected.contains(id));
 
+    if let Err(error) = ctx.replace_batch_any(owner_upserts, owner_deletes) {
+        log::warn!("[cleanup] managed owner cleanup failed: {error}");
+    }
+
     for id in to_delete {
         log::info!("[cleanup] DELing abandoned session {}", id);
         if let Err(e) = ctx.del_by_id(Session::ENTITY_NAME_STATIC, &id) {
@@ -367,6 +409,7 @@ mod tests {
     fn set_hook_session(ctx: &MykoServerContext, id: &str, last_activity_at: i64) {
         let session = Session {
             id: SessionId(Arc::from(id)),
+            managed_presence: false,
             client_id: None,
             agent_id: None,
             pid: 0,
@@ -430,6 +473,91 @@ mod tests {
         };
         let ev = MEvent::from_item(&client, MEventType::SET, &Uuid::new_v4().to_string());
         ctx.apply_event_batch(vec![ev]).expect("apply Client SET");
+    }
+
+    fn managed_row(ctx: &MykoServerContext, id: &str) {
+        set_hook_session(ctx, id, 1);
+        let store = ctx.registry.get("Session").unwrap();
+        let item = store
+            .entries()
+            .materialize()
+            .get()
+            .into_iter()
+            .find(|(key, _)| key.as_ref() == id)
+            .unwrap()
+            .1;
+        let mut row = downcast_item::<Session>(&item).unwrap();
+        row.managed_presence = true;
+        ctx.set(&row).unwrap();
+    }
+
+    fn owner(ctx: &MykoServerContext, client: &str, tick: u64, sessions: &[&str]) {
+        let row = marshal_entities::ManagedPresenceOwner {
+            id: marshal_entities::ManagedPresenceOwnerId(client.into()),
+            client_id: myko::entities::client::ClientId(client.into()),
+            sequence: 1,
+            threads: sessions
+                .iter()
+                .map(|id| marshal_entities::ManagedThreadRegistration {
+                    session_id: SessionId((*id).into()),
+                    thread_id: (*id).into(),
+                    cwd: "/repo".into(),
+                    title: None,
+                    agent_id: None,
+                    operator: None,
+                    host: None,
+                })
+                .collect(),
+            observed_tick_ms: tick,
+            retired: false,
+        };
+        ctx.set(&row).unwrap();
+    }
+
+    #[test]
+    fn managed_claims_are_a_union_and_expire_while_clients_remain() {
+        let ctx = setup();
+        set_client(&ctx, "owner-a");
+        set_client(&ctx, "owner-b");
+        managed_row(&ctx, "selected");
+        owner(&ctx, "owner-a", 0, &["selected"]);
+        owner(&ctx, "owner-b", 50_000, &["selected"]);
+        let now = Instant::now();
+        let mut grace = HashMap::new();
+        sweep_at(&ctx, &mut grace, now, 90_000);
+        assert!(session_ids(&ctx).contains("selected"));
+        assert!(grace.is_empty(), "the other owner retains the session");
+        sweep_at(&ctx, &mut grace, now, 140_000);
+        assert!(session_ids(&ctx).contains("selected"));
+        sweep_at(&ctx, &mut grace, now + STALE_AFTER, 200_000);
+        assert!(
+            !session_ids(&ctx).contains("selected"),
+            "live Client membership cannot defeat lease expiry"
+        );
+        let owners = ctx.registry.get("ManagedPresenceOwner").unwrap();
+        let rows = owners.entries().materialize().get();
+        assert_eq!(
+            rows.len(),
+            2,
+            "retired fences remain bounded by live clients"
+        );
+        assert!(rows.iter().all(|(_, row)| {
+            downcast_item::<marshal_entities::ManagedPresenceOwner>(row)
+                .unwrap()
+                .retired
+        }));
+    }
+
+    #[test]
+    fn replayed_managed_policy_gets_grace_without_any_client_store() {
+        let ctx = setup();
+        managed_row(&ctx, "replayed");
+        let mut grace = HashMap::new();
+        let now = Instant::now();
+        sweep_at(&ctx, &mut grace, now, 0);
+        assert!(session_ids(&ctx).contains("replayed"));
+        sweep_at(&ctx, &mut grace, now + STALE_AFTER, 60_000);
+        assert!(!session_ids(&ctx).contains("replayed"));
     }
 
     #[test]
