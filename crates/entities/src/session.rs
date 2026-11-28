@@ -167,14 +167,12 @@ pub struct Session {
     /// on checkout/switch (event-driven, not sampled at startup) so peers see
     /// branch changes mid-session, matching the operator's own statusline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub git_branch: Option<String>,
 
     /// Free-form short status text, settable via the `set_status` command.
     /// Surfaces on the roster so peers can see what this session is up to
     /// without needing a separate task system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub current_task: Option<String>,
 
     /// Human-facing session name. For Claude Code this is the operator's
@@ -187,7 +185,6 @@ pub struct Session {
     /// agent is doing X"). `None` for harnesses with no such manifest
     /// (Codex) or Claude builds predating it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub session_name: Option<String>,
 
     /// Live activity / turn-state, from Claude's per-PID manifest `status`:
@@ -199,7 +196,6 @@ pub struct Session {
     /// turn-state in near real time. `None` for harnesses with no such
     /// manifest (Codex) or older Claude builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub activity: Option<String>,
 
     /// Session kind, from the manifest `kind`: `"interactive"` (a human at a
@@ -220,7 +216,6 @@ pub struct Session {
     /// "did this peer do anything in the last N seconds?". Stale =
     /// candidate for the stuck-session visualization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub last_activity_at: Option<i64>,
 
     /// Name of the most recent MCP tool the shim served (e.g.
@@ -229,7 +224,6 @@ pub struct Session {
     /// last called X 3s ago" without leaking message content. Pair
     /// with `last_tool_at` for staleness reasoning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub last_tool: Option<String>,
 
     /// Wall-clock millis when `last_tool` was served. Distinct from
@@ -240,7 +234,6 @@ pub struct Session {
     /// receives notifications and never calls a tool will have a
     /// fresh `last_activity_at` and a stale `last_tool_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub last_tool_at: Option<i64>,
 
     /// Which human this session belongs to. Resolved by the shim:
@@ -539,7 +532,91 @@ impl myko::command::CommandHandler for RegisterOperatorConsole {
     }
 }
 
-// The schema generates these commands. Declare just the legacy client contract.
+macro_rules! session_field_command {
+    ($command:ident, $field:ident, $value:ty, $convert:expr) => {
+        #[myko::myko_command]
+        #[myko_scope(Session, write)]
+        pub struct $command {
+            pub id: SessionId,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub $field: $value,
+        }
+
+        impl myko::command::CommandHandler for $command {
+            #[cfg(target_arch = "wasm32")]
+            fn execute(self, _ctx: CommandContext) -> Result<(), CommandError> {
+                unreachable!("Session field updates are server-only")
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            fn execute(self, ctx: CommandContext) -> Result<(), CommandError> {
+                update_session_field(&ctx, &self.id, |session| {
+                    session.$field = ($convert)(self.$field)
+                })
+            }
+        }
+    };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn update_session_field(
+    ctx: &CommandContext,
+    id: &SessionId,
+    update: impl FnOnce(&mut Session),
+) -> Result<(), CommandError> {
+    require_console_owner(ctx, id)?;
+    let _guard = crate::session_lifecycle_guard();
+    let mut session = ctx
+        .exec_report(GetSessionById { id: id.clone() })?
+        .map(|row| (*row).clone())
+        .ok_or_else(|| caller_err(ctx, &format!("Session {id} not found")))?;
+    update(&mut session);
+    ctx.emit_set(&session)
+}
+
+session_field_command!(
+    SetSessionGitBranch,
+    git_branch,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionCurrentTask,
+    current_task,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionSessionName,
+    session_name,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionActivity,
+    activity,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionLastActivityAt,
+    last_activity_at,
+    Option<i64>,
+    std::convert::identity
+);
+session_field_command!(
+    SetSessionLastTool,
+    last_tool,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionLastToolAt,
+    last_tool_at,
+    Option<i64>,
+    std::convert::identity
+);
+
 macro_rules! public_session_commands {
     ($($command:ty),* $(,)?) => { $(
         #[cfg(not(target_arch = "wasm32"))]

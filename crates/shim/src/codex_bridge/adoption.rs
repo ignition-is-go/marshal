@@ -96,10 +96,11 @@ pub(super) async fn run(args: &[String]) -> Result<()> {
     let mut writer = LauncherStateWriter::new(
         evidence.state_file.clone(),
         PathBuf::new(),
-        Some(evidence.thread.clone()),
+        state.thread_id.clone(),
         agent_id,
     );
     writer.state.generation = state.generation;
+    writer.state.active_thread_id = Some(evidence.thread.clone());
     let launcher = Arc::new(tokio::sync::Mutex::new(writer));
     evidence.validate()?;
     tokio::select! {

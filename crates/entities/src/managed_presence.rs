@@ -223,11 +223,15 @@ impl CommandHandler for ReconcileManagedPresence {
                         .to_owned()
                 });
             }
-            if let Some(agent) = thread
+            if session
                 .agent_id
                 .as_deref()
-                .map(str::trim)
-                .filter(|agent| !agent.is_empty())
+                .is_none_or(|agent| agent.trim().is_empty())
+                && let Some(agent) = thread
+                    .agent_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|agent| !agent.is_empty())
             {
                 session.agent_id = Some(agent.to_owned());
             }

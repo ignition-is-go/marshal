@@ -150,6 +150,28 @@ fn retries_do_not_renew_and_retirement_fences_late_frames() {
 }
 
 #[test]
+fn two_observers_cannot_churn_existing_launch_correlation_or_durable_events() {
+    let (ctx, durable) = setup();
+    let first = connect(&ctx, "first-observer");
+    let second = connect(&ctx, "second-observer");
+    reconcile(&first, 1, vec![thread("selected")], false).unwrap();
+    let writes = durable.0.lock().unwrap().len();
+    let mut conflicting = thread("selected");
+    conflicting.agent_id = Some("another-original-launch".into());
+    for sequence in 2..12 {
+        reconcile(&second, sequence, vec![conflicting.clone()], false).unwrap();
+        assert_eq!(
+            second.exec_query(GetAllSessions {}).unwrap()[0]
+                .agent_id
+                .as_deref(),
+            Some("launch-id")
+        );
+        reconcile(&first, sequence, vec![thread("selected")], false).unwrap();
+    }
+    assert_eq!(durable.0.lock().unwrap().len(), writes);
+}
+
+#[test]
 fn connection_console_and_snapshot_bounds_are_enforced() {
     let (ctx, _) = setup();
     assert!(reconcile(&caller(&ctx, None), 1, vec![thread("selected")], false).is_err());
@@ -222,4 +244,67 @@ fn hook_end_and_old_registration_cannot_remove_managed_policy() {
         .unwrap();
     assert!(owner.exec_query(GetAllSessions {}).unwrap()[0].managed_presence);
     assert_eq!(row.last_activity_at, None);
+}
+
+#[test]
+fn canonical_promotion_and_concurrent_field_commands_preserve_each_others_updates() {
+    let (ctx, _) = setup();
+    let owner = connect(&ctx, "owner");
+    let id = SessionId("selected".into());
+    let mut original = new_hook_session(id.clone(), "/repo".into(), 1);
+    original.session_name = Some("before promotion".into());
+    owner.emit_set(&original).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let (done, completed) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for field in 0..3 {
+            let owner = owner.clone();
+            let id = id.clone();
+            let barrier = barrier.clone();
+            let done = done.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                match field {
+                    0 => SetSessionSessionName {
+                        id,
+                        session_name: Some("confirmed title".into()),
+                    }
+                    .execute(owner),
+                    1 => SetSessionCurrentTask {
+                        id,
+                        current_task: Some("in-flight task".into()),
+                    }
+                    .execute(owner),
+                    _ => SetSessionLastActivityAt {
+                        id,
+                        last_activity_at: Some(123),
+                    }
+                    .execute(owner),
+                }
+                .unwrap();
+                done.send(()).unwrap();
+            });
+        }
+        update_registered_session(&owner, &id, |prior| {
+            let mut promoted = prior.unwrap().clone();
+            barrier.wait();
+            for _ in 0..3 {
+                if completed
+                    .recv_timeout(std::time::Duration::from_millis(150))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            promoted.managed_presence = true;
+            promoted
+        })
+        .unwrap();
+    });
+    reconcile(&owner, 1, vec![thread("selected")], false).unwrap();
+    let row = &owner.exec_query(GetAllSessions {}).unwrap()[0];
+    assert!(row.managed_presence);
+    assert_eq!(row.session_name.as_deref(), Some("confirmed title"));
+    assert_eq!(row.current_task.as_deref(), Some("in-flight task"));
+    assert_eq!(row.last_activity_at, Some(123));
 }

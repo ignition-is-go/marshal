@@ -3,6 +3,43 @@ use marshal_entities::{
     MANAGED_PRESENCE_SCAN, ManagedThreadRegistration, ReconcileManagedPresence,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PresenceSelection {
+    generation: u64,
+    requested: u64,
+    confirmed: u64,
+    launch_thread: Option<String>,
+    active_thread: Option<String>,
+    retained_thread: Option<String>,
+    kept_threads: HashSet<String>,
+}
+
+impl PresenceSelection {
+    fn snapshot(launcher: &LauncherStateWriter) -> Self {
+        Self {
+            generation: launcher.state.generation,
+            requested: launcher.selection_sequence,
+            confirmed: launcher.confirmed_sequence,
+            launch_thread: launcher.state.thread_id.clone(),
+            active_thread: launcher.state.active_thread_id.clone(),
+            retained_thread: launcher.state.retained_thread_id.clone(),
+            kept_threads: launcher.state.kept_threads.clone(),
+        }
+    }
+
+    fn targets(&self) -> HashSet<String> {
+        let mut targets = self.kept_threads.clone();
+        targets.extend(
+            self.active_thread
+                .as_ref()
+                .or(self.launch_thread.as_ref())
+                .cloned(),
+        );
+        targets.extend(self.retained_thread.iter().cloned());
+        targets
+    }
+}
+
 pub(super) async fn run(
     endpoint: AppServerEndpoint,
     daemon: String,
@@ -134,18 +171,14 @@ where
         if let Some(evidence) = evidence {
             evidence.validate()?;
         }
-        let (selection, targets, agent_id) = {
+        let (selection, agent_id) = {
             let launcher = launcher.lock().await;
-            let selection = (
-                launcher.state.generation,
-                launcher.selection_sequence,
-                launcher.state.thread_id.clone(),
-                launcher.state.kept_threads.clone(),
-            );
-            let mut targets = launcher.state.kept_threads.clone();
-            targets.extend(launcher.state.thread_id.iter().cloned());
-            (selection, targets, launcher.launch_id.clone())
+            (
+                PresenceSelection::snapshot(&launcher),
+                launcher.launch_id.clone(),
+            )
         };
+        let targets = selection.targets();
         closed.retain(|id| targets.contains(id));
         let missing = last_claims
             .iter()
@@ -161,7 +194,14 @@ where
         }
         let threads = tokio::time::timeout(
             RPC_TIMEOUT,
-            scan(socket, &targets, &mut closed, &mut request_id, &agent_id),
+            scan(
+                socket,
+                &targets,
+                &mut closed,
+                &mut request_id,
+                &agent_id,
+                selection.launch_thread.as_deref(),
+            ),
         )
         .await
         .context("presence inventory scan timed out")??;
@@ -169,14 +209,7 @@ where
             evidence.validate()?;
         }
         let current = launcher.lock().await;
-        if selection
-            != (
-                current.state.generation,
-                current.selection_sequence,
-                current.state.thread_id.clone(),
-                current.state.kept_threads.clone(),
-            )
-        {
+        if selection != PresenceSelection::snapshot(&current) {
             anyhow::bail!("presence observation crossed a launcher generation");
         }
         sequence += 1;
@@ -200,13 +233,7 @@ where
         }
         let current = launcher.lock().await;
         anyhow::ensure!(
-            selection
-                == (
-                    current.state.generation,
-                    current.selection_sequence,
-                    current.state.thread_id.clone(),
-                    current.state.kept_threads.clone()
-                ),
+            selection == PresenceSelection::snapshot(&current),
             "presence publish crossed a launcher generation"
         );
         drop(current);
@@ -241,6 +268,7 @@ async fn scan<S>(
     closed: &mut HashSet<String>,
     request_id: &mut i64,
     agent_id: &Option<String>,
+    launch_thread: Option<&str>,
 ) -> Result<Vec<ManagedThreadRegistration>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -321,7 +349,11 @@ where
             thread_id: registration.thread_id,
             cwd: registration.cwd,
             title: registration.name,
-            agent_id: agent_id.clone(),
+            agent_id: if launch_thread == Some(id.as_str()) {
+                agent_id.clone()
+            } else {
+                None
+            },
             operator: Some(crate::codex_hook::operator()),
             host: Some(marshal_entities::HostInfo {
                 name: short_host(),
@@ -344,7 +376,9 @@ fn record_closes(closed: &mut HashSet<String>, notifications: &[Value]) {
 
 async fn relevant_thread(launcher: &SharedLauncherState, id: &str) -> bool {
     let launcher = launcher.lock().await;
-    launcher.state.thread_id.as_deref() == Some(id) || launcher.state.kept_threads.contains(id)
+    PresenceSelection::snapshot(&launcher)
+        .targets()
+        .contains(id)
 }
 
 #[cfg(test)]
@@ -407,6 +441,7 @@ mod tests {
             &mut HashSet::new(),
             &mut 1,
             &Some("selected-launch".into()),
+            Some("selected"),
         )
         .await;
         socket.close(None).await.unwrap();
