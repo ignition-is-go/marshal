@@ -54,6 +54,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+marshal-daemon = { path = "../daemon" }
 myko-server = { workspace = true }
 socket2 = "0.6"
 tempfile = "3"

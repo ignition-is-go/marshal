@@ -129,6 +129,24 @@ struct HookHarness {
 }
 
 impl HookHarness {
+    async fn spawn_daemon(ctx: Arc<MykoServerContext>) -> Self {
+        let address = candidate_addr();
+        let task =
+            tokio::spawn(async move { daemon::http_listener::run(address, ctx).await.unwrap() });
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if TcpStream::connect(address).await.is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "daemon hook listener readiness");
+            tokio::time::sleep(POLL).await;
+        }
+        Self {
+            base_url: format!("http://{address}"),
+            task,
+        }
+    }
+
     async fn spawn(ctx: Arc<MykoServerContext>) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -468,11 +486,34 @@ impl BridgeProcess {
         temp: &TempDir,
         name: &str,
     ) -> Self {
+        Self::spawn_bound(app_server, cell, hooks, temp, name, None)
+    }
+
+    fn spawn_bound(
+        app_server: &FakeAppServer,
+        cell: &CellHarness,
+        hooks: &HookHarness,
+        temp: &TempDir,
+        name: &str,
+        selected_thread: Option<&str>,
+    ) -> Self {
         let ready_file = temp.path().join(format!("{name}.ready"));
         let mut command = Command::new(SHIM);
+        command.arg("codex-bridge");
+        if let Some(thread) = selected_thread {
+            command
+                .env("MARSHAL_LAUNCH_ID", "managed-presence-canary")
+                .args([
+                    "--launcher-thread-id",
+                    thread,
+                    "--launcher-cwd",
+                    "/wake-canary",
+                    "--launcher-state-file",
+                ])
+                .arg(temp.path().join(format!("{name}.state.json")));
+        }
         command
             .args([
-                "codex-bridge",
                 "--endpoint",
                 &app_server.endpoint,
                 "--daemon",
@@ -970,6 +1011,109 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
     })
     .await;
     bridge.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_idle_bridge_survives_activity_backstop_after_successful_wake() {
+    let temp = tempfile::tempdir().expect("test tempdir");
+    let cell = CellHarness::spawn(candidate_addr());
+    let hooks = HookHarness::spawn_daemon(Arc::clone(&cell.ctx)).await;
+    let app_server = FakeAppServer::spawn(&["idle-managed-thread"]).await;
+    let mut bridge = BridgeProcess::spawn_bound(
+        &app_server,
+        &cell,
+        &hooks,
+        &temp,
+        "idle-managed",
+        Some("idle-managed-thread"),
+    );
+    bridge.wait_ready().await;
+    wait_for_sessions(&cell.ctx, &["idle-managed-thread"]).await;
+
+    let mut aged = internal_context(&cell.ctx)
+        .exec_query(GetAllSessions {})
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id.0.as_ref() == "idle-managed-thread")
+        .map(|row| (*row).clone())
+        .unwrap();
+    aged.last_activity_at = Some(
+        chrono::Utc::now().timestamp_millis()
+            - daemon::cleanup::PULL_STALE_AFTER.as_millis() as i64
+            - 60_000,
+    );
+    aged.connected_at = aged.last_activity_at.unwrap();
+    aged.last_tool_at = None;
+    internal_context(&cell.ctx).emit_set(&aged).unwrap();
+
+    emit_message(&cell.ctx, "idle-message", "idle-managed-thread");
+    app_server.wait_for_count(1).await;
+    wait_until("successful wake acknowledged", WAIT, || {
+        is_read(&cell.ctx, "idle-message", "idle-managed-thread")
+    })
+    .await;
+    let registered = internal_context(&cell.ctx)
+        .exec_query(GetAllSessions {})
+        .unwrap();
+    let session = registered
+        .iter()
+        .find(|row| row.id.0.as_ref() == "idle-managed-thread")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("managed-presence-canary"));
+    eprintln!(
+        "before sweep: client_id={:?}, last_activity_at={:?}, wake acknowledged=true",
+        session.client_id, session.last_activity_at
+    );
+
+    let sweeper = tokio::spawn(daemon::cleanup::run_sweeper((*cell.ctx).clone()));
+    tokio::time::sleep(daemon::cleanup::TICK_INTERVAL + Duration::from_millis(250)).await;
+    sweeper.abort();
+    assert!(
+        bridge.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "bridge must remain alive during sweep"
+    );
+    let rows = internal_context(&cell.ctx)
+        .exec_query(GetAllSessions {})
+        .unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row.id.0.as_ref() == "idle-managed-thread"),
+        "connected managed bridge lost its roster row at the activity backstop after acknowledging a wake"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_bridge_repairs_manually_deleted_roster_row_without_reconnect() {
+    let temp = tempfile::tempdir().expect("test tempdir");
+    let cell = CellHarness::spawn(candidate_addr());
+    let hooks = HookHarness::spawn_daemon(Arc::clone(&cell.ctx)).await;
+    let app_server = FakeAppServer::spawn(&["deleted-managed-thread"]).await;
+    let mut bridge = BridgeProcess::spawn_bound(
+        &app_server,
+        &cell,
+        &hooks,
+        &temp,
+        "deleted-managed",
+        Some("deleted-managed-thread"),
+    );
+    bridge.wait_ready().await;
+    wait_for_sessions(&cell.ctx, &["deleted-managed-thread"]).await;
+    assert!(bridge.child.as_mut().unwrap().try_wait().unwrap().is_none());
+    cell.ctx
+        .del_by_id("Session", "deleted-managed-thread")
+        .unwrap();
+    assert!(
+        !internal_context(&cell.ctx)
+            .exec_query(GetAllSessions {})
+            .unwrap()
+            .iter()
+            .any(|row| row.id.0.as_ref() == "deleted-managed-thread")
+    );
+    wait_for_sessions(&cell.ctx, &["deleted-managed-thread"]).await;
+    assert!(
+        bridge.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "bridge must remain alive during repair"
+    );
 }
 
 #[cfg(windows)]
