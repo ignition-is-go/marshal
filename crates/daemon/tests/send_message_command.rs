@@ -49,6 +49,7 @@ fn setup() -> MykoServerContext {
 fn session(id: &str, client_id: Option<&str>) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
+        managed_presence: false,
         client_id: client_id.map(|c| ClientId(Arc::from(c))),
         agent_id: None,
         pid: 0,

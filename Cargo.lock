@@ -2507,6 +2507,7 @@ dependencies = [
  "hyphae",
  "libc",
  "log",
+ "marshal-daemon",
  "marshal-entities",
  "myko",
  "myko-server",

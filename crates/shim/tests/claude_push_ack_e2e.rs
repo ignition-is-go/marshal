@@ -122,6 +122,7 @@ impl Cell {
         self.context()
             .emit_set(&Session {
                 id: SessionId(Arc::from(SENDER)),
+                managed_presence: false,
                 client_id: None,
                 agent_id: None,
                 pid: 0,

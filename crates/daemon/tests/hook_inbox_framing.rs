@@ -25,6 +25,7 @@ const RECIPIENT: &str = r#"{"session_id":"recipient","cwd":"/work/repo"}"#;
 fn sender() -> Session {
     Session {
         id: SessionId(Arc::from("sender")),
+        managed_presence: false,
         client_id: Some(ClientId(Arc::from("c-sender"))),
         agent_id: None,
         pid: 0,

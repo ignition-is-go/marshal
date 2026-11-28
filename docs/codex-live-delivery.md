@@ -15,6 +15,61 @@ notification contains the canonical root `sessionId` and cwd, so the bridge
 registers that session with Marshal immediately—without waiting for a first
 prompt or `SessionStart` hook.
 
+## Runtime presence
+
+Selected managed bridges observe the current `thread/loaded/list` inventory and
+read metadata only for their selected and explicitly retained threads. A fresh
+full snapshot renews a connection-scoped claim every 30 seconds. The daemon
+expires claims after 90 seconds on its monotonic clock. Last-owner loss starts
+60 seconds of reconnect grace. With the 3-second sweep, removal occurs within
+153 seconds of the last accepted observation, apart from scheduler delay.
+A complete inventory scan and each reconciliation response have an 8-second
+limit. Partial scans, timeouts and unknown loaded status do not renew claims.
+Recovery uses a new ownership connection and a new scan.
+
+Presence does not advance work activity timestamps. A successful wake or ACK
+also does not establish runtime ownership. Unchanged renewals write transient
+owner state only. Multiple observers retain the union of their fresh claims.
+Equal retries do not extend expiry. An expired or explicitly retired connection
+cannot publish again. `Session.managedPresence` persists cleanup policy across
+daemon replay; it is not a live signal. Replayed rows get fresh reconnect grace.
+Hook end cannot remove a managed or currently claimed runtime.
+
+The TUI and `marshal://roster` read server-derived current presence separately
+from activity. Failed reads produce unknown presence. The TUI expires its read
+cache after 6 seconds. Legacy rows without an observer keep their existing
+activity and WebSocket policy. A new bridge can still launch against an older
+daemon that lacks presence commands, but has no managed presence coverage.
+Updating a binary on disk does not adopt already-running bridges. Downgrading
+the daemon restores legacy cleanup behavior and can remove idle managed rows.
+
+## Observe an existing Linux runtime
+
+`codex-presence-observer` adopts one already-loaded thread through the same
+presence protocol. It requires all of these flags.
+
+| Flag | Required evidence |
+| --- | --- |
+| `--daemon WS_URL` | Explicit Marshal daemon destination. |
+| `--socket PATH` or `--endpoint LOOPBACK_WS_URL` | Direct backend Unix socket or IPv4 loopback WebSocket listener. Frontend proxies are rejected by backend ownership checks. |
+| `--thread-id ID` | One selected or explicitly retained thread in the launcher state. |
+| `--bridge-pid PID` and `--bridge-start-ticks TICKS` | Original bridge process incarnation from Linux `/proc/PID/stat`. |
+| `--backend-pid PID` and `--backend-start-ticks TICKS` | Backend process incarnation that owns the listener inode. |
+| `--launcher-state-file PATH` and `--generation N` | Original bridge's launcher state path and generation. |
+
+The observer checks process ownership, bridge arguments, the backend listener,
+and launcher identity before and after scans and publication. It observes only
+the requested thread even when a shared backend contains other loaded threads.
+An empty loaded inventory publishes no claim. Missing or unsupported metadata
+leaves coverage unavailable. Evidence loss stops the observer. Windows, macOS
+and IPv6 listener adoption are unsupported by this mode.
+
+This mode never starts or upgrades an app-server, resumes or creates a thread,
+sends a turn, renames a thread, takes wake leadership, writes launcher state,
+or stops another process. Stopping the observer closes its dedicated ownership
+connection and leaves the original runtime running. Adopted claims then lose
+ownership and receive the normal reconnect grace.
+
 ## Delivery path
 
 ```text

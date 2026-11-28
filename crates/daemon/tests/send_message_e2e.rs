@@ -114,6 +114,7 @@ fn make_session(id: &str) -> Session {
     Session {
         agent_id: None,
         id: SessionId(Arc::from(id)),
+        managed_presence: false,
         client_id: None, // server auto-populates
         pid: 0,
         cwd: "/repo".into(),

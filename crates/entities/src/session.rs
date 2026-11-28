@@ -57,6 +57,7 @@ mod tests {
     fn session_with_liveness_round_trips() {
         let s = Session {
             id: SessionId(Arc::from("sess-002")),
+            managed_presence: false,
             client_id: None,
             agent_id: None,
             pid: 4321,
@@ -90,6 +91,7 @@ mod tests {
     fn session_with_identity_round_trips() {
         let s = Session {
             id: SessionId(Arc::from("sess-003")),
+            managed_presence: false,
             client_id: None,
             agent_id: Some("agent/\"x\nopaque".into()),
             pid: 1,
@@ -137,6 +139,9 @@ mod tests {
 #[myko::myko_external(SET, DEL)]
 #[myko_public_events(set, delete)]
 pub struct Session {
+    /// Durable cleanup policy, never proof of current runtime presence.
+    #[serde(default)]
+    pub managed_presence: bool,
     /// WebSocket client this session is currently bound to. Auto-populated
     /// by the server from the WS connection — clients send the SET command
     /// without providing it. There is intentionally no `belongs_to(Client)`
@@ -162,14 +167,12 @@ pub struct Session {
     /// on checkout/switch (event-driven, not sampled at startup) so peers see
     /// branch changes mid-session, matching the operator's own statusline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub git_branch: Option<String>,
 
     /// Free-form short status text, settable via the `set_status` command.
     /// Surfaces on the roster so peers can see what this session is up to
     /// without needing a separate task system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub current_task: Option<String>,
 
     /// Human-facing session name. For Claude Code this is the operator's
@@ -182,7 +185,6 @@ pub struct Session {
     /// agent is doing X"). `None` for harnesses with no such manifest
     /// (Codex) or Claude builds predating it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub session_name: Option<String>,
 
     /// Live activity / turn-state, from Claude's per-PID manifest `status`:
@@ -194,7 +196,6 @@ pub struct Session {
     /// turn-state in near real time. `None` for harnesses with no such
     /// manifest (Codex) or older Claude builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub activity: Option<String>,
 
     /// Session kind, from the manifest `kind`: `"interactive"` (a human at a
@@ -215,7 +216,6 @@ pub struct Session {
     /// "did this peer do anything in the last N seconds?". Stale =
     /// candidate for the stuck-session visualization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub last_activity_at: Option<i64>,
 
     /// Name of the most recent MCP tool the shim served (e.g.
@@ -224,7 +224,6 @@ pub struct Session {
     /// last called X 3s ago" without leaking message content. Pair
     /// with `last_tool_at` for staleness reasoning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub last_tool: Option<String>,
 
     /// Wall-clock millis when `last_tool` was served. Distinct from
@@ -235,7 +234,6 @@ pub struct Session {
     /// receives notifications and never calls a tool will have a
     /// fresh `last_activity_at` and a stale `last_tool_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[myko_setter]
     pub last_tool_at: Option<i64>,
 
     /// Which human this session belongs to. Resolved by the shim:
@@ -378,7 +376,38 @@ impl myko::command::CommandHandler for RegisterSession {
     }
 }
 
-/// Serialize hook and shim registration because both replace the same Session row.
+pub fn session_project(cwd: &str) -> Option<String> {
+    cwd.rsplit(['/', '\\'])
+        .next()
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+}
+
+pub fn new_hook_session(id: SessionId, cwd: String, connected_at: i64) -> Session {
+    Session {
+        id,
+        managed_presence: false,
+        client_id: None,
+        agent_id: None,
+        pid: 0,
+        project: session_project(&cwd),
+        cwd,
+        connected_at,
+        git_branch: None,
+        current_task: None,
+        session_name: None,
+        activity: None,
+        kind: None,
+        last_activity_at: None,
+        last_tool: None,
+        last_tool_at: None,
+        operator: None,
+        host: None,
+        channels_enabled: None,
+        acks_pushes: None,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn update_registered_session(
     ctx: &CommandContext,
@@ -386,13 +415,11 @@ pub fn update_registered_session(
     update: impl FnOnce(Option<&Session>) -> Session,
 ) -> Result<(), CommandError> {
     require_console_owner(ctx, id)?;
-    static REGISTRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = REGISTRATION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = crate::session_lifecycle_guard();
     let sessions: Vec<Arc<Session>> = ctx.exec_query(GetAllSessions {})?;
     let prior = sessions.iter().find(|s| &s.id == id).map(Arc::as_ref);
     let mut session = update(prior);
+    session.managed_presence |= prior.is_some_and(|s| s.managed_presence);
     session.agent_id = session
         .agent_id
         .as_deref()
@@ -505,7 +532,91 @@ impl myko::command::CommandHandler for RegisterOperatorConsole {
     }
 }
 
-// The schema generates these commands. Declare just the legacy client contract.
+macro_rules! session_field_command {
+    ($command:ident, $field:ident, $value:ty, $convert:expr) => {
+        #[myko::myko_command]
+        #[myko_scope(Session, write)]
+        pub struct $command {
+            pub id: SessionId,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub $field: $value,
+        }
+
+        impl myko::command::CommandHandler for $command {
+            #[cfg(target_arch = "wasm32")]
+            fn execute(self, _ctx: CommandContext) -> Result<(), CommandError> {
+                unreachable!("Session field updates are server-only")
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            fn execute(self, ctx: CommandContext) -> Result<(), CommandError> {
+                update_session_field(&ctx, &self.id, |session| {
+                    session.$field = ($convert)(self.$field)
+                })
+            }
+        }
+    };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn update_session_field(
+    ctx: &CommandContext,
+    id: &SessionId,
+    update: impl FnOnce(&mut Session),
+) -> Result<(), CommandError> {
+    require_console_owner(ctx, id)?;
+    let _guard = crate::session_lifecycle_guard();
+    let mut session = ctx
+        .exec_report(GetSessionById { id: id.clone() })?
+        .map(|row| (*row).clone())
+        .ok_or_else(|| caller_err(ctx, &format!("Session {id} not found")))?;
+    update(&mut session);
+    ctx.emit_set(&session)
+}
+
+session_field_command!(
+    SetSessionGitBranch,
+    git_branch,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionCurrentTask,
+    current_task,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionSessionName,
+    session_name,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionActivity,
+    activity,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionLastActivityAt,
+    last_activity_at,
+    Option<i64>,
+    std::convert::identity
+);
+session_field_command!(
+    SetSessionLastTool,
+    last_tool,
+    Option<Arc<str>>,
+    |value: Option<Arc<str>>| value.map(|value| value.to_string())
+);
+session_field_command!(
+    SetSessionLastToolAt,
+    last_tool_at,
+    Option<i64>,
+    std::convert::identity
+);
+
 macro_rules! public_session_commands {
     ($($command:ty),* $(,)?) => { $(
         #[cfg(not(target_arch = "wasm32"))]
@@ -532,7 +643,10 @@ myko::submit! { myko::auth::public_access::PublicOperationRegistration {
     operation: "GetAllClients",
 } }
 
-fn require_console_owner(ctx: &CommandContext, id: &SessionId) -> Result<(), CommandError> {
+pub(crate) fn require_console_owner(
+    ctx: &CommandContext,
+    id: &SessionId,
+) -> Result<(), CommandError> {
     if !is_operator_console(id.0.as_ref()) {
         return Ok(());
     }

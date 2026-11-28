@@ -672,7 +672,7 @@ fn short_host() -> String {
         .unwrap_or_else(|| "codex".to_string())
 }
 
-fn operator() -> String {
+pub(crate) fn operator() -> String {
     std::env::var("MARSHAL_OPERATOR")
         .or_else(|_| std::env::var("USER"))
         .or_else(|_| std::env::var("USERNAME"))

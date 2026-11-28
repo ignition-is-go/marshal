@@ -36,9 +36,11 @@
 //! backend with no control socket, so there is nowhere safe for a peer process
 //! to send `turn/start`; it retains hook-boundary inbox delivery.
 
+mod adoption;
 mod keeper;
 #[cfg(target_os = "linux")]
 mod managed;
+mod presence;
 use keeper::ThreadKeepers;
 
 use std::net::{TcpListener, TcpStream};
@@ -286,6 +288,7 @@ impl LauncherState {
             .or(self.thread_id.as_deref())
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn managed_thread_id(&self) -> Option<&str> {
         self.recovery_thread_id()
             .filter(|id| self.kept_threads.contains(*id))
@@ -704,6 +707,7 @@ fn codex_resume_args(original: &[String], thread_id: &str) -> Vec<String> {
     recovered
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn codex_managed_resume_args(original: &[String], thread_id: &str) -> Vec<String> {
     let mut arguments = codex_fresh_args(original).into_iter();
     let mut resumed = Vec::new();
@@ -739,6 +743,7 @@ fn codex_managed_resume_args(original: &[String], thread_id: &str) -> Vec<String
     resumed
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn permission_config_override(value: &str) -> bool {
     let key = value.split('=').next().unwrap_or(value).trim();
     matches!(
@@ -1285,7 +1290,7 @@ fn shared_connection_path() -> Option<PathBuf> {
             .or_else(|| {
                 std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join(".codex"))
             })?;
-        return managed_connection_path(&home);
+        managed_connection_path(&home)
     }
     #[cfg(not(windows))]
     None
@@ -1340,6 +1345,7 @@ fn authenticated_request(endpoint: &str, token: Option<&str>) -> Result<Request>
     Ok(request)
 }
 
+#[cfg(any(unix, test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManagedDaemonVersion {
@@ -1360,6 +1366,7 @@ fn managed_daemon_is_behind(codex: &str) -> bool {
     output.status.success() && managed_daemon_version_is_behind(&output.stdout)
 }
 
+#[cfg(any(unix, test))]
 fn managed_daemon_version_is_behind(encoded: &[u8]) -> bool {
     serde_json::from_slice::<ManagedDaemonVersion>(encoded).is_ok_and(|version| {
         version.status == "running"
@@ -1499,6 +1506,14 @@ pub async fn run(args: &[String]) -> Result<()> {
         launcher.clone(),
         titles,
     ));
+    let _presence_task = launcher.clone().map(|launcher| {
+        presence::ObserverTask(tokio::spawn(presence::run(
+            args.app_server.clone(),
+            args.daemon.clone(),
+            launcher,
+            None,
+        )))
+    });
     let client = Arc::new(MykoClient::new());
     let sessions = client.watch_query::<GetAllSessions>(GetAllSessions {});
     let messages = client.watch_query::<GetAllMessages>(GetAllMessages {});
@@ -1658,6 +1673,10 @@ pub async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub async fn observe_presence(args: &[String]) -> Result<()> {
+    adoption::run(args).await
+}
+
 #[cfg(unix)]
 async fn wait_for_launcher_exit(launcher_stdin: bool) {
     if !launcher_stdin {
@@ -1710,7 +1729,10 @@ fn parse_args(args: &[String]) -> Result<BridgeArgs> {
     let mut launcher_thread_id = None;
     let mut proxy_socket = None;
     let mut proxy_endpoint = None;
+    #[cfg(unix)]
     let mut launcher_stdin = false;
+    #[cfg(not(unix))]
+    let launcher_stdin = false;
     let mut keep_threads = false;
     #[cfg(target_os = "linux")]
     let mut owned_groups = Vec::new();
@@ -3430,6 +3452,7 @@ mod tests {
     fn session(id: &str, host: &str, hook_owned: bool) -> Arc<Session> {
         Arc::new(Session {
             id: SessionId(Arc::from(id)),
+            managed_presence: false,
             client_id: (!hook_owned).then(|| myko::entities::client::ClientId(Arc::from("client"))),
             agent_id: None,
             pid: 1,

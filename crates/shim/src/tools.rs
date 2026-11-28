@@ -156,7 +156,7 @@ impl Handler for CoordHandler {
             }
             match parsed.path.as_str() {
                 "whoami" => Ok(read_whoami(&host, &uri, &parsed.query)),
-                "roster" => Ok(read_roster(&host, &uri)),
+                "roster" => Ok(read_roster(&host, &uri).await),
                 "rooms" => Ok(read_rooms(&host, &uri)),
                 "messages" => read_messages(&host, &uri, &parsed.query).await,
                 other => Err(ResourceError {
@@ -257,7 +257,8 @@ fn read_whoami(
     )
 }
 
-fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
+async fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
+    let presence = await_command(host.client.send_command::<marshal_entities::ReadManagedPresence, marshal_entities::ManagedPresenceSnapshot>(&marshal_entities::ReadManagedPresence {}), Duration::from_secs(3)).await.ok();
     let sessions: Vec<Arc<Session>> = host.sessions_cell.get();
     let members: Vec<Arc<RoomMember>> = host.members_cell.get();
     let watchers = host.wake_watchers_cell.get();
@@ -284,6 +285,8 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 "kind": s.kind,
                 "operator": s.operator,
                 "agent_id": s.agent_id,
+                "managed_presence": s.managed_presence,
+                "runtime_present": presence.as_ref().and_then(|snapshot| if snapshot.sessions.contains(&s.id) { Some(true) } else { s.managed_presence.then_some(false) }),
                 "host": s.host,
                 "project": s.project,
                 "connected_at": s.connected_at,
@@ -292,6 +295,7 @@ fn read_roster(host: &ToolHost, uri: &str) -> ResourceContent {
                 // ghost pending sweep. Raw activity timestamps + a derived
                 // "how long since last seen" (falls back to connected_at).
                 "last_activity_at": s.last_activity_at,
+                "last_activity_ms_ago": s.last_activity_at.map(|at| now_ms.saturating_sub(at)),
                 "last_tool": s.last_tool,
                 "last_tool_at": s.last_tool_at,
                 "last_seen_ms_ago": now_ms - s.last_activity_at.unwrap_or(s.connected_at),
@@ -1085,6 +1089,7 @@ mod tests {
     fn session(id: &str) -> Arc<Session> {
         Arc::new(Session {
             id: SessionId(Arc::from(id)),
+            managed_presence: false,
             client_id: None,
             agent_id: None,
             pid: 0,

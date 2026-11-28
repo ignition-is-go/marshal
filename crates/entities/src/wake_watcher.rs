@@ -72,6 +72,7 @@ mod tests {
     fn session(id: &str) -> Session {
         Session {
             id: SessionId(Arc::from(id)),
+            managed_presence: false,
             client_id: None,
             agent_id: None,
             pid: 0,

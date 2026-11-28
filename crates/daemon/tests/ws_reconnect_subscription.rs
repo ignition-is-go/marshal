@@ -99,6 +99,7 @@ fn spawn_server(bind: SocketAddr) -> ServerHandle {
 fn session_set_event(id: &str) -> MEvent {
     let session = Session {
         id: SessionId(Arc::from(id)),
+        managed_presence: false,
         client_id: None,
         agent_id: None,
         pid: 0,

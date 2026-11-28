@@ -21,12 +21,17 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
+use hyphae::Gettable;
 use marshal_entities::{
     GetAllMessageReads, GetAllMessages, GetAllSessions, HostInfo, Message, MessageId, MessageRead,
     MessageReadId, Session, SessionId,
 };
 use myko::prelude::EventPublishing as _;
-use myko::{command::CommandContext, request::RequestContext, server::MykoServerContext};
+use myko::{
+    command::{CommandContext, CommandHandler},
+    request::RequestContext,
+    server::MykoServerContext,
+};
 use myko_server::{BlackholePersister, MykoServer};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -129,6 +134,24 @@ struct HookHarness {
 }
 
 impl HookHarness {
+    async fn spawn_daemon(ctx: Arc<MykoServerContext>) -> Self {
+        let address = candidate_addr();
+        let task =
+            tokio::spawn(async move { daemon::http_listener::run(address, ctx).await.unwrap() });
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if TcpStream::connect(address).await.is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "daemon hook listener readiness");
+            tokio::time::sleep(POLL).await;
+        }
+        Self {
+            base_url: format!("http://{address}"),
+            task,
+        }
+    }
+
     async fn spawn(ctx: Arc<MykoServerContext>) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -386,8 +409,17 @@ async fn serve_app_server_connection(
             continue;
         };
         let request: Value = serde_json::from_str(text.as_ref())?;
-        if request["method"] == "thread/read" {
-            let thread = request["params"]["threadId"].as_str().unwrap();
+        if request["method"] == "thread/loaded/list" {
+            websocket.send(WebSocketMessage::Text(json!({"id":request["id"],"result":{"data":owned_threads.iter().collect::<Vec<_>>(),"nextCursor":null}}).to_string().into())).await?;
+            continue;
+        }
+        if matches!(
+            request["method"].as_str(),
+            Some("thread/read" | "thread/resume" | "thread/start")
+        ) {
+            let thread = request["params"]["threadId"]
+                .as_str()
+                .unwrap_or("active-thread");
             let status = if owned_threads.contains(thread) {
                 "idle"
             } else {
@@ -395,7 +427,7 @@ async fn serve_app_server_connection(
             };
             let result = json!({
                 "id":request["id"],
-                "result":{"thread":{"id":thread,"status":{"type":status}}}
+                "result":{"thread":{"id":thread,"sessionId":thread,"cwd":format!("/wake-canary/{thread}"),"status":{"type":status}}}
             });
             websocket
                 .send(WebSocketMessage::Text(result.to_string().into()))
@@ -468,11 +500,38 @@ impl BridgeProcess {
         temp: &TempDir,
         name: &str,
     ) -> Self {
+        Self::spawn_bound(app_server, cell, hooks, temp, name, None, None)
+    }
+
+    fn spawn_bound(
+        app_server: &FakeAppServer,
+        cell: &CellHarness,
+        hooks: &HookHarness,
+        temp: &TempDir,
+        name: &str,
+        selected_thread: Option<&str>,
+        proxy: Option<&str>,
+    ) -> Self {
         let ready_file = temp.path().join(format!("{name}.ready"));
         let mut command = Command::new(SHIM);
+        command.arg("codex-bridge");
+        if let Some(proxy) = proxy {
+            command.args(["--proxy-endpoint", proxy]);
+        }
+        if let Some(thread) = selected_thread {
+            command
+                .env("MARSHAL_LAUNCH_ID", "managed-presence-canary")
+                .args([
+                    "--launcher-thread-id",
+                    thread,
+                    "--launcher-cwd",
+                    "/wake-canary",
+                    "--launcher-state-file",
+                ])
+                .arg(temp.path().join(format!("{name}.state.json")));
+        }
         command
             .args([
-                "codex-bridge",
                 "--endpoint",
                 &app_server.endpoint,
                 "--daemon",
@@ -568,6 +627,7 @@ fn internal_context(ctx: &Arc<MykoServerContext>) -> CommandContext {
 fn hook_session(id: &str, cwd: &str) -> Session {
     Session {
         id: SessionId(Arc::from(id)),
+        managed_presence: false,
         client_id: None,
         agent_id: None,
         pid: 0,
@@ -791,13 +851,16 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
                             "initialize" => {
                                 json!({"userAgent":"recovery-test","platformFamily":"test","platformOs":"linux","codexHome":"/tmp"})
                             }
+                            "thread/loaded/list" => {
+                                json!({"data":["initial-thread"],"nextCursor":null})
+                            }
                             "thread/list" => json!({"data":[
                                 {"id":"initial-thread","status":{"type":"notLoaded"}},
                                 {"id":"unrelated-thread","status":{"type":"loaded"}}
                             ],"nextCursor":null}),
                             "thread/read" | "thread/resume" => {
                                 let thread = request["params"]["threadId"].as_str().unwrap();
-                                json!({"thread":{"id":thread,"sessionId":thread,"cwd":"/initial","name":name.lock().unwrap().clone()}})
+                                json!({"thread":{"id":thread,"sessionId":thread,"cwd":"/initial","name":name.lock().unwrap().clone(),"status":{"type":"idle"}}})
                             }
                             "thread/name/set" => {
                                 assert_eq!(request["params"]["threadId"], "initial-thread");
@@ -970,6 +1033,300 @@ async fn reconnect_restores_deleted_initial_launch_session_without_started_notif
     })
     .await;
     bridge.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn confirmed_picker_and_new_selection_repair_current_thread_without_keepers() {
+    let temp = tempfile::tempdir().unwrap();
+    let cell = CellHarness::spawn(candidate_addr());
+    let hooks = HookHarness::spawn_daemon(Arc::clone(&cell.ctx)).await;
+    let app_server =
+        FakeAppServer::spawn(&["initial-thread", "active-thread", "picker-thread"]).await;
+    let proxy = format!("ws://{}", candidate_addr());
+    let mut bridge = BridgeProcess::spawn_bound(
+        &app_server,
+        &cell,
+        &hooks,
+        &temp,
+        "selection",
+        Some("initial-thread"),
+        Some(&proxy),
+    );
+    bridge.wait_ready().await;
+    let present = |expected: &str| {
+        marshal_entities::ReadManagedPresence {}
+            .execute(internal_context(&cell.ctx))
+            .unwrap()
+            .sessions
+            == vec![SessionId(expected.into())]
+    };
+    wait_until("initial selected runtime observed", WAIT, || {
+        present("initial-thread")
+    })
+    .await;
+    let (mut tui, _) = connect_async(&proxy).await.unwrap();
+    for request in [
+        json!({"id":1,"method":"initialize","params":{}}),
+        json!({"id":2,"method":"thread/resume","params":{"threadId":"picker-thread"}}),
+        json!({"id":3,"method":"thread/start","params":{}}),
+    ] {
+        tui.send(WebSocketMessage::Text(request.to_string().into()))
+            .await
+            .unwrap();
+        loop {
+            let frame = tokio::time::timeout(WAIT, tui.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let WebSocketMessage::Text(text) = frame
+                && serde_json::from_str::<Value>(&text).unwrap()["id"] == request["id"]
+            {
+                break;
+            }
+        }
+        if request["id"] == 1 {
+            tui.send(WebSocketMessage::Text(
+                json!({"method":"initialized"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            continue;
+        }
+        let selected = if request["id"] == 2 {
+            "picker-thread"
+        } else {
+            "active-thread"
+        };
+        wait_until("confirmed active selection observed", WAIT, || {
+            present(selected)
+        })
+        .await;
+        let state: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("selection.state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["threadId"], "initial-thread");
+        assert_eq!(state["activeThreadId"], selected);
+        assert_eq!(state["keptThreads"], json!([]));
+        cell.ctx.del_by_id("Session", selected).unwrap();
+        wait_for_sessions(&cell.ctx, &[selected]).await;
+        let rows = internal_context(&cell.ctx)
+            .exec_query(GetAllSessions {})
+            .unwrap();
+        let repaired = rows
+            .iter()
+            .find(|row| row.id.0.as_ref() == selected)
+            .unwrap();
+        assert!(repaired.managed_presence);
+        assert_eq!(
+            repaired.agent_id, None,
+            "active selection does not inherit the original launch correlation"
+        );
+    }
+    bridge.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_idle_bridge_survives_activity_backstop_after_successful_wake() {
+    let temp = tempfile::tempdir().expect("test tempdir");
+    let cell = CellHarness::spawn(candidate_addr());
+    let hooks = HookHarness::spawn_daemon(Arc::clone(&cell.ctx)).await;
+    let app_server = FakeAppServer::spawn(&["idle-managed-thread"]).await;
+    let mut bridge = BridgeProcess::spawn_bound(
+        &app_server,
+        &cell,
+        &hooks,
+        &temp,
+        "idle-managed",
+        Some("idle-managed-thread"),
+        None,
+    );
+    bridge.wait_ready().await;
+    wait_for_sessions(&cell.ctx, &["idle-managed-thread"]).await;
+
+    let mut aged = internal_context(&cell.ctx)
+        .exec_query(GetAllSessions {})
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id.0.as_ref() == "idle-managed-thread")
+        .map(|row| (*row).clone())
+        .unwrap();
+    aged.last_activity_at = Some(
+        chrono::Utc::now().timestamp_millis()
+            - daemon::cleanup::PULL_STALE_AFTER.as_millis() as i64
+            - 60_000,
+    );
+    aged.connected_at = aged.last_activity_at.unwrap();
+    aged.last_tool_at = None;
+    internal_context(&cell.ctx).emit_set(&aged).unwrap();
+
+    emit_message(&cell.ctx, "idle-message", "idle-managed-thread");
+    app_server.wait_for_count(1).await;
+    wait_until("successful wake acknowledged", WAIT, || {
+        is_read(&cell.ctx, "idle-message", "idle-managed-thread")
+    })
+    .await;
+    let registered = internal_context(&cell.ctx)
+        .exec_query(GetAllSessions {})
+        .unwrap();
+    let session = registered
+        .iter()
+        .find(|row| row.id.0.as_ref() == "idle-managed-thread")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("managed-presence-canary"));
+    eprintln!(
+        "before sweep: client_id={:?}, last_activity_at={:?}, wake acknowledged=true",
+        session.client_id, session.last_activity_at
+    );
+
+    let sweeper = tokio::spawn(daemon::cleanup::run_sweeper((*cell.ctx).clone()));
+    tokio::time::sleep(daemon::cleanup::TICK_INTERVAL + Duration::from_millis(250)).await;
+    sweeper.abort();
+    assert!(
+        bridge.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "bridge must remain alive during sweep"
+    );
+    let rows = internal_context(&cell.ctx)
+        .exec_query(GetAllSessions {})
+        .unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row.id.0.as_ref() == "idle-managed-thread"),
+        "connected managed bridge lost its roster row at the activity backstop after acknowledging a wake"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_bridge_repairs_manually_deleted_roster_row_without_reconnect() {
+    let temp = tempfile::tempdir().expect("test tempdir");
+    let cell = CellHarness::spawn(candidate_addr());
+    let hooks = HookHarness::spawn_daemon(Arc::clone(&cell.ctx)).await;
+    let app_server = FakeAppServer::spawn(&["deleted-managed-thread"]).await;
+    let mut bridge = BridgeProcess::spawn_bound(
+        &app_server,
+        &cell,
+        &hooks,
+        &temp,
+        "deleted-managed",
+        Some("deleted-managed-thread"),
+        None,
+    );
+    bridge.wait_ready().await;
+    wait_for_sessions(&cell.ctx, &["deleted-managed-thread"]).await;
+    assert!(bridge.child.as_mut().unwrap().try_wait().unwrap().is_none());
+    cell.ctx
+        .del_by_id("Session", "deleted-managed-thread")
+        .unwrap();
+    assert!(
+        !internal_context(&cell.ctx)
+            .exec_query(GetAllSessions {})
+            .unwrap()
+            .iter()
+            .any(|row| row.id.0.as_ref() == "deleted-managed-thread")
+    );
+    wait_for_sessions(&cell.ctx, &["deleted-managed-thread"]).await;
+    assert!(
+        bridge.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "bridge must remain alive during repair"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measures the real 90-second lease plus 60-second grace"]
+async fn suspended_publisher_expires_with_its_websocket_still_connected() {
+    use marshal_entities::{
+        GetAllManagedPresenceOwners, ManagedThreadRegistration, ReconcileManagedPresence,
+    };
+    use myko::client::{ConnectionStatus, MykoClient};
+    let cell = CellHarness::spawn(candidate_addr());
+    let client = MykoClient::new();
+    client.set_address(Some(cell.address.clone()));
+    wait_until("publisher socket connected", WAIT, || {
+        matches!(
+            client.connection_status_sync(),
+            ConnectionStatus::Connected(_)
+        )
+    })
+    .await;
+    let threads = vec![ManagedThreadRegistration {
+        session_id: SessionId("suspended".into()),
+        thread_id: "suspended".into(),
+        cwd: "/owned".into(),
+        title: None,
+        agent_id: None,
+        operator: None,
+        host: None,
+    }];
+    let first = client.send_command::<ReconcileManagedPresence, ()>(&ReconcileManagedPresence {
+        sequence: 1,
+        threads: threads.clone(),
+        retire: false,
+    });
+    wait_until("first claim accepted", WAIT, || first.get().is_some()).await;
+    first.get().unwrap().unwrap();
+    let started = Instant::now();
+    let sweeper = tokio::spawn(daemon::cleanup::run_sweeper((*cell.ctx).clone()));
+    tokio::time::sleep(Duration::from_secs(94)).await;
+    assert!(matches!(
+        client.connection_status_sync(),
+        ConnectionStatus::Connected(_)
+    ));
+    let late = client.send_command::<ReconcileManagedPresence, ()>(&ReconcileManagedPresence {
+        sequence: 2,
+        threads,
+        retire: false,
+    });
+    wait_until("expired incarnation rejected", WAIT, || {
+        late.get().is_some()
+    })
+    .await;
+    assert!(
+        late.get()
+            .unwrap()
+            .unwrap_err()
+            .contains("expired or retired")
+    );
+    let projection = client.send_command::<marshal_entities::ReadManagedPresence, marshal_entities::ManagedPresenceSnapshot>(&marshal_entities::ReadManagedPresence {});
+    wait_until("expired presence projection answered", WAIT, || {
+        projection.get().is_some()
+    })
+    .await;
+    assert!(
+        projection.get().unwrap().unwrap().sessions.is_empty(),
+        "an expired claim is not live even before Session grace ends"
+    );
+    wait_until(
+        "suspended publisher session reaped",
+        Duration::from_secs(65),
+        || {
+            !internal_context(&cell.ctx)
+                .exec_query(GetAllSessions {})
+                .unwrap()
+                .iter()
+                .any(|row| row.id.0.as_ref() == "suspended")
+        },
+    )
+    .await;
+    assert!(matches!(
+        client.connection_status_sync(),
+        ConnectionStatus::Connected(_)
+    ));
+    assert!(
+        started.elapsed() <= Duration::from_secs(154),
+        "expiry exceeded 90+60+3-second detection bound"
+    );
+    let owners = internal_context(&cell.ctx)
+        .exec_query(GetAllManagedPresenceOwners {})
+        .unwrap();
+    assert_eq!(owners.len(), 1);
+    assert!(owners[0].retired);
+    eprintln!(
+        "publisher stopped renewing, socket stayed connected, Session removed after {:?}",
+        started.elapsed()
+    );
+    sweeper.abort();
+    client.set_address(None);
 }
 
 #[cfg(windows)]

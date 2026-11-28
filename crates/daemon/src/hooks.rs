@@ -323,13 +323,6 @@ fn register_hook_session(
         })
         .unwrap_or("")
         .to_string();
-    // Recognise both `/` and `\` as path separators when extracting the
-    // trailing component.
-    let dir = cwd
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("session");
     let operator = q.get("operator").filter(|s| !s.is_empty()).cloned();
     let host = q.get("host").filter(|s| !s.is_empty()).map(|h| HostInfo {
         // `hostname` may return an FQDN (common on Windows); the host:*
@@ -338,11 +331,7 @@ fn register_hook_session(
         os: q.get("os").cloned().unwrap_or_default(),
         arch: q.get("arch").cloned().unwrap_or_default(),
     });
-    let project = if dir == "session" {
-        None
-    } else {
-        Some(dir.to_string())
-    };
+    let project = marshal_entities::session_project(&cwd);
 
     let cmd_ctx = internal_cmd_ctx(ctx);
     let sid_typed = SessionId(Arc::from(sid.as_str()));
@@ -378,28 +367,15 @@ fn register_hook_session(
                 }
                 updated
             }
-            None => Session {
-                id: sid_typed.clone(),
-                client_id: None,
-                agent_id,
-                pid: 0,
-                cwd,
-                git_branch: None,
-                current_task: None,
-                // Codex has no per-PID name manifest; identity is hook-owned.
-                session_name: None,
-                activity: None,
-                kind: None,
-                connected_at: now,
-                last_activity_at: active_at,
-                last_tool: None,
-                last_tool_at: None,
-                operator,
-                host,
-                project,
-                channels_enabled: None,
-                acks_pushes: None,
-            },
+            None => {
+                let mut session = marshal_entities::new_hook_session(sid_typed.clone(), cwd, now);
+                session.agent_id = agent_id;
+                session.last_activity_at = active_at;
+                session.operator = operator;
+                session.host = host;
+                session.project = project;
+                session
+            }
         });
     if let Err(e) = result {
         log::warn!("[hook] session SET failed for {sid}: {e:?}");
@@ -531,8 +507,23 @@ fn handle_session_end(body: &[u8], ctx: &Arc<MykoServerContext>) -> HookOutcome 
         return HookOutcome::text(String::new());
     };
     let cmd_ctx = internal_cmd_ctx(ctx);
+    let _lifecycle = marshal_entities::session_lifecycle_guard();
+    if cmd_ctx
+        .exec_query(marshal_entities::GetAllSessions {})
+        .unwrap_or_default()
+        .iter()
+        .any(|session| session.id.0.as_ref() == sid && session.managed_presence)
+        || marshal_entities::current_managed_sessions(&cmd_ctx)
+            .unwrap_or_default()
+            .iter()
+            .any(|id| id.0.as_ref() == sid)
+    {
+        end_wait(&cmd_ctx, sid);
+        return HookOutcome::text(String::new());
+    }
     let stub = Session {
         id: SessionId(Arc::from(sid)),
+        managed_presence: false,
         client_id: None,
         agent_id: None,
         pid: 0,

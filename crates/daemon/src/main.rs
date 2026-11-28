@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
         // A wait dies with the daemon, so there's nothing to replay, and a held
         // wait's refreshes shouldn't grow the event table.
         .with_persister_override("WakeWatcher", blackhole.clone())
+        .with_persister_override("ManagedPresenceOwner", blackhole.clone())
         .with_persister_override("Session", session_filter.clone())
         .with_server_info(marshal_server_info());
 
